@@ -106,6 +106,18 @@ public enum ImageFile {
         return value >= 1 ? value : 72
     }
 
+    /// Type identifiers ImageIO can encode on this Mac (HEIC needs an HEVC encoder, which Intel
+    /// Macs without one lack; AVIF encoding depends on the macOS version).
+    private static let writableTypes: Set<String> = Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
+
+    /// Whether Orbit can write `format` images here. WebP, ICO and PDF use Orbit's own writers.
+    public static func canWrite(_ format: OutputFormat) -> Bool {
+        switch format {
+        case .webp, .ico, .pdf: return true
+        default: return imageType(for: format).map { writableTypes.contains($0.identifier) } ?? false
+        }
+    }
+
     private static func imageType(for format: OutputFormat) -> UTType? {
         switch format {
         case .jpg: .jpeg

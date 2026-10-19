@@ -105,13 +105,28 @@ import Testing
     }
 
     @Test func compressFormats() {
-        #expect(ImageCompressor.outputFormat(for: item("a.png"), hasAlpha: true) == .png)
-        #expect(ImageCompressor.outputFormat(for: item("a.png"), hasAlpha: false) == .jpg)
-        #expect(ImageCompressor.outputFormat(for: item("a.heic"), hasAlpha: false) == .heic)
-        #expect(ImageCompressor.outputFormat(for: item("a.jpeg"), hasAlpha: true) == .jpg)
-        #expect(ImageCompressor.outputFormat(for: item("a.webp"), hasAlpha: true) == .webp)
-        #expect(ImageCompressor.outputFormat(for: item("a.avif"), hasAlpha: false) == .avif)
-        #expect(ImageCompressor.outputFormat(for: item("a.gif"), hasAlpha: false) == .jpg)
+        let all: (OutputFormat) -> Bool = { _ in true }
+        #expect(ImageCompressor.outputFormat(for: item("a.png"), hasAlpha: true, canWrite: all) == .png)
+        #expect(ImageCompressor.outputFormat(for: item("a.png"), hasAlpha: false, canWrite: all) == .jpg)
+        #expect(ImageCompressor.outputFormat(for: item("a.heic"), hasAlpha: false, canWrite: all) == .heic)
+        #expect(ImageCompressor.outputFormat(for: item("a.jpeg"), hasAlpha: true, canWrite: all) == .jpg)
+        #expect(ImageCompressor.outputFormat(for: item("a.webp"), hasAlpha: true, canWrite: all) == .webp)
+        #expect(ImageCompressor.outputFormat(for: item("a.avif"), hasAlpha: false, canWrite: all) == .avif)
+        #expect(ImageCompressor.outputFormat(for: item("a.gif"), hasAlpha: false, canWrite: all) == .jpg)
+    }
+
+    /// A Mac without an HEVC (Intel) or AVIF (older macOS) encoder never offers or attempts those outputs.
+    @Test func unwritableImageFormatsFallBack() {
+        let noHEICorAVIF: (OutputFormat) -> Bool = { $0 != .heic && $0 != .avif }
+        let table = ConversionMatrix.table(for: .image, canWriteImage: noHEICorAVIF)
+        #expect(table == [.jpg, .png, .webp, .tiff, .bmp, .gif, .ico, .pdf])
+        #expect(ImageCompressor.outputFormat(for: item("a.heic"), hasAlpha: false, canWrite: noHEICorAVIF) == .jpg)
+        #expect(ImageCompressor.outputFormat(for: item("a.avif"), hasAlpha: true, canWrite: noHEICorAVIF) == .png)
+        #expect(ImageProcessor.editFormat(for: item("a.heic"), canWrite: noHEICorAVIF) == .png)
+        #expect(ImageProcessor.editFormat(for: item("a.avif"), canWrite: noHEICorAVIF) == .png)
+        #expect(ImageProcessor.editFormat(for: item("a.heic"), canWrite: { _ in true }) == .heic)
+        for always in [OutputFormat.jpg, .png, .webp, .ico, .pdf] { #expect(ImageFile.canWrite(always)) }
+        #expect(!ImageFile.canWrite(.mp4))
     }
 
     // MARK: Metadata

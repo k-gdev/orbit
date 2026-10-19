@@ -116,9 +116,15 @@ public struct ImageProcessor: Processor {
     /// Formats an edited copy can be saved in as-is; svg, ico, gif and the rest become PNG.
     private static let editFormats: Set<OutputFormat> = [.jpg, .png, .heic, .webp, .tiff, .avif, .bmp]
 
+    /// The format an edited copy is saved in: the source's own when it's an edit format this Mac
+    /// can write, PNG otherwise.
+    static func editFormat(for item: DroppedItem, canWrite: (OutputFormat) -> Bool = ImageFile.canWrite) -> OutputFormat {
+        OutputFormat(rawValue: item.formatKey).flatMap { editFormats.contains($0) && canWrite($0) ? $0 : nil } ?? .png
+    }
+
     private func writeEdit(of item: DroppedItem, suffix: String, context: JobContext,
                            edit: (CGImage) throws -> CGImage) throws -> URL {
-        let format = OutputFormat(rawValue: item.formatKey).flatMap { Self.editFormats.contains($0) ? $0 : nil } ?? .png
+        let format = Self.editFormat(for: item)
         var image = try edit(try ImageFile.loadOriented(item.url))
         if format == .jpg || format == .bmp { image = try ImageBitmap.flattenedOnWhite(image) }
         let quality: Double? = switch format {

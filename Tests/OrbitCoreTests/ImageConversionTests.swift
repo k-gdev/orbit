@@ -50,7 +50,8 @@ import Testing
         try #require(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
     }
 
-    @Test(arguments: [OutputFormat.jpg, .heic, .webp, .tiff, .avif, .bmp, .gif])
+    // HEIC and AVIF only where this Mac has the encoder (ImageFile.canWrite).
+    @Test(arguments: [OutputFormat.jpg, .heic, .webp, .tiff, .avif, .bmp, .gif].filter(ImageFile.canWrite))
     func pngConverts(to f: OutputFormat) async throws {
         let out = try await convert("a.png", w: 120, h: 80, to: f)
         #expect(Fixtures.size(out) == CGSize(width: 120, height: 80))

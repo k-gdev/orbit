@@ -9,10 +9,11 @@ public enum ConversionMatrix {
     }
 
     /// The category's full convert table, in slice order, including the source's own format.
-    public static func table(for category: FileCategory) -> [OutputFormat] {
+    /// Image formats this Mac can't encode (e.g. HEIC on an Intel Mac, AVIF on older macOS) are left out.
+    public static func table(for category: FileCategory, canWriteImage: (OutputFormat) -> Bool = ImageFile.canWrite) -> [OutputFormat] {
         let all: [OutputFormat]
         switch category {
-        case .image: all = [.jpg, .png, .heic, .webp, .tiff, .avif, .bmp, .gif, .ico, .pdf]
+        case .image: all = [OutputFormat.jpg, .png, .heic, .webp, .tiff, .avif, .bmp, .gif, .ico, .pdf].filter(canWriteImage)
         case .video: all = [.mp4, .mov, .mkv, .webm, .avi, .wmv, .gif, .m4a, .mp3]
         case .audio: all = [.m4a, .aac, .wav, .aiff, .flac, .mp3, .ogg, .opus, .wma]
         case .pdf: all = [.jpg, .png, .txt, .md, .docx, .epub, .pages, .pptx, .xlsx]

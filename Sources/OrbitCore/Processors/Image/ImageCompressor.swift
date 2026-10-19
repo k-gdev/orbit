@@ -7,15 +7,19 @@ import UniformTypeIdentifiers
 public enum ImageCompressor {
     private static let lossy: Set<OutputFormat> = [.jpg, .heic, .webp, .avif]
 
-    /// jpg, heic, webp and avif keep their format; everything else is PNG when it has alpha, JPG when it hasn't.
-    public static func outputFormat(for item: DroppedItem, hasAlpha: Bool) -> OutputFormat {
-        switch item.formatKey {
+    /// jpg, heic, webp and avif keep their format (when this Mac can write it); everything else is
+    /// PNG when it has alpha, JPG when it hasn't.
+    public static func outputFormat(for item: DroppedItem, hasAlpha: Bool,
+                                    canWrite: (OutputFormat) -> Bool = ImageFile.canWrite) -> OutputFormat {
+        let kept: OutputFormat? = switch item.formatKey {
         case "jpg": .jpg
         case "heic": .heic
         case "webp": .webp
         case "avif": .avif
-        default: hasAlpha ? .png : .jpg
+        default: nil
         }
+        if let kept, canWrite(kept) { return kept }
+        return hasAlpha ? .png : .jpg
     }
 
     /// Writes the compressed image to `to` and returns the file sizes. Throws `.targetTooSmall`
