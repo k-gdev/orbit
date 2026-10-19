@@ -14,6 +14,7 @@ public enum ProcessorRegistry {
             SlidesProcessor(),
             SpreadsheetProcessor(),
             SubtitleProcessor(),
+            AudioProcessor(),
         ]
     }
 }
