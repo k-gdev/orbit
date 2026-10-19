@@ -136,6 +136,22 @@ import Testing
         let o = try await runP(turned, .tool(.redact, nil), .pdfRedactions([PDFRedaction(pageIndex: 0, rects: [rect])])).outputs[0]
         #expect(Fixtures.bytes(o).range(of: Data("123-45-6789".utf8)) == nil)
         #expect(PDFDocument(url: o)!.page(at: 0)!.bounds(for: .mediaBox).size == CGSize(width: 792, height: 612))
+
+        // Render the redacted output and check the pixels. The page is turned a quarter clockwise, so a
+        // page-space point (x, y) on the 612 x 792 sheet lands at pixel (y, x) with the origin top left.
+        let turnedPage = try #require(PDFDocument(url: turned)?.page(at: 0))
+        try #require(turnedPage.rotation == 90)
+        let png = root.appending(path: "rotated-check.png")
+        try PDFConverter.images(o, format: .png, dpi: 72, quality: 0.9, to: [png])
+        #expect(Fixtures.size(png) == CGSize(width: 792, height: 612))
+        let inside = Fixtures.pixel(png, x: Int(rect.midY), y: Int(rect.midX))
+        #expect(inside.r < 0.05 && inside.g < 0.05 && inside.b < 0.05)
+        // Just outside the rectangle, above and below the line of text, the page is still white.
+        let above = Fixtures.pixel(png, x: Int(rect.maxY) + 4, y: Int(rect.midX))
+        let below = Fixtures.pixel(png, x: Int(rect.minY) - 4, y: Int(rect.midX))
+        #expect(above.isWhite && below.isWhite)
+        // The unrotated mapping would land somewhere else entirely.
+        #expect(Fixtures.pixel(png, x: Int(rect.midX), y: Int(792 - rect.midY)).isWhite)
     }
 
     @Test func docxKeepsText() async throws {
