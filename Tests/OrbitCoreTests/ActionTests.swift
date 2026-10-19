@@ -141,4 +141,124 @@ import Testing
         #expect(r.outputs.count == 2)
         #expect(r.undo != nil)
     }
+
+    @Test func moveCollisionKeepsExistingAndUndoRestores() async throws {
+        let a = Fixtures.file("a.txt", "mine", in: src)
+        let existing = Fixtures.file("a.txt", "existing", in: dest)
+        let r = try await run([a], .action(.moveTo, .folder(dest)))
+        #expect(r.outputs.map(\.lastPathComponent) == ["a-2.txt"])
+        #expect(try String(contentsOf: existing, encoding: .utf8) == "existing")
+        #expect(try String(contentsOf: dest.appending(path: "a-2.txt"), encoding: .utf8) == "mine")
+        #expect(!exists(a))
+        try UndoPerformer.perform(try #require(r.undo))
+        #expect(try String(contentsOf: a, encoding: .utf8) == "mine")
+        #expect(try String(contentsOf: existing, encoding: .utf8) == "existing")
+        #expect(!exists(dest.appending(path: "a-2.txt")))
+    }
+
+    @Test func moveTwoSourcesSharingAName() async throws {
+        let other = root.appending(path: "other", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let a1 = Fixtures.file("a.txt", "one", in: src)
+        let a2 = Fixtures.file("a.txt", "two", in: other)
+        let r = try await run([a1, a2], .action(.moveTo, .folder(dest)))
+        #expect(Set(r.outputs.map(\.lastPathComponent)) == ["a.txt", "a-2.txt"])
+        #expect(!exists(a1) && !exists(a2))
+        let contents = try r.outputs.map { try String(contentsOf: $0, encoding: .utf8) }
+        #expect(Set(contents) == ["one", "two"])
+        try UndoPerformer.perform(try #require(r.undo))
+        #expect(try String(contentsOf: a1, encoding: .utf8) == "one")
+        #expect(try String(contentsOf: a2, encoding: .utf8) == "two")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    /// Wraps the real processor and cancels the running job while the second item is being named.
+    private struct CancelOnSecondClaim: Processor {
+        func canHandle(_ request: JobRequest) -> Bool { ActionProcessor().canHandle(request) }
+        func run(_ request: JobRequest, context: JobContext) async throws -> ProcessorOutput {
+            let calls = Counter()
+            let inner = context.claimDestination
+            let wrapped = JobContext(
+                options: context.options, capabilities: context.capabilities, progress: context.progress,
+                outputURL: context.outputURL, numberedOutputURLs: context.numberedOutputURLs,
+                combinedOutputURL: context.combinedOutputURL,
+                claimDestination: { folder, base, ext in
+                    if calls.next() == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+                    return inner(folder, base, ext)
+                },
+                tempDirectory: context.tempDirectory)
+            return try await ActionProcessor().run(request, context: wrapped)
+        }
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func next() -> Int { lock.withLock { n += 1; return n } }
+    }
+
+    private func runCancelling(_ urls: [URL], _ action: SliceAction) async throws -> JobResult {
+        let runner = JobRunner(processors: [CancelOnSecondClaim()], capabilities: Fixtures.caps,
+                               fallbackFolder: root.appending(path: "fallback", directoryHint: .isDirectory))
+        let request = JobRequest(items: urls.map(DroppedItem.init(url:)), action: action)
+        // An unstructured task, so cancelling the job does not cancel the test itself.
+        return try await Task { try await runner.run(request, progress: { _ in }) }.value
+    }
+
+    @Test func runnerCancelMidMoveRestoresSources() async throws {
+        let files = ["a.txt", "b.txt", "c.txt"].map { Fixtures.file($0, "x", in: src) }
+        await #expect(throws: OrbitError.cancelled) {
+            _ = try await self.runCancelling(files, .action(.moveTo, .folder(self.dest)))
+        }
+        #expect(files.allSatisfy(exists))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    @Test func runnerCancelMidCopyRemovesCopies() async throws {
+        let files = ["a.txt", "b.txt", "c.txt"].map { Fixtures.file($0, "x", in: src) }
+        await #expect(throws: OrbitError.cancelled) {
+            _ = try await self.runCancelling(files, .action(.copyTo, .folder(self.dest)))
+        }
+        #expect(files.allSatisfy(exists))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    @Test func moveRollbackFailureIsSurfaced() throws {
+        let a = Fixtures.file("a.txt", "1", in: src)
+        let b = Fixtures.file("b.txt", "2", in: src)
+        var calls = 0
+        let error = #expect(throws: OrbitError.self) {
+            _ = try FileActions.move([a, b], to: dest, check: {
+                calls += 1
+                if calls == 2 {
+                    _ = Fixtures.file("a.txt", "squatter", in: src)  // a's original path is taken again
+                    throw Boom()
+                }
+            })
+        }
+        guard case .unsupported(let message)? = error else { Issue.record("wrong error \(String(describing: error))"); return }
+        #expect(message.contains("couldn't be put back"))
+        #expect(message.contains(dest.appending(path: "a.txt").path))
+        #expect(try String(contentsOf: dest.appending(path: "a.txt"), encoding: .utf8) == "1")
+        #expect(try String(contentsOf: a, encoding: .utf8) == "squatter")
+    }
+
+    @Test func copyRollbackFailureIsSurfaced() throws {
+        let a = Fixtures.file("a.txt", "1", in: src)
+        let b = Fixtures.file("b.txt", "2", in: src)
+        var calls = 0
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest.path) }
+        let error = #expect(throws: OrbitError.self) {
+            _ = try FileActions.copy([a, b], to: dest, check: {
+                calls += 1
+                if calls == 2 {
+                    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dest.path)
+                    throw Boom()
+                }
+            })
+        }
+        guard case .unsupported(let message)? = error else { Issue.record("wrong error \(String(describing: error))"); return }
+        #expect(message.contains("couldn't be removed"))
+        #expect(message.contains("a.txt"))
+    }
 }

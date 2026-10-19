@@ -33,8 +33,11 @@ public enum FileActions {
             }
             return copies
         } catch {
-            for copy in copies.reversed() { try? fm.removeItem(at: copy) }
-            throw error
+            var stuck: [URL] = []
+            for copy in copies.reversed() {
+                do { try fm.removeItem(at: copy) } catch { stuck.append(copy) }
+            }
+            throw rollbackError(original: error, stuck: stuck.map(\.path), verb: "removed")
         }
     }
 
@@ -61,9 +64,20 @@ public enum FileActions {
             }
             return moves
         } catch {
-            for move in moves.reversed() { try? fm.moveItem(at: move.to, to: move.from) }
-            throw error
+            var stuck: [String] = []
+            for move in moves.reversed() {
+                do { try fm.moveItem(at: move.to, to: move.from) } catch { stuck.append(move.to.path) }
+            }
+            throw rollbackError(original: error, stuck: stuck, verb: "put back")
         }
+    }
+
+    /// The original error when the rollback was clean; otherwise an error that names every file
+    /// the rollback could not undo, so the user knows where those files are.
+    private static func rollbackError(original: any Error, stuck: [String], verb: String) -> any Error {
+        guard !stuck.isEmpty else { return original }
+        let reason = original is CancellationError ? "Cancelled" : original.localizedDescription
+        return OrbitError.unsupported("\(reason), and these files couldn't be \(verb): \(stuck.joined(separator: ", "))")
     }
 
     /// A folder is its own terminal directory; a file uses its parent.
