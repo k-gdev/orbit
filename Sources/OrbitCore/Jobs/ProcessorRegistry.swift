@@ -11,6 +11,9 @@ public enum ProcessorRegistry {
             VideoProcessor(),
             DocumentProcessor(),
             PDFProcessor(),
+            SlidesProcessor(),
+            SpreadsheetProcessor(),
+            SubtitleProcessor(),
         ]
     }
 }
