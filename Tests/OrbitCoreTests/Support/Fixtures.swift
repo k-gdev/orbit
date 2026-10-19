@@ -170,12 +170,13 @@ extension Fixtures {
 
     /// A small JPEG with GPS (37.33 N, 122.03 W), Make `OrbitCam`, Model `X1`, BodySerialNumber `SN-12345`,
     /// DateTimeOriginal `2024:05:06 07:08:09`, IPTC byline `IPTC Secret` and an XMP packet with dc:subject `XMP Secret`.
-    static func jpegWithMetadata(in dir: URL) -> URL {
+    /// `orientation` adds an EXIF Orientation tag; `thumbnail` embeds an EXIF (IFD1) thumbnail.
+    static func jpegWithMetadata(in dir: URL, orientation: Int? = nil, thumbnail: Bool = false) -> URL {
         let src = image("meta-src-\(UUID().uuidString).png", w: 64, h: 48, noise: true, in: dir)
         defer { try? FileManager.default.removeItem(at: src) }
         let cg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(src as CFURL, nil)!, 0, nil)!
         let out = dir.appending(path: "photo-\(UUID().uuidString.prefix(6)).jpg", directoryHint: .notDirectory)
-        let props: [CFString: Any] = [
+        var props: [CFString: Any] = [
             kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "OrbitCam", kCGImagePropertyTIFFModel: "X1"],
             kCGImagePropertyExifDictionary: [kCGImagePropertyExifBodySerialNumber: "SN-12345",
                                              kCGImagePropertyExifDateTimeOriginal: "2024:05:06 07:08:09"],
@@ -183,6 +184,8 @@ extension Fixtures {
                                             kCGImagePropertyGPSLongitude: 122.03, kCGImagePropertyGPSLongitudeRef: "W"],
             kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCByline: ["IPTC Secret"]],
         ]
+        if let orientation { props[kCGImagePropertyOrientation] = orientation }
+        if thumbnail { props[kCGImageDestinationEmbedThumbnail] = true }
         let xmp = CGImageMetadataCreateMutable()
         CGImageMetadataRegisterNamespaceForPrefix(xmp, kCGImageMetadataNamespaceDublinCore, kCGImageMetadataPrefixDublinCore, nil)
         CGImageMetadataSetValueWithPath(xmp, nil, "dc:subject" as CFString, ["XMP Secret"] as CFArray)

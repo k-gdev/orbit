@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 /// Reading, stripping and editing the metadata of an image file without touching its pixels.
 public enum ImageMetadata {
@@ -57,16 +58,26 @@ public enum ImageMetadata {
         let props = ImageFile.properties(src)
 
         // Lossless path: the metadata tree is replaced (strip all) or merged (GPS only).
+        // kCGImageDestinationOrientation can't be combined with kCGImageDestinationMetadata (the copy
+        // then always fails), so orientation goes into the tree, or for JPEG into a minimal EXIF
+        // segment written afterwards: a tree orientation would keep JPEG's EXIF thumbnail.
+        let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        let isJPEG = (CGImageSourceGetType(source) as String?) == UTType.jpeg.identifier
         var options: [CFString: Any] = [kCGImageMetadataShouldExcludeGPS: true]
         if locationOnly {
             options[kCGImageDestinationMergeMetadata] = true
         } else {
+            let tree = CGImageMetadataCreateMutable()
+            if orientation != 1 && !isJPEG {
+                CGImageMetadataSetValueWithPath(tree, nil, "tiff:Orientation" as CFString, "\(orientation)" as CFString)
+            }
             options[kCGImageMetadataShouldExcludeXMP] = true
-            options[kCGImageDestinationMetadata] = CGImageMetadataCreateMutable()
+            options[kCGImageDestinationMetadata] = tree
             options[kCGImageDestinationMergeMetadata] = false
-            if let orientation = props[kCGImagePropertyOrientation] { options[kCGImageDestinationOrientation] = orientation }
         }
-        if try copyLosslessly(source, to: to, options: options), verifyStripped(to, locationOnly: locationOnly) { return }
+        if try copyLosslessly(source, to: to, options: options),
+           locationOnly || !isJPEG || orientation == 1 || insertOrientation(orientation, into: to),
+           verifyStripped(to, locationOnly: locationOnly, orientation: locationOnly ? nil : orientation) { return }
         try? FileManager.default.removeItem(at: to)
 
         // Fallback: property dictionaries nulled while the image is re-added from the source.
@@ -174,11 +185,21 @@ public enum ImageMetadata {
         return true
     }
 
-    /// Whether the written file is free of the metadata a strip promises to remove.
-    private static func verifyStripped(_ url: URL, locationOnly: Bool) -> Bool {
+    /// Rewrites the JPEG Orbit just wrote at `url` with an EXIF segment holding only `orientation`.
+    private static func insertOrientation(_ orientation: Int, into url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let tagged = JPEGSegments.insertingOrientation(orientation, into: data) else { return false }
+        return (try? tagged.write(to: url, options: .atomic)) != nil
+    }
+
+    /// Whether the written file is free of the metadata a strip promises to remove, and (when
+    /// `orientation` is given) still shows the picture the same way up.
+    private static func verifyStripped(_ url: URL, locationOnly: Bool, orientation: Int? = nil) -> Bool {
         let props = ImageFile.properties(url)
         if props[kCGImagePropertyGPSDictionary] != nil { return false }
         if locationOnly { return true }
+        if let orientation, ((props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1) != orientation { return false }
+        if let data = try? Data(contentsOf: url), JPEGSegments.hasEmbeddedThumbnail(data) { return false }
         let gone: [CFString] = [kCGImagePropertyExifDictionary, kCGImagePropertyExifAuxDictionary, kCGImagePropertyTIFFDictionary,
                                 kCGImagePropertyIPTCDictionary, kCGImagePropertyPNGDictionary, kCGImagePropertyMakerAppleDictionary]
         for key in gone {

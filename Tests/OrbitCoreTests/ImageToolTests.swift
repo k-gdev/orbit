@@ -143,6 +143,31 @@ import Testing
         #expect(Fixtures.decodedPixels(edited) == Fixtures.decodedPixels(src))
     }
 
+    /// Nearly every camera JPEG has an Orientation tag; strip-all must stay lossless for it, keep it
+    /// upright, and drop the EXIF thumbnail (a small copy of the photo inside APP1).
+    @Test(arguments: [6, 1])
+    func stripAllKeepsOrientationLosslessly(orientation: Int) async throws {
+        let src = Fixtures.jpegWithMetadata(in: root, orientation: orientation, thumbnail: true)
+        #expect(startOfImageCount(Fixtures.bytes(src)) == 2, "fixture should embed a thumbnail")
+        let out = try #require(try await run([src], .tool(.metadata, .metadataStripAll)).outputs.first)
+        #expect(Fixtures.decodedPixels(out) == Fixtures.decodedPixels(src))
+        let kept = ImageFile.properties(out)[kCGImagePropertyOrientation] as? Int ?? 1
+        #expect(kept == orientation)
+        let d = Fixtures.bytes(out)
+        #expect(startOfImageCount(d) == 1, "the EXIF thumbnail survived")
+        for secret in ["XMP Secret", "IPTC Secret", "SN-12345", "OrbitCam", "2024:05:06 07:08:09"] {
+            #expect(!contains(d, secret), "stripped file still contains \(secret)")
+        }
+        #expect(ImageFile.properties(out)[kCGImagePropertyGPSDictionary] == nil)
+    }
+
+    /// JPEG start-of-image markers (FF D8 FF): 1 for a plain JPEG, 2 with an embedded thumbnail.
+    private func startOfImageCount(_ d: Data) -> Int {
+        let b = [UInt8](d)
+        guard b.count > 2 else { return 0 }
+        return (0..<(b.count - 2)).filter { b[$0] == 0xFF && b[$0 + 1] == 0xD8 && b[$0 + 2] == 0xFF }.count
+    }
+
     @Test func stripAllPNGText() async throws {
         let src = Fixtures.pngWithText(in: root)
         #expect(contains(Fixtures.bytes(src), "PNG Secret") && contains(Fixtures.bytes(src), "PNG Description Secret"))
