@@ -19,6 +19,7 @@ public final class SettingsStore: ObservableObject {
         static let terminalBundleID = "terminalBundleID"
         static let customFFmpegPath = "customFFmpegPath"
         static let hapticsEnabled = "hapticsEnabled"
+        static let bindings = "bindings"
     }
 
     @Published public var isEnabled: Bool { didSet { defaults.set(isEnabled, forKey: Key.isEnabled) } }
@@ -40,6 +41,12 @@ public final class SettingsStore: ObservableObject {
         }
     }
     @Published public var hapticsEnabled: Bool { didSet { defaults.set(hapticsEnabled, forKey: Key.hapticsEnabled) } }
+
+    @Published public var bindings: TriggerBindings {
+        didSet {
+            if let data = try? JSONEncoder().encode(bindings) { defaults.set(data, forKey: Key.bindings) }
+        }
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -68,5 +75,7 @@ public final class SettingsStore: ObservableObject {
         terminalBundleID = defaults.string(forKey: Key.terminalBundleID) ?? "com.apple.Terminal"
         customFFmpegPath = defaults.string(forKey: Key.customFFmpegPath)
         hapticsEnabled = bool(Key.hapticsEnabled, true)
+        bindings = defaults.data(forKey: Key.bindings)
+            .flatMap { try? JSONDecoder().decode(TriggerBindings.self, from: $0) } ?? .defaults
     }
 }
