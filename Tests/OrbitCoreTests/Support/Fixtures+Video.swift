@@ -21,7 +21,7 @@ extension Fixtures {
                 AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: storedW, AVVideoHeightKey: storedH,
             ])
             vInput.expectsMediaDataInRealTime = false
-            if rotated { vInput.transform = CGAffineTransform(rotationAngle: .pi / 2).translatedBy(x: 0, y: -CGFloat(storedW)) }
+            if rotated { vInput.transform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: CGFloat(storedH), ty: 0) }
             let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vInput, sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: storedW, kCVPixelBufferHeightKey as String: storedH,

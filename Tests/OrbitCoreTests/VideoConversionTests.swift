@@ -64,7 +64,23 @@ import Testing
         let long = GIFMaker.plan(duration: 120, fps: 12)
         #expect(long?.count == GIFMaker.maxFrames)
         #expect((long?.fps ?? 99) < 12)
-        #expect(GIFMaker.plan(duration: GIFMaker.maxDuration + 1, fps: 12) == nil)
+        #expect(GIFMaker.plan(duration: GIFMaker.maxDuration(for: CGSize(width: 480, height: 270)) + 1, fps: 12) == nil)
+    }
+
+    @Test func gifFrameBudgetIsByPixelsForTallClips() {
+        let size = GIFMaker.outputSize(for: CGSize(width: 1080, height: 1920), maxSide: 480)
+        #expect(size == CGSize(width: 270, height: 480))
+        let long = GIFMaker.plan(duration: 120, fps: 12, size: size)
+        #expect(long != nil)
+        #expect(Int(size.width * size.height) * (long?.count ?? .max) <= GIFMaker.maxPixels)
+        // A square clip has more pixels per frame, so it gets fewer frames than a 16:9 one.
+        let square = GIFMaker.outputSize(for: CGSize(width: 1000, height: 1000), maxSide: 480)
+        #expect(square == CGSize(width: 480, height: 480))
+        #expect(GIFMaker.frameBudget(for: square) < GIFMaker.maxFrames)
+        #expect(Int(square.width * square.height) * GIFMaker.frameBudget(for: square) <= GIFMaker.maxPixels)
+        // Never scaled up; an uncapped 1080x1920 frame would blow the budget at 600 frames.
+        #expect(GIFMaker.outputSize(for: CGSize(width: 100, height: 50), maxSide: 480) == CGSize(width: 100, height: 50))
+        #expect(GIFMaker.frameBudget(for: CGSize(width: 1080, height: 1920)) < GIFMaker.maxFrames)
     }
 
     @Test func movToM4A() async throws {
@@ -76,6 +92,9 @@ import Testing
     @Test func mediaInfoReadsRotationAndChannels() async throws {
         let rotated = await Fixtures.video("r.mov", seconds: 1, w: 320, h: 240, rotated: true, in: root)
         #expect(try await MediaInfo.videoSize(rotated) == CGSize(width: 320, height: 240))
+        let track = try #require(try await AVURLAsset(url: rotated).loadTracks(withMediaType: .video).first)
+        let (natural, transform) = try await track.load(.naturalSize, .preferredTransform)
+        #expect(CGRect(origin: .zero, size: natural).applying(transform).origin == .zero)
         #expect(try await MediaInfo.channelCount(rotated) == 1)
         let silent = await Fixtures.video("s.mov", seconds: 1, w: 64, h: 64, audio: false, in: root)
         #expect(try await !MediaInfo.hasAudio(silent))

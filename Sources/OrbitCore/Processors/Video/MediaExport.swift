@@ -4,11 +4,32 @@ import Foundation
 /// A thin wrapper over `AVAssetExportSession` that works on macOS 14 (status polling; the async
 /// `export(to:as:)` API is macOS 15+). Cancelling the task cancels the export.
 public enum MediaExport {
-    /// Boxes the session so it can cross into the cancellation handler; AVFoundation documents
-    /// `cancelExport()` and `status`/`progress` as callable from any thread.
+    /// Boxes the session and orders start against cancel: `cancelExport()` on a session that has not
+    /// started raises `NSInternalInconsistencyException`, and so does starting it afterwards. AVFoundation
+    /// documents `status`/`progress` as callable from any thread.
     private final class SessionBox: @unchecked Sendable {
         let session: AVAssetExportSession
+        private let lock = NSLock()
+        private var started = false
+        private var cancelled = false
+
         init(_ session: AVAssetExportSession) { self.session = session }
+
+        /// Starts the export unless a cancel already landed; returns false in that case.
+        func start() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if cancelled { return false }
+            session.exportAsynchronously {}
+            started = true
+            return true
+        }
+
+        /// Cancels a started export; before the start it only records the cancel so `start()` bails out.
+        func cancel() {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+            if started { session.cancelExport() }
+        }
     }
 
     public static func export(
@@ -30,7 +51,7 @@ public enum MediaExport {
 
         try Task.checkCancellation()
         try await withTaskCancellationHandler {
-            session.exportAsynchronously {}
+            guard box.start() else { throw CancellationError() }
             while true {
                 switch box.session.status {
                 case .completed:
@@ -48,7 +69,7 @@ public enum MediaExport {
                 }
             }
         } onCancel: {
-            box.session.cancelExport()
+            box.cancel()
         }
     }
 }
