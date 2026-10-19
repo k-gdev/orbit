@@ -10,6 +10,7 @@ public enum ProcessorRegistry {
             ActionProcessor(),
             VideoProcessor(),
             DocumentProcessor(),
+            PDFProcessor(),
         ]
     }
 }
