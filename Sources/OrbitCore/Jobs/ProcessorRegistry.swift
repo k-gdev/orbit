@@ -7,6 +7,7 @@ public enum ProcessorRegistry {
         [
             ImageProcessor(),
             ArchiveProcessor(),
+            ActionProcessor(),
         ]
     }
 }

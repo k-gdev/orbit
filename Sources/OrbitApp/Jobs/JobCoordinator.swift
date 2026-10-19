@@ -52,7 +52,40 @@ final class JobCoordinator: ObservableObject {
             }
             return
         }
+        if case .action(let id, _) = action, performSystemAction(id, items: items, near: point) { return }
         run(JobRequest(items: items, action: action, options: settings.jobOptions), near: point)
+    }
+
+    static let needsUIMessage = "That action needs the Orbit app's interface."
+
+    /// Float, AirDrop and Terminal talk to the system and never reach `JobRunner`.
+    /// Returns false for every other action.
+    private func performSystemAction(_ id: ActionID, items: [DroppedItem], near point: CGPoint) -> Bool {
+        guard id == .float || id == .airDrop || id == .terminal else { return false }
+        if outcomeHandler != nil {
+            report(.failed(OrbitError.unsupported(Self.needsUIMessage)))
+            return true
+        }
+        let urls = items.map(\.url)
+        switch id {
+        case .float:
+            FloatManager.shared.add(urls, near: point)
+        case .airDrop:
+            do { try SystemActions.airDrop(urls) } catch { report(.failed(error)) }
+        default:
+            let bundleID = settings.terminalBundleID
+            var seen = Set<String>()
+            let folders = urls.filter { seen.insert(FileActions.terminalDirectory(for: $0).path).inserted }
+            Task { [weak self] in
+                for url in folders {
+                    do { try await SystemActions.openTerminal(at: url, bundleID: bundleID) } catch {
+                        self?.report(.failed(error))
+                        return
+                    }
+                }
+            }
+        }
+        return true
     }
 
     func run(_ request: JobRequest, near point: CGPoint) {
