@@ -63,7 +63,8 @@ public enum ImageCompressor {
         }
 
         guard let data = best else {
-            throw OrbitError.targetTooSmall("Can't get this image under \(targetBytes) bytes.")
+            if case .tier = target { throw OrbitError.targetTooSmall("Orbit can't compress this image any further.") }
+            throw OrbitError.targetTooSmall("Can't get this image under \(ResultSummary.bytes(targetBytes)).")
         }
         try data.write(to: to, options: .withoutOverwriting)
         return (before, Int64(data.count))

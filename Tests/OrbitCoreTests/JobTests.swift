@@ -169,6 +169,49 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
         expectSourcesIntact()
     }
 
+    // MARK: Ruling R35: "Fit under X" for a file already at or under X
+
+    @Test func fitUnderPresetSkipsAFileAlreadyUnder() async throws {
+        let r = try await runner([rec]).run(req(["a.txt"], .tool(.compress, .compress(.fitUnder(1000)))), progress: { _ in })
+        #expect(r.summary == "Already under 1 KB.")
+        #expect(r.outputs.isEmpty && r.undo == nil && r.failures.isEmpty)
+        #expect(rec.units.isEmpty)
+        #expect(try listing(dir) == ["a.txt"])
+    }
+
+    @Test func fitUnderFromCustomParametersSkipsToo() async throws {
+        let urls = ["a.txt", "b.txt"].map { Fixtures.file($0, "source \($0)", in: dir) }
+        let request = JobRequest(items: urls.map(DroppedItem.init(url:)), action: .tool(.compress, nil),
+                                 parameters: .compress(.fitUnder(500)))
+        let r = try await runner([rec]).run(request, progress: { _ in })
+        #expect(r.summary == "Already under 500 bytes.")
+        #expect(r.outputs.isEmpty && r.failures.isEmpty && rec.units.isEmpty)
+    }
+
+    @Test func fitUnderMixedBatchCompressesOnlyTheBigOnes() async throws {
+        let big = Fixtures.file("big.txt", String(repeating: "x", count: 2_000), in: dir)
+        let small = Fixtures.file("small.txt", "tiny", in: dir)
+        let request = JobRequest(items: [big, small].map(DroppedItem.init(url:)), action: .tool(.compress, .compress(.fitUnder(1_000))))
+        let r = try await runner([rec]).run(request, progress: { _ in })
+        #expect(rec.units.map { $0.map(\.url.lastPathComponent) } == [["big.txt"]])
+        #expect(r.outputs.map(\.lastPathComponent) == ["big-converted.txt"])
+        #expect(r.summary == "Saved 1 file · 1 already under 1 KB")
+        #expect(r.failures.isEmpty)
+    }
+
+    @Test func fitUnderSkipCountsInAPartlyFailedBatch() async throws {
+        let big = Fixtures.file("big.txt", String(repeating: "x", count: 2_000), in: dir)
+        let small = Fixtures.file("small.txt", "tiny", in: dir)
+        let request = JobRequest(items: [big, small].map(DroppedItem.init(url:)), action: .tool(.compress, .compress(.fitUnder(1_000))))
+        let r = try await runner([failsOn("big.txt", afterWriting: false)]).run(request, progress: { _ in })
+        #expect(r.summary == "1 of 2 done · 1 failed · 1 already under 1 KB")
+    }
+
+    @Test func tierCompressIsNeverSkipped() async throws {
+        _ = try await runner([rec]).run(req(["a.txt"], .tool(.compress, .compress(.tier(.light)))), progress: { _ in })
+        #expect(rec.units.count == 1)
+    }
+
     // MARK: Cleanup that fails (a volume without a Trash)
 
     @Test func untrashablePartialIsNamedInFailure() async throws {

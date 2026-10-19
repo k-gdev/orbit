@@ -23,18 +23,29 @@ public enum PDFTools {
 
     /// Writes a compressed copy of `src` to `to` and returns its size in bytes.
     ///
-    /// Tiers: light and medium keep the text; strong flattens the pages to pictures. "Fit under" tries
-    /// light, medium, strong and then a 72 DPI flatten, and keeps the first that fits. Throws
-    /// `.targetTooSmall` (and writes nothing) when none does.
+    /// Tiers: light and medium keep the text; strong flattens the pages to pictures. A tier never
+    /// hands back a bigger file: light falls back to medium, and when nothing comes out smaller than
+    /// the source it throws "already as small as Orbit can make it" (and writes nothing). "Fit under"
+    /// tries light, medium, strong and then a 72 DPI flatten, and keeps the first that fits. Throws
+    /// `.targetTooSmall` (and writes nothing) when none does; a source already under the limit is
+    /// refused with "Already under …" (R35; JobRunner normally skips it before this point).
     @discardableResult
     public static func compress(_ src: URL, target: CompressTarget, to: URL) throws -> Int64 {
         let levels: [Level]
-        var limit: Int64?
+        let sourceSize = try fileSize(src)
+        let limit: Int64
         switch target {
-        case .tier(.light): levels = [.light]
-        case .tier(.medium): levels = [.medium]
-        case .tier(.strong): levels = [.strong]
+        case .tier(.light):
+            levels = [.light, .medium]
+            limit = sourceSize - 1
+        case .tier(.medium):
+            levels = [.medium]
+            limit = sourceSize - 1
+        case .tier(.strong):
+            levels = [.strong]
+            limit = sourceSize - 1
         case .fitUnder(let bytes):
+            guard sourceSize > bytes else { throw OrbitError.unsupported("Already under \(ResultSummary.bytes(bytes)).") }
             levels = Level.allCases
             limit = bytes
         }
@@ -46,11 +57,12 @@ public enum PDFTools {
                 try? FileManager.default.removeItem(at: candidate)
                 try attempt(level, src: src, into: candidate)
                 let size = try fileSize(candidate)
-                if let limit, size > limit { continue }
+                if size > limit { continue }
                 try FileManager.default.moveItem(at: candidate, to: to)
                 return size
             }
-            throw OrbitError.targetTooSmall("Can't get this PDF under \(limit ?? 0) bytes.")
+            if case .tier = target { throw OrbitError.unsupported("This PDF is already as small as Orbit can make it.") }
+            throw OrbitError.targetTooSmall("Can't get this PDF under \(ResultSummary.bytes(limit)).")
         }
     }
 

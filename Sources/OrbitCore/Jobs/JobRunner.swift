@@ -56,6 +56,8 @@ public final class JobRunner: Sendable {
         var firstError: (any Error)?
         var usedFallback = false
         var stuckPartials: [URL] = []
+        let fitLimit = combining ? nil : Self.fitUnderLimit(request)
+        var alreadyUnder = 0
         func recordFailure(_ error: any Error, unit: JobRequest, title: String) {
             let first = unit.items[0]
             Log.error("\(title) failed for \(first.url.lastPathComponent): \(error.localizedDescription)")
@@ -70,6 +72,13 @@ public final class JobRunner: Sendable {
             if Task.isCancelled { throw cancelled() }
             if !combining, Self.isAlreadyInTargetFormat(unit) {
                 // Ruling R11: already in the target format. Counts as done; nothing is written.
+                reporter.finish(index, title: title, fileName: fileName)
+                continue
+            }
+            if let fitLimit, Self.isAlreadyUnder(unit, limit: fitLimit) {
+                // Ruling R35: "Fit under X" for a file already at or under X. A skip, not a failure;
+                // nothing is reserved or written.
+                alreadyUnder += 1
                 reporter.finish(index, title: title, fileName: fileName)
                 continue
             }
@@ -111,7 +120,8 @@ public final class JobRunner: Sendable {
         return JobResult(
             outputs: outputs,
             summary: Self.summary(unitCount: units.count, failureCount: failures.count, done: done,
-                                  outputCount: outputs.count, stuck: stuckPartials),
+                                  outputCount: outputs.count, stuck: stuckPartials,
+                                  alreadyUnder: fitLimit.map { (alreadyUnder, $0) }),
             undo: Self.undo(action: action, done: done, outputs: outputs, ledger: ledger),
             usedFallbackFolder: usedFallback,
             clipboardText: texts.isEmpty ? nil : texts.joined(separator: "\n"),
@@ -158,6 +168,28 @@ public final class JobRunner: Sendable {
         return unit.items[0].formatKey == format.rawValue
     }
 
+    /// The byte limit of a "Fit under" compress, from the slice's preset or (Custom panel) the
+    /// parameters, the preset winning as in the processors; nil for every other request. Custom
+    /// percent targets are fit-under sizes below the file's own size, so they never skip.
+    private static func fitUnderLimit(_ request: JobRequest) -> Int64? {
+        guard case .tool(.compress, let preset) = request.action else { return nil }
+        if case .compress(let target)? = preset {
+            if case .fitUnder(let bytes) = target { return bytes }
+            return nil
+        }
+        if case .compress(.fitUnder(let bytes)) = request.parameters { return bytes }
+        return nil
+    }
+
+    /// Ruling R35: the unit's one file is already at or under `limit`. Reads the size from disk
+    /// (not cached URL resource values).
+    private static func isAlreadyUnder(_ unit: JobRequest, limit: Int64) -> Bool {
+        guard unit.items.count == 1,
+              let size = (try? FileManager.default.attributesOfItem(atPath: unit.items[0].url.path))?[.size] as? NSNumber
+        else { return false }
+        return size.int64Value <= limit
+    }
+
     private static func isCancellation(_ error: any Error) -> Bool {
         (error as? OrbitError) == .cancelled || error is CancellationError
     }
@@ -177,15 +209,25 @@ public final class JobRunner: Sendable {
         return "couldn't remove partial file\(urls.count == 1 ? "" : "s") \(names)"
     }
 
+    /// `alreadyUnder` is (files skipped by R35, the fit-under limit) for a fit-under compress.
     private static func summary(unitCount: Int, failureCount: Int, done: [ProcessorOutput], outputCount: Int,
-                                stuck: [URL]) -> String {
+                                stuck: [URL], alreadyUnder: (count: Int, limit: Int64)?) -> String {
+        let under = alreadyUnder.flatMap { $0.count > 0 ? $0 : nil }
+        if let under, under.count == unitCount { return "Already under \(ResultSummary.bytes(under.limit))." }
+        let head: String
         if failureCount > 0 {
-            let head = "\(unitCount - failureCount) of \(unitCount) done · \(failureCount) failed"
-            return stuck.isEmpty ? head : "\(head) · \(stuckText(stuck))"
+            head = "\(unitCount - failureCount) of \(unitCount) done · \(failureCount) failed"
+        } else if unitCount == 1 {
+            head = ResultSummary.text(for: done.first?.hint, outputCount: outputCount)
+        } else if let sizes = summedSizes(done) {
+            head = ResultSummary.text(for: sizes, outputCount: outputCount)
+        } else {
+            head = ResultSummary.text(for: nil, outputCount: outputCount)
         }
-        if unitCount == 1 { return ResultSummary.text(for: done.first?.hint, outputCount: outputCount) }
-        if let sizes = summedSizes(done) { return ResultSummary.text(for: sizes, outputCount: outputCount) }
-        return ResultSummary.text(for: nil, outputCount: outputCount)
+        var parts = [head]
+        if let under { parts.append("\(under.count) already under \(ResultSummary.bytes(under.limit))") }
+        if failureCount > 0, !stuck.isEmpty { parts.append(stuckText(stuck)) }
+        return parts.joined(separator: " · ")
     }
 
     /// The before/after totals when every processed unit reported sizes.

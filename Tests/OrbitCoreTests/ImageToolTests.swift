@@ -82,6 +82,17 @@ import Testing
         #expect(try fileSize(#require(r.outputs.first)) <= 60_000)
     }
 
+    /// Ruling R35: never re-encode into a file that may be bigger than one already under the target.
+    @Test func fitUnderAlreadyUnderWritesNothing() async throws {
+        let src = Fixtures.noisyJPEG(64, 48, in: root)
+        let r = try await run([src], .tool(.compress, .compress(.fitUnder(10_000_000))))
+        #expect(r.summary == "Already under 10 MB.")
+        #expect(r.outputs.isEmpty && r.undo == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.contains("compressed") }.isEmpty)
+        let custom = try await run([src], .tool(.compress, nil), parameters: .compress(.fitUnder(5_000_000)))
+        #expect(custom.summary == "Already under 5 MB." && custom.outputs.isEmpty)
+    }
+
     @Test func fitUnderImpossible() async throws {
         let src = Fixtures.noisyJPEG(400, 300, in: root)
         await #expect(throws: OrbitError.targetTooSmall("Can't get this image under 100 bytes.")) {

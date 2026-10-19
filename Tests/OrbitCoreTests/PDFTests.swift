@@ -186,6 +186,21 @@ import Testing
         #expect(try size(r.outputs[0]) < size(doc) / 2)
     }
 
+    /// A compress tier never hands back a bigger file: it either shrinks the PDF or says it can't.
+    @Test(arguments: [CompressTier.light, .medium, .strong])
+    func compressTierNeverGrowsAFile(tier: CompressTier) async throws {
+        let text = Fixtures.pdf("text.pdf", pages: ["Just a little text", "And a second page"], in: root)
+        let before = try size(text)
+        do {
+            let r = try await run(text, .tool(.compress, .compress(.tier(tier))))
+            let after = try size(r.outputs[0])
+            #expect(after < before, "\(tier) grew \(before) to \(after)")
+        } catch {
+            #expect(error as? OrbitError == .unsupported("This PDF is already as small as Orbit can make it."))
+            #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix("text-compressed") }.isEmpty)
+        }
+    }
+
     @Test func compressFitUnderWins() async throws {
         let target = Int64(try size(doc) / 3)
         let r = try await run(doc, .tool(.compress, .compress(.fitUnder(target))))
