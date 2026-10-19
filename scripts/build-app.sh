@@ -17,5 +17,7 @@ rm -rf build
 mkdir -p build/Orbit.app/Contents/MacOS
 cp "$BIN" build/Orbit.app/Contents/MacOS/Orbit
 cp Support/Info.plist build/Orbit.app/Contents/Info.plist
+mkdir -p build/Orbit.app/Contents/Resources
+cp Support/AppIcon.icns build/Orbit.app/Contents/Resources/AppIcon.icns
 codesign --force --sign - build/Orbit.app
 echo "Built build/Orbit.app"
