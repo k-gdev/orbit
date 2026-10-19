@@ -8,6 +8,11 @@ public enum ImageConverter {
 
     @discardableResult
     public static func convert(_ src: URL, to format: OutputFormat, output: URL, options: JobOptions) throws -> SummaryHint? {
+        if format == .pdf {
+            // Same page rules as several images into one PDF, including JPEG passthrough (R36).
+            try ImagesToPDF.make([src], output: output)
+            return .sizes(before: fileSize(src), after: fileSize(output))
+        }
         var image = try ImageFile.loadOriented(src)
         let original = CGSize(width: image.width, height: image.height)
         var downscaled = false

@@ -51,7 +51,7 @@ public enum ImageFile {
             try data.write(to: url, options: .withoutOverwriting)
         case .pdf:
             let dpi = dpi(from: properties ?? [:])
-            try PDFWriter.write(count: 1, to: url) { _ in (image, dpi) }
+            try PDFWriter.write(count: 1, to: url) { _ in PDFPageImage(image: image, dpi: dpi) }
         case .ico:
             try ICOWriter.write(image, to: url)
         default:
@@ -68,6 +68,36 @@ public enum ImageFile {
                 throw OrbitError.unsupported("Orbit couldn't write this \(format.label) image.")
             }
         }
+    }
+
+    /// The picture for one PDF page made from the image file at `url`. A JPEG (RGB or grey) keeps
+    /// its compressed data (DCT passthrough, R36): it is not decoded or re-encoded, its EXIF
+    /// orientation is applied when the page is drawn, and its metadata segments (EXIF, GPS, XMP,
+    /// IPTC, thumbnails) are cut out first so none of it reaches the PDF. Anything else is decoded
+    /// upright and embedded losslessly.
+    static func pdfPage(_ url: URL) throws -> PDFPageImage {
+        let props = properties(url)
+        let dpi = dpi(from: props)
+        if let image = jpegPassthrough(url, properties: props) {
+            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+            return PDFPageImage(image: image, dpi: dpi, orientation: (1...8).contains(orientation) ? orientation : 1)
+        }
+        return PDFPageImage(image: try loadOriented(url), dpi: dpi)
+    }
+
+    /// The JPEG's own DCT data, metadata removed, as a CGImage Quartz embeds without re-encoding.
+    /// Nil for anything that isn't an RGB or greyscale JPEG (CMYK JPEGs take the decode path).
+    private static func jpegPassthrough(_ url: URL, properties props: [CFString: Any]) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              (CGImageSourceGetType(source) as String?) == UTType.jpeg.identifier,
+              let model = props[kCGImagePropertyColorModel] as? String,
+              model == (kCGImagePropertyColorModelRGB as String) || model == (kCGImagePropertyColorModelGray as String),
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let clean = JPEGSegments.strippingMetadata(data),
+              let provider = CGDataProvider(data: clean as CFData),
+              let image = CGImage(jpegDataProviderSource: provider, decode: nil, shouldInterpolate: true,
+                                  intent: .defaultIntent) else { return nil }
+        return image
     }
 
     /// Pixels per inch from a metadata dictionary; 72 when it says nothing sensible.
@@ -90,11 +120,39 @@ public enum ImageFile {
     }
 }
 
+/// One PDF page's picture. `orientation` is the EXIF orientation applied while drawing (1 when the
+/// pixels are already upright).
+struct PDFPageImage {
+    var image: CGImage
+    var dpi: Double
+    var orientation: Int = 1
+
+    /// The page size in pixels, after orientation (5–8 swap width and height).
+    var displayPixels: (width: Int, height: Int) {
+        orientation >= 5 ? (image.height, image.width) : (image.width, image.height)
+    }
+
+    /// Maps the stored image, drawn at (0, 0, width, height), onto the upright page (y-up, pixels).
+    var orientationTransform: CGAffineTransform {
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        switch orientation {
+        case 2: return CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: w, ty: 0)
+        case 3: return CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: w, ty: h)
+        case 4: return CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: h)
+        case 5: return CGAffineTransform(a: 0, b: -1, c: -1, d: 0, tx: h, ty: w)
+        case 6: return CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: w)
+        case 7: return CGAffineTransform(a: 0, b: 1, c: 1, d: 0, tx: 0, ty: 0)
+        case 8: return CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: h, ty: 0)
+        default: return .identity
+        }
+    }
+}
+
 /// Image-only PDFs: one page per image, each page as large as the image at its DPI.
 enum PDFWriter {
     /// Streams `count` pages: `page(i)` is called, drawn and released before the next, so memory
     /// stays at one image regardless of the batch size.
-    static func write(count: Int, to url: URL, page: (Int) throws -> (image: CGImage, dpi: Double)) throws {
+    static func write(count: Int, to url: URL, page: (Int) throws -> PDFPageImage) throws {
         guard count > 0 else { throw OrbitError.unsupported("There are no images to put in a PDF.") }
         guard let context = CGContext(url as CFURL, mediaBox: nil, nil) else {
             throw OrbitError.unsupported("Orbit couldn't create this PDF.")
@@ -102,11 +160,17 @@ enum PDFWriter {
         for index in 0..<count {
             try Task.checkCancellation()
             try autoreleasepool {
-                let (image, dpi) = try page(index)
-                var box = CGRect(x: 0, y: 0, width: Double(image.width) * 72 / dpi, height: Double(image.height) * 72 / dpi)
+                let picture = try page(index)
+                let scale = 72 / picture.dpi
+                let pixels = picture.displayPixels
+                var box = CGRect(x: 0, y: 0, width: Double(pixels.width) * scale, height: Double(pixels.height) * scale)
                 let pageInfo = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
                 context.beginPDFPage(pageInfo)
-                context.draw(image, in: box)
+                context.saveGState()
+                context.scaleBy(x: scale, y: scale)
+                context.concatenate(picture.orientationTransform)
+                context.draw(picture.image, in: CGRect(x: 0, y: 0, width: picture.image.width, height: picture.image.height))
+                context.restoreGState()
                 context.endPDFPage()
             }
         }

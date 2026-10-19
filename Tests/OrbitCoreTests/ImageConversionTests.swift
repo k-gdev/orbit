@@ -163,4 +163,94 @@ import Testing
         let hint = try ImageConverter.convert(src, to: .ico, output: root.appending(path: "w.ico"), options: JobOptions())
         #expect(hint == .dimensions(from: CGSize(width: 1000, height: 500), to: CGSize(width: 256, height: 128)))
     }
+
+    // MARK: JPEG → PDF passthrough (R36)
+
+    private func contains(_ d: Data, _ text: String) -> Bool { d.range(of: Data(text.utf8)) != nil }
+
+    @Test func jpegToPDFEmbedsTheJPEGWithoutItsMetadata() async throws {
+        let src = Fixtures.jpegWithMetadata(in: root, orientation: 6, thumbnail: true)
+        let out = try await convertURL(src, to: .pdf)
+        let d = Fixtures.bytes(out)
+        #expect(contains(d, "/DCTDecode"))
+        for secret in ["Exif", "OrbitCam", "SN-12345", "IPTC Secret", "XMP Secret", "2024:05:06"] {
+            #expect(!contains(d, secret), "PDF still contains \(secret)")
+        }
+        #expect(PDFDocument(url: out)?.page(at: 0)?.bounds(for: .mediaBox).size == CGSize(width: 48, height: 64))
+    }
+
+    @Test func jpegToPDFStaysAboutTheJPEGSize() async throws {
+        let src = Fixtures.noisyJPEG(600, 400, in: root)
+        let out = try await convertURL(src, to: .pdf)
+        let (pdfSize, jpegSize) = (try bytes(out), try bytes(src))
+        #expect(pdfSize <= jpegSize + 16_000, "\(pdfSize) vs \(jpegSize)")
+    }
+
+    @Test func manyJPEGsIntoOnePDFPassThrough() async throws {
+        let a = Fixtures.jpegWithMetadata(in: root)
+        let b = Fixtures.noisyJPEG(300, 200, in: root)
+        let r = try await run([a, b], .convert(.pdf))
+        let out = try #require(r.outputs.first)
+        let d = Fixtures.bytes(out)
+        #expect(PDFDocument(url: out)?.pageCount == 2)
+        #expect(!contains(d, "OrbitCam") && !contains(d, "XMP Secret") && !contains(d, "Exif"))
+        #expect(try bytes(out) <= (try bytes(a)) + (try bytes(b)) + 16_000)
+    }
+
+    @Test func jpegSegmentStripKeepsPixelsAndDropsMetadata() throws {
+        let src = Fixtures.jpegWithMetadata(in: root, orientation: 6, thumbnail: true)
+        let clean = try #require(JPEGSegments.strippingMetadata(Fixtures.bytes(src)))
+        let out = root.appending(path: "clean.jpg")
+        try clean.write(to: out)
+        #expect(Fixtures.decodedPixels(out) == Fixtures.decodedPixels(src))
+        for secret in ["Exif", "OrbitCam", "IPTC Secret", "XMP Secret"] { #expect(!contains(clean, secret)) }
+        #expect(!JPEGSegments.hasEmbeddedThumbnail(clean) && JPEGSegments.hasEmbeddedThumbnail(Fixtures.bytes(src)))
+    }
+
+    /// Every EXIF orientation draws the page the same way up as the decoded, rotated image.
+    @Test(arguments: 1...8)
+    func jpegPDFPageFollowsOrientation(orientation: Int) async throws {
+        let src = quadrantJPEG(orientation: orientation)
+        let out = try await convertURL(src, to: .pdf)
+        let upright = try ImageFile.loadOriented(src)
+        let page = try #require(CGPDFDocument(out as CFURL)?.page(at: 1))
+        #expect(page.getBoxRect(.mediaBox).size == CGSize(width: upright.width, height: upright.height))
+        let expected = rgba(width: upright.width, height: upright.height) { $0.draw(upright, in: CGRect(x: 0, y: 0, width: upright.width, height: upright.height)) }
+        let actual = rgba(width: upright.width, height: upright.height) { $0.drawPDFPage(page) }
+        for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+            let x = Int(Double(upright.width) * fx), y = Int(Double(upright.height) * fy)
+            let o = (y * upright.width + x) * 4
+            for c in 0..<3 {
+                #expect(abs(Int(expected[o + c]) - Int(actual[o + c])) < 40,
+                        "orientation \(orientation) at (\(x), \(y)) channel \(c): \(expected[o + c]) vs \(actual[o + c])")
+            }
+        }
+    }
+
+    /// An 80×40 JPEG with four solid quadrants (red, green, blue, yellow) and EXIF `orientation`.
+    private func quadrantJPEG(orientation: Int) -> URL {
+        let w = 80, h = 40
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let colours: [(Double, Double, Double)] = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)]
+        for (i, c) in colours.enumerated() {
+            ctx.setFillColor(CGColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: 1))
+            ctx.fill(CGRect(x: (i % 2) * w / 2, y: (i / 2) * h / 2, width: w / 2, height: h / 2))
+        }
+        let url = root.appending(path: "quad-\(orientation).jpg")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, [kCGImagePropertyOrientation: orientation,
+                                                            kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+        _ = CGImageDestinationFinalize(dest)
+        return url
+    }
+
+    private func rgba(width: Int, height: Int, _ draw: (CGContext) -> Void) -> [UInt8] {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        draw(ctx)
+        return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: width * height * 4))
+    }
 }
