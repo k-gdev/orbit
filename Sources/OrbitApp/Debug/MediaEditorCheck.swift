@@ -26,6 +26,8 @@ extension EditorCheck {
         checkVideoSession(samples, check)
         checkAudioSession(samples, check)
         checkProxySession(samples, check)
+        checkProxyProbe(samples, check)
+        checkClosingStopsTheProxyLoad(samples, check)
         checkRangeModel(samples, check)
         checkCropModel(samples, check)
         checkPanels(samples, check)
@@ -160,6 +162,116 @@ extension EditorCheck {
         } else {
             check("proxy: an MKV without ffmpeg fails", false, "\(without.status)")
         }
+    }
+
+
+    /// A proxied video whose original can't be probed has no picture size to measure a crop in, and the proxy's (at most
+    /// 1280 px wide) must never stand in for it.
+    @MainActor
+    private static func checkProxyProbe(_ samples: Samples, _ check: Checker) {
+        func attempt(_ name: String, says expected: String, probe: @escaping @Sendable (URL, FFmpeg) async throws -> MediaProbe.VideoStream?) {
+            let session = MediaSession(item: DroppedItem(url: samples.mkv), ffmpeg: samples.ffmpeg)
+            let tally = Tally()
+            session.videoProbe = probe
+            session.proxyProvider = { _, _, _ in
+                tally.add("proxy")
+                return samples.video   // a real, smaller-or-equal file: the old code would have adopted its size
+            }
+            let opened = loaded(session)
+            var message = ""
+            if case .failed(let text) = session.status { message = text }
+            check("proxy probe (\(name)): the editor refuses instead of opening", !opened && !message.isEmpty, "\(session.status)")
+            check("proxy probe (\(name)): it says why, and keeps no size",
+                  session.videoSize == nil && message.contains(expected), "\(message), \(String(describing: session.videoSize))")
+            check("proxy probe (\(name)): no preview was encoded for a file that can't be edited", tally.count("proxy") == 0)
+            session.stop()
+        }
+        attempt("nothing listed", says: "picture size") { _, _ in nil }
+        attempt("ffmpeg can't run", says: "could not be started") { _, _ in throw OrbitError.unsupported("ffmpeg could not be started") }
+    }
+
+
+    /// Closing the panel while "Preparing a preview…" runs must stop the encode, quietly, and reopening must not start a
+    /// second one beside it. A `sleep` stands in for the ffmpeg encode (same `ProcessRunner`, same cancellation).
+    @MainActor
+    private static func checkClosingStopsTheProxyLoad(_ samples: Samples, _ check: Checker) {
+        let marker = "31.\(Int.random(in: 100...999))"
+        let tally = Tally()
+        func makeSession(_ item: DroppedItem) -> MediaSession {
+            let session = MediaSession(item: item, ffmpeg: samples.ffmpeg)
+            session.proxyProvider = { _, _, _ in
+                tally.add("started")
+                tally.add("running")
+                defer { tally.add("running", -1) }
+                do {
+                    _ = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), [marker])
+                } catch {
+                    tally.add("ended-by-error")
+                    throw error
+                }
+                return samples.video
+            }
+            return session
+        }
+        let host = EditorRouter.MediaHost(ffmpeg: samples.ffmpeg, options: { JobOptions() }, submit: { _ in }, makeSession: makeSession)
+        let mkv = [DroppedItem(url: samples.mkv)]
+
+        for (name, open) in [("crop", { EditorRouter.openVideoCrop(mkv, action: .tool(.crop, nil), host: host) }),
+                             ("trim", { EditorRouter.openMediaRange(mkv, mode: .trim, action: .tool(.trim, nil), host: host) })]
+            as [(String, () -> EditorWindowController?)] {
+            tally.reset()
+            guard let controller = open() else { check("close during a proxy load (\(name)): opens", false); continue }
+            spin(until: { tally.count("started") == 1 }, timeout: 10)
+            check("close during a proxy load (\(name)): the preview encode is running", tally.count("started") == 1 && runningCount(marker) == 1,
+                  "\(tally.count("started")) started, \(runningCount(marker)) processes")
+            controller.close()
+            spin(until: { tally.count("running") == 0 && runningCount(marker) == 0 }, timeout: 8)
+            check("close during a proxy load (\(name)): the encode is stopped", tally.count("ended-by-error") == 1 && runningCount(marker) == 0,
+                  "\(tally.count("ended-by-error")) cancelled, \(runningCount(marker)) processes left")
+
+            // Reopening starts one encode, not two side by side.
+            guard let again = open() else { check("close during a proxy load (\(name)): reopens", false); continue }
+            spin(until: { tally.count("started") == 2 }, timeout: 10)
+            check("close during a proxy load (\(name)): reopening runs exactly one encode",
+                  tally.count("started") == 2 && runningCount(marker) == 1, "\(tally.count("started")) started, \(runningCount(marker)) processes")
+            again.close()
+            spin(until: { runningCount(marker) == 0 }, timeout: 8)
+            check("close during a proxy load (\(name)): and it stops too", runningCount(marker) == 0)
+            settle()
+        }
+
+        // The cancelled load is a quiet exit, not an error shown to nobody.
+        let session = makeSession(DroppedItem(url: samples.mkv))
+        var finished = false
+        Task { await session.load(); finished = true }
+        spin(until: { tally.count("running") == 1 }, timeout: 10)
+        session.stop()
+        spin(until: { finished }, timeout: 8)
+        var failed = false
+        if case .failed = session.status { failed = true }
+        check("close during a proxy load: load() returns without a failure status", finished && !failed && !session.isReady, "\(session.status)")
+        check("close during a proxy load: nothing is left running", runningCount(marker) == 0)
+    }
+
+    /// How many `sleep <marker>` processes are alive (read-only `pgrep`).
+    private static func runningCount(_ marker: String) -> Int {
+        let process = Process(), out = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-f", "sleep \(marker)"]
+        process.standardOutput = out
+        guard (try? process.run()) != nil else { return -1 }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).count
+    }
+
+    /// Named counters the `@Sendable` stand-ins bump from any thread.
+    private final class Tally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [String: Int] = [:]
+        func add(_ key: String, _ amount: Int = 1) { lock.lock(); counts[key, default: 0] += amount; lock.unlock() }
+        func count(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return counts[key, default: 0] }
+        func reset() { lock.lock(); counts = [:]; lock.unlock() }
     }
 
     private final class Box<T> {

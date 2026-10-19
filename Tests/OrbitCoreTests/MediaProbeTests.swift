@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 import Testing
 @testable import OrbitCore
@@ -40,5 +41,28 @@ import Testing
     @Test func noVideoStreamIsNil() {
         #expect(MediaProbe.parseVideoStream("  Stream #0:0: Audio: mp3, 44100 Hz, stereo") == nil)
         #expect(MediaProbe.parseVideoStream("") == nil)
+    }
+
+    @Test func aProbeThatCannotRunThrowsInsteadOfLookingLikeAFileWithoutVideo() async {
+        let missing = FFmpeg(executable: URL(fileURLWithPath: "/nonexistent/ffmpeg-for-test"))
+        await #expect(throws: (any Error).self) {
+            _ = try await MediaProbe.videoStream(of: URL(fileURLWithPath: "/tmp/a.mkv"), ffmpeg: missing)
+        }
+    }
+
+    @Test func aCancelledProbeThrowsCancelled() async {
+        let task = Task { () -> Bool in
+            // /bin/sleep stands in for ffmpeg: it ignores `-hide_banner`, so it fails at once; cancel before it runs.
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                _ = try await MediaProbe.videoStream(of: URL(fileURLWithPath: "/tmp/a.mkv"), ffmpeg: FFmpeg(executable: URL(fileURLWithPath: "/bin/sleep")))
+                return false
+            } catch OrbitError.cancelled {
+                return true
+            } catch {
+                return false
+            }
+        }
+        #expect(await task.value)
     }
 }

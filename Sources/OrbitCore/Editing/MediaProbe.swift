@@ -10,11 +10,10 @@ public enum MediaProbe {
         public let frameRate: Double?
     }
 
-    /// The first video stream of `url`, or nil when ffmpeg lists none.
-    public static func videoStream(of url: URL, ffmpeg: FFmpeg) async -> VideoStream? {
-        guard let result = try? await ProcessRunner.runCapturing(ffmpeg.executable, ["-hide_banner", "-i", FFmpeg.pathArg(url)]) else {
-            return nil
-        }
+    /// The first video stream of `url`, or nil when ffmpeg lists none. Throws when ffmpeg can't be run or the probe is
+    /// cancelled, so "couldn't ask" is never mistaken for "no video". (`ffmpeg -i` with no output exits non-zero by design.)
+    public static func videoStream(of url: URL, ffmpeg: FFmpeg) async throws -> VideoStream? {
+        let result = try await ProcessRunner.runCapturing(ffmpeg.executable, ["-hide_banner", "-i", FFmpeg.pathArg(url)])
         return parseVideoStream(result.stderr)
     }
 

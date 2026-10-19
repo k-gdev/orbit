@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// AVFoundation plays and reads the file itself when it can. For MKV, WebM, WMV and the like (`MediaSupport.needsFFmpegToRead`)
 /// the session previews the small MP4/M4A proxy `ProxyMaker` makes; the numbers the job needs (the display size the crop
-/// rectangle is measured in) still come from the original.
+/// rectangle is measured in) still come from the original, and the session fails rather than fall back to the proxy's.
 @MainActor
 final class MediaSession: ObservableObject {
     enum Status: Equatable {
@@ -45,7 +45,14 @@ final class MediaSession: ObservableObject {
         try await ProxyMaker.proxy(for: url, ffmpeg: ffmpeg, audioOnly: audioOnly)
     }
 
+    /// Reads the original's picture size and frame rate when AVFoundation can't; replaced in tests.
+    var videoProbe: @Sendable (URL, FFmpeg) async throws -> MediaProbe.VideoStream? = { url, ffmpeg in
+        try await MediaProbe.videoStream(of: url, ffmpeg: ffmpeg)
+    }
+
     private var generator: AVAssetImageGenerator?
+    /// The running `load()`; `stop()` cancels it, which also ends a proxy encode in progress.
+    private var loadTask: Task<Void, Never>?
     private var stillTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var statusObserver: AnyCancellable?
@@ -68,44 +75,79 @@ final class MediaSession: ObservableObject {
 
     // MARK: Loading
 
+    /// Opens the file. The work runs in a task the session owns, so `stop()` (the panel closing) ends it, including a
+    /// proxy encode in progress; cancelling the caller does the same. A second call waits for the first.
     func load() async {
+        guard !isStopped else { return }
+        let task: Task<Void, Never>
+        if let loadTask {
+            task = loadTask
+        } else {
+            task = Task { await performLoad() }
+            loadTask = task
+        }
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
+    private func performLoad() async {
         do {
             var playURL = url
+            var originalRate: Double?
             if needsProxy {
                 guard let ffmpeg else {
                     throw OrbitError.unsupported("Previewing .\(url.pathExtension.lowercased()) files needs ffmpeg (brew install ffmpeg).")
                 }
                 status = .loading("Preparing a preview…")
-                playURL = try await proxyProvider(url, ffmpeg, isAudio)
-                if !isAudio, let stream = await MediaProbe.videoStream(of: url, ffmpeg: ffmpeg) {
+                if !isAudio {
+                    // The crop rectangle is in the original's pixels and the proxy is smaller: without the original's
+                    // size there is nothing right to hand the job, so ask first (before the slow encode) and refuse.
+                    guard let stream = try await videoProbe(url, ffmpeg) else {
+                        throw OrbitError.unsupported("Couldn't read the picture size of \(url.lastPathComponent).")
+                    }
                     videoSize = stream.displaySize
-                    if let rate = stream.frameRate { frameRate = rate }
+                    originalRate = stream.frameRate
                 }
+                playURL = try await proxyProvider(url, ffmpeg, isAudio)
+                try Task.checkCancellation()
             }
             let length = try await MediaInfo.duration(playURL)
             guard length > 0 else { throw OrbitError.unsupported("\(url.lastPathComponent) has no length to edit.") }
             if isAudio {
                 peaks = try await Waveform.peaks(playURL, buckets: 480)
             } else {
-                try await loadVideoFacts(playURL)
+                try await loadVideoFacts(playURL, originalRate: originalRate)
             }
-            guard !isStopped else { return }
+            guard !isStopped, !Task.isCancelled else { return }
             duration = length
             makePlayer(for: playURL)
             status = .ready
             requestStill()
         } catch {
+            // Closing the panel cancels the load: that is not a failure to report.
+            if isStopped || Task.isCancelled || error is CancellationError { return }
+            if case OrbitError.cancelled = error { return }
             Log.error("Media editor couldn't open \(url.lastPathComponent): \(error)")
             status = .failed(error.localizedDescription)
         }
     }
 
-    private func loadVideoFacts(_ playURL: URL) async throws {
+    /// `originalRate` is the original's frame rate when it was probed (a proxied file); its size is already in `videoSize`.
+    private func loadVideoFacts(_ playURL: URL, originalRate: Double?) async throws {
         let asset = AVURLAsset(url: playURL)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw OrbitError.unsupported("\(url.lastPathComponent) has no video to show.")
         }
-        if videoSize == nil {
+        if needsProxy {
+            // `playURL` is the proxy: its size is not the original's, so it is never adopted. The probe set `videoSize`.
+            guard videoSize != nil else { throw OrbitError.unsupported("Couldn't read the picture size of \(url.lastPathComponent).") }
+            // The proxy keeps the original's frame rate, so it stands in when the probe listed none.
+            let proxyRate = try await track.load(.nominalFrameRate)
+            if let originalRate {
+                frameRate = originalRate
+            } else if proxyRate > 0 {
+                frameRate = Double(proxyRate)
+            }
+        } else {
             guard let size = try await MediaInfo.videoSize(playURL), size.width > 0, size.height > 0 else {
                 throw OrbitError.unsupported("Couldn't read the picture size of \(url.lastPathComponent).")
             }
@@ -136,6 +178,8 @@ final class MediaSession: ObservableObject {
     /// Releases the player and stops anything still running. Safe to call twice.
     func stop() {
         isStopped = true
+        loadTask?.cancel()
+        loadTask = nil
         stillTask?.cancel()
         generator?.cancelAllCGImageGeneration()
         player?.pause()
