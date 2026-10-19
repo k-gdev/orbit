@@ -9,8 +9,14 @@ import OrbitCore
 ///
 /// Prints `summary:`, `output:`, `failure:`, `clipboard:` or `error:` lines to stdout and
 /// exits 0 once the job ends, or 1 when it failed.
+///
+///     Orbit --list-slices <file>... --wheel <convert|tools|actions>
+///
+/// Prints one `slice: <id>` line per runnable leaf slice for those files (`slice: <id> [editor]` when the slice opens an
+/// editor window, which `--perform` cannot drive), then exits.
 enum PerformCommand {
     static let flag = "--perform"
+    static let listFlag = "--list-slices"
     static let usage = "usage: Orbit --perform <file>... --wheel <convert|tools|actions> --slice <sliceID>"
 
     struct Options {
@@ -21,6 +27,9 @@ enum PerformCommand {
 
     @MainActor
     static func runIfRequested(_ arguments: [String]) {
+        if let start = arguments.firstIndex(of: listFlag) {
+            listSlices(parse(Array(arguments[(start + 1)...])))
+        }
         guard let start = arguments.firstIndex(of: flag) else { return }
         let options = parse(Array(arguments[(start + 1)...]))
         guard !options.files.isEmpty, let wheel = options.wheel, let sliceID = options.sliceID else {
@@ -56,6 +65,27 @@ enum PerformCommand {
         }
         coordinator.perform(slice, items: items, near: .zero)
         withExtendedLifetime(coordinator) { NSApplication.shared.run() }
+    }
+
+    @MainActor
+    private static func listSlices(_ options: Options) -> Never {
+        guard !options.files.isEmpty, let wheel = options.wheel else {
+            FileHandle.standardError.write(Data("usage: Orbit --list-slices <file>... --wheel <convert|tools|actions>\n".utf8))
+            exit(64)
+        }
+        let settings = SettingsStore()
+        let capabilities = JobCoordinator(settings: settings).capabilities
+        let content = SliceCatalog.content(for: options.files.map(DroppedItem.init(url:)), wheel: wheel,
+                                           capabilities: capabilities, settings: settings.catalogSettings)
+        if let message = content.hubMessage { print("hub: \(message)") }
+        func emit(_ slices: [Slice]) {
+            for slice in slices {
+                if slice.children.isEmpty { print("slice: \(slice.id)\(slice.editor != nil ? " [editor]" : "")") }
+                else { emit(slice.children) }
+            }
+        }
+        emit(content.slices)
+        exit(0)
     }
 
     static func parse(_ args: [String]) -> Options {

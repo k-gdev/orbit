@@ -156,7 +156,10 @@ public enum SliceCatalog {
             child("tools.metadata.stripLocation", "Strip location", .tool(.metadata, .metadataStripLocation)),
         ]
         if single { meta.append(metadataEditChild()) }
-        out.append(tool(.metadata, "METADATA", "info.circle", children: meta))
+        // SVG has no EXIF/GPS block and ImageIO can't open it, so a metadata slice would only fail.
+        if items.contains(where: { $0.formatKey != "svg" }) {
+            out.append(tool(.metadata, "METADATA", "info.circle", children: meta))
+        }
         out.append(tool(.readQR, "READ QR", "qrcode.viewfinder"))
         if !single { out.append(tool(.collage, "COLLAGE", "square.grid.2x2")) }
         return out

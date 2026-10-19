@@ -106,6 +106,12 @@ private func allIDs(_ c: WheelContent) -> [String] {
 
 // Controller rulings R5/R6 and extras.
 @Test func imageToolsNeverNeedFFmpeg() { #expect(!titles(.tools, ["a.webp"], .none).isEmpty) }
+@Test func svgHasNoMetadataSlice() {
+    #expect(!titles(.tools, ["a.svg"], .everything).contains("METADATA"))
+    #expect(titles(.tools, ["a.svg"], .everything).contains("COMPRESS"))
+    #expect(titles(.tools, ["a.png"], .everything).contains("METADATA"))
+    #expect(titles(.tools, ["a.svg", "b.png"], .everything).contains("METADATA"))
+}
 @Test func chooseFolderAppearsForMany() { #expect(childTitles(.actions, ["a.png","b.png"], "MOVE TO", .none).last == "Choose…") }
 @Test func readHelperDoesNotGateToollessSelections() {
     #expect(content(.tools, ["a.pptx"], .none).hubMessage == "No tools for PPTX files")

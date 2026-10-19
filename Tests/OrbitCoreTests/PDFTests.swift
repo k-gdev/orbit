@@ -192,6 +192,23 @@ import Testing
         #expect(Int64(try size(r.outputs[0])) <= target)
     }
 
+    /// Regression: the fit loop rewrites one candidate URL, and `URL.resourceValues` caches its size, so every
+    /// level reported the first level's size and a target only the second level met was refused.
+    @Test func compressFitUnderSeesEachLevelsOwnSize() async throws {
+        func tierSize(_ tier: CompressTier) throws -> Int64 {
+            let out = root.appending(path: "probe-\(tier.rawValue).pdf")
+            defer { try? FileManager.default.removeItem(at: out) }
+            return try PDFTools.compress(doc, target: .tier(tier), to: out)
+        }
+        let light = try tierSize(.light), medium = try tierSize(.medium)
+        try #require(medium < light)
+        let target = (light + medium) / 2
+        let out = root.appending(path: "fit.pdf")
+        let written = try PDFTools.compress(doc, target: .fitUnder(target), to: out)
+        #expect(written <= target)
+        #expect(Int64(try size(out)) == written)
+    }
+
     @Test func compressFitUnderImpossible() async throws {
         await #expect(throws: OrbitError.targetTooSmall("Can't get this PDF under 100 bytes.")) {
             try await self.run(self.doc, .tool(.compress, .compress(.fitUnder(100))))

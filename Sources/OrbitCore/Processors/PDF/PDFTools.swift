@@ -240,8 +240,10 @@ public enum PDFTools {
         }
     }
 
+    /// The size on disk. (Not `URL.resourceValues`, which caches the size on the URL: the compress loop
+    /// rewrites the same candidate URL.)
     private static func fileSize(_ url: URL) throws -> Int64 {
-        Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     /// Writes `document` beside a scratch name and moves it to `to`, so a failure leaves no partial file.
