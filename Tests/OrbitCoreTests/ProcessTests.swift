@@ -56,4 +56,30 @@ private func makeTempDir() throws -> URL {
         let s = "on run argv\nreturn (item 1 of argv) & \"|\" & (item 2 of argv)\nend run"
         #expect(try await AppleScriptRunner.run(s, arguments: [weird, "-x"]) == "\(weird)|-x")
     }
+
+    @Test func largeOutputOnBothPipesCompletesInOrder() async throws {
+        final class Collector: @unchecked Sendable {
+            let lock = NSLock(); var nums: [Int] = []
+            func add(_ l: String) { lock.lock(); nums.append(Int(l) ?? -1); lock.unlock() }
+        }
+        let c = Collector()
+        let r = try await ProcessRunner.run(URL(filePath: "/bin/sh"),
+            ["-c", "seq 1 200000; seq 1 200000 >&2"], onStdoutLine: { c.add($0) })
+        #expect(r.stdout.split(separator: "\n").count == 200000)
+        #expect(r.stderr.split(separator: "\n").count == 200000)
+        #expect(c.nums.count == 200000)
+        #expect(c.nums == Array(1...200000))
+    }
+
+    @Test func stderrTailIsLast2000Chars() async {
+        do {
+            _ = try await ProcessRunner.run(URL(filePath: "/bin/sh"),
+                ["-c", "seq 1 5000 >&2; exit 4"])
+            Issue.record("expected failure")
+        } catch OrbitError.processFailed(_, let code, let stderr) {
+            #expect(code == 4)
+            #expect(stderr.count == 2000)
+            #expect(stderr.hasSuffix("5000\n"))
+        } catch { Issue.record("wrong error \(error)") }
+    }
 }

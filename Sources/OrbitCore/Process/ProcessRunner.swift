@@ -55,38 +55,42 @@ public enum ProcessRunner {
         let state = RunState()
         let outReader = StreamReader(onLine: onStdoutLine)
         let errReader = StreamReader(onLine: nil)
-        // Drain both pipes concurrently so a chatty process can never block on a full pipe.
-        if fileHandle == nil {
-            outPipe.fileHandleForReading.readabilityHandler = { h in
-                let d = h.availableData
-                if d.isEmpty { h.readabilityHandler = nil } else { outReader.append(d) }
+        // Each pipe has exactly one reader that reads until EOF, so output stays in order and
+        // nothing is lost at exit. Resume only when both pipes hit EOF and the process has exited.
+        let group = DispatchGroup()
+        func drain(_ pipe: Pipe, into reader: StreamReader) {
+            group.enter()
+            DispatchQueue.global().async {
+                let h = pipe.fileHandleForReading
+                while let d = try? h.read(upToCount: 65536), !d.isEmpty { reader.append(d) }
+                try? h.close()
+                group.leave()
             }
-        }
-        errPipe.fileHandleForReading.readabilityHandler = { h in
-            let d = h.availableData
-            if d.isEmpty { h.readabilityHandler = nil } else { errReader.append(d) }
         }
 
         let exitCode: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int32, Error>) in
+                group.enter()
+                let status = StatusBox()
                 process.terminationHandler = { p in
-                    // Pick up whatever is left in the pipes, then stop reading.
-                    if fileHandle == nil {
-                        outPipe.fileHandleForReading.readabilityHandler = nil
-                        if let rest = try? outPipe.fileHandleForReading.readToEnd() { outReader.append(rest) }
-                    }
-                    errPipe.fileHandleForReading.readabilityHandler = nil
-                    if let rest = try? errPipe.fileHandleForReading.readToEnd() { errReader.append(rest) }
-                    cont.resume(returning: p.terminationStatus)
+                    status.value = p.terminationStatus
+                    group.leave()
                 }
                 do {
                     try process.run()
                 } catch {
-                    outPipe.fileHandleForReading.readabilityHandler = nil
-                    errPipe.fileHandleForReading.readabilityHandler = nil
+                    process.terminationHandler = nil
+                    try? outPipe.fileHandleForWriting.close()
+                    try? errPipe.fileHandleForWriting.close()
                     cont.resume(throwing: error)
                     return
                 }
+                // The parent's copies of the write ends must close so EOF can arrive.
+                if fileHandle == nil { try? outPipe.fileHandleForWriting.close() }
+                try? errPipe.fileHandleForWriting.close()
+                if fileHandle == nil { drain(outPipe, into: outReader) }
+                drain(errPipe, into: errReader)
+                group.notify(queue: .global()) { cont.resume(returning: status.value) }
                 state.started(process)
             }
         } onCancel: {
@@ -183,3 +187,5 @@ private final class StreamReader: @unchecked Sendable {
         if let onLine, !rest.isEmpty { onLine(String(decoding: rest, as: UTF8.self)) }
     }
 }
+
+private final class StatusBox: @unchecked Sendable { var value: Int32 = 0 }
