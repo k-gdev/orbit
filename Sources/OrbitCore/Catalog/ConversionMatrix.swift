@@ -5,8 +5,13 @@ public enum ConversionMatrix {
 
     /// Convert outputs for one item, in slice order. The item's own format is omitted.
     public static func outputs(for item: DroppedItem) -> [OutputFormat] {
+        table(for: item.category).filter { $0.fileExtension != item.formatKey && $0.rawValue != item.formatKey }
+    }
+
+    /// The category's full convert table, in slice order, including the source's own format.
+    public static func table(for category: FileCategory) -> [OutputFormat] {
         let all: [OutputFormat]
-        switch item.category {
+        switch category {
         case .image: all = [.jpg, .png, .heic, .webp, .tiff, .avif, .bmp, .gif, .ico, .pdf]
         case .video: all = [.mp4, .mov, .mkv, .webm, .avi, .wmv, .gif, .m4a, .mp3]
         case .audio: all = [.m4a, .aac, .wav, .aiff, .flac, .mp3, .ogg, .opus, .wma]
@@ -18,7 +23,7 @@ public enum ConversionMatrix {
         case .archive, .folder: all = archives
         case .other: all = []
         }
-        return all.filter { $0.fileExtension != item.formatKey && $0.rawValue != item.formatKey }
+        return all
     }
 
     /// Helper needed to read this item, if any.

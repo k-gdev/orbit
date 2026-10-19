@@ -13,12 +13,22 @@ public enum SliceCatalog {
     }
 
     /// Keeps the first `maxSlices - 1` and folds the rest into a final MORE slice.
-    public static func capped(_ slices: [Slice]) -> [Slice] {
+    /// `moreID` defaults to "<wheel>.more", derived from the first slice's id.
+    public static func capped(_ slices: [Slice], moreID: String? = nil) -> [Slice] {
         guard slices.count > maxSlices else { return slices }
-        let wheel = slices[0].id.split(separator: ".").first.map(String.init) ?? "wheel"
-        let more = Slice(id: "\(wheel).more", title: "MORE", symbol: "ellipsis.circle",
-                         children: Array(slices[(maxSlices - 1)...]))
+        let id = moreID ?? "\(slices[0].id.split(separator: ".").first.map(String.init) ?? "wheel").more"
+        let rest = capped(Array(slices[(maxSlices - 1)...]), moreID: id + ".more")
+        let more = Slice(id: id, title: "MORE", symbol: "ellipsis.circle", children: rest)
         return Array(slices[..<(maxSlices - 1)]) + [more]
+    }
+
+    private static func ring(_ parentID: String, _ children: [Slice]) -> [Slice] {
+        capped(children, moreID: parentID + ".more")
+    }
+
+    private static func unique<T: Hashable>(_ values: [T]) -> [T] {
+        var seen = Set<T>()
+        return values.filter { seen.insert($0).inserted }
     }
 
     // MARK: Convert
@@ -38,10 +48,8 @@ public enum SliceCatalog {
             return WheelContent(slices: [], hubMessage: "Install \(helper.displayName) to convert \(missing.formatKey.uppercased())")
         }
 
-        // A format is omitted only when every item already has it.
-        var seenOutputs = Set<OutputFormat>()
-        let candidates = items.flatMap { ConversionMatrix.outputs(for: $0) }.filter { seenOutputs.insert($0).inserted }
-        let outputs = candidates.filter { output in
+        // Walk the category's table order once; omit a format only when every item already has it.
+        let outputs = ConversionMatrix.table(for: first.category).filter { output in
             items.contains { !isSameFormat($0, output) }
                 && items.allSatisfy { ConversionMatrix.outputHelper(for: $0, output: output).map(caps.has) ?? true }
         }
@@ -84,18 +92,6 @@ public enum SliceCatalog {
         let single = items.count == 1
         let categories = Set(items.map(\.category))
 
-        // Helper gating: read helpers, plus ffmpeg for video/audio not natively writable (R5).
-        for item in items {
-            var needed = ConversionMatrix.readHelper(for: item)
-            if needed == nil, item.category == .video || item.category == .audio,
-               !MediaSupport.isNativelyWritable(formatKey: item.formatKey) {
-                needed = .ffmpeg
-            }
-            if let helper = needed, !caps.has(helper) {
-                return WheelContent(slices: [], hubMessage: "Install \(helper.displayName) to edit \(item.formatKey.uppercased())")
-            }
-        }
-
         let slices: [Slice]
         if categories.count > 1 {
             let allowed: Set<FileCategory> = [.image, .video, .audio, .pdf]
@@ -119,7 +115,26 @@ public enum SliceCatalog {
                 return WheelContent(slices: [], hubMessage: ext.isEmpty ? "No tool fits every file" : "No tools for \(ext) files")
             }
         }
+        // Helper gating only applies when the selection would otherwise have tools (R12).
+        if !slices.isEmpty, let message = missingHelperMessage(items, caps) {
+            return WheelContent(slices: [], hubMessage: message)
+        }
         return WheelContent(slices: capped(slices), hubMessage: nil)
+    }
+
+    /// Read helpers, plus ffmpeg for video/audio not natively writable (R5).
+    private static func missingHelperMessage(_ items: [DroppedItem], _ caps: Capabilities) -> String? {
+        for item in items {
+            var needed = ConversionMatrix.readHelper(for: item)
+            if needed == nil, item.category == .video || item.category == .audio,
+               !MediaSupport.isNativelyWritable(formatKey: item.formatKey) {
+                needed = .ffmpeg
+            }
+            if let helper = needed, !caps.has(helper) {
+                return "Install \(helper.displayName) to edit \(item.formatKey.uppercased())"
+            }
+        }
+        return nil
     }
 
     private static func imageTools(_ items: [DroppedItem], _ single: Bool, _ s: CatalogSettings) -> [Slice] {
@@ -135,7 +150,7 @@ public enum SliceCatalog {
             compress.append(Slice(id: "tools.compress.custom", title: "Custom…",
                                   action: .tool(.compress, nil), editor: .compressCustom))
         }
-        out.append(tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: compress))
+        out.append(tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: ring("tools.compress", compress)))
         var meta = [
             child("tools.metadata.stripAll", "Strip all", .tool(.metadata, .metadataStripAll)),
             child("tools.metadata.stripLocation", "Strip location", .tool(.metadata, .metadataStripLocation)),
@@ -153,7 +168,7 @@ public enum SliceCatalog {
         let speeds = [0.25, 0.5, 1.5, 2, 4].map { v in
             child("tools.speed.\(v)", "\(formatSpeed(v))×", .tool(.speed, .speed(v)))
         }
-        var out: [Slice] = [tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: compress)]
+        var out: [Slice] = [tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: ring("tools.compress", compress))]
         if single {
             out.append(tool(.trim, "TRIM", "scissors", editor: .mediaTrim))
             out.append(tool(.crop, "CROP", "crop", editor: .videoCrop))
@@ -183,7 +198,7 @@ public enum SliceCatalog {
         if single { meta.append(metadataEditChild()) }
 
         var out: [Slice] = [tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left",
-                                 subtitle: note, children: compress)]
+                                 subtitle: note, children: ring("tools.compress", compress))]
         if single { out.append(tool(.trim, "TRIM", "scissors", editor: .mediaTrim)) }
         out.append(tool(.normalize, "NORMALIZE", "waveform.path"))
         if single { out.append(tool(.bleep, "BLEEP", "speaker.wave.3", editor: .audioBleep)) }
@@ -200,7 +215,7 @@ public enum SliceCatalog {
             split.append(Slice(id: "tools.split.choose", title: "Choose pages…",
                                action: .tool(.split, nil), editor: .pdfSplit))
         }
-        var out: [Slice] = [tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: compress)]
+        var out: [Slice] = [tool(.compress, "COMPRESS", "arrow.down.right.and.arrow.up.left", children: ring("tools.compress", compress))]
         if !single { out.append(tool(.merge, "MERGE", "doc.on.doc")) }
         out.append(tool(.split, "SPLIT", "square.split.2x1", children: split))
         if single {
@@ -217,10 +232,11 @@ public enum SliceCatalog {
         var seen = Set<String>()
         let folders = settings.favouriteFolders.filter { seen.insert($0.path).inserted }
         func folderChildren(_ id: ActionID) -> [Slice] {
-            folders.map {
+            // Reserve a slot for Choose… so it stays reachable; cap the whole ring.
+            ring("actions.\(id.rawValue)", folders.map {
                 child("actions.\(id.rawValue).\($0.path)", $0.lastPathComponent, .action(id, .folder($0)))
             } + [Slice(id: "actions.\(id.rawValue).choose", title: "Choose…",
-                       action: .action(id, nil), editor: .chooseFolder)]
+                       action: .action(id, nil), editor: .chooseFolder)])
         }
         let paths = [PathStyle.posix, .uri].map {
             child("actions.copyPath.\($0.rawValue)", $0.title, .action(.copyPath, .pathStyle($0)))
@@ -268,7 +284,7 @@ public enum SliceCatalog {
     }
 
     private static func fitChildren(parent: String, presets: [Int64]) -> [Slice] {
-        presets.map {
+        unique(presets).map {
             child("\(parent).fit.\($0)", "Under \(byteTitle($0))", .tool(.compress, .compress(.fitUnder($0))))
         }
     }

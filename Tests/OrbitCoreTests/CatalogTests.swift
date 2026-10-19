@@ -107,7 +107,40 @@ private func allIDs(_ c: WheelContent) -> [String] {
 // Controller rulings R5/R6 and extras.
 @Test func imageToolsNeverNeedFFmpeg() { #expect(!titles(.tools, ["a.webp"], .none).isEmpty) }
 @Test func chooseFolderAppearsForMany() { #expect(childTitles(.actions, ["a.png","b.png"], "MOVE TO", .none).last == "Choose…") }
-@Test func readHelperGatesTools() { #expect(content(.tools, ["a.pptx"], .none).hubMessage == "Install Keynote to edit PPTX") }
+@Test func readHelperDoesNotGateToollessSelections() {
+    #expect(content(.tools, ["a.pptx"], .none).hubMessage == "No tools for PPTX files")
+    #expect(content(.tools, ["a.png","b.pages"], .none).hubMessage == "No tool fits every file")
+    #expect(content(.tools, ["a.mkv"], .none).hubMessage == "Install ffmpeg to edit MKV")
+}
+@Test func multiFormatConvertOrderIsDropOrderIndependent() {
+    let expected = ["JPG","PNG","HEIC","WEBP","TIFF","AVIF","BMP","GIF","ICO","PDF"]
+    #expect(titles(.convert, ["a.png","b.jpg"], .everything) == expected)
+    #expect(titles(.convert, ["b.jpg","a.png"], .everything) == expected)
+    #expect(titles(.convert, ["a.mov","b.mp4"], .everything) == ["MP4","MOV","MKV","WEBM","AVI","WMV","GIF","M4A","MP3"])
+    #expect(titles(.convert, ["b.mp4","a.mov"], .everything) == titles(.convert, ["a.mov","b.mp4"], .everything))
+}
+@Test func manyFavouriteFoldersAreCapped() {
+    let folders = (0..<12).map { URL(fileURLWithPath: "/Users/test/F\($0)", isDirectory: true) }
+    let c = SliceCatalog.content(for: [item("a.xyz")], wheel: .actions, capabilities: .none,
+                                 settings: CatalogSettings(favouriteFolders: folders))
+    for title in ["COPY TO", "MOVE TO"] {
+        let kids = c.slices.first { $0.title == title }!.children
+        #expect(kids.count <= 10 && kids.last?.title == "MORE")
+    }
+    let ids = allIDs(c)
+    #expect(Set(ids).count == ids.count)
+}
+@Test func duplicatePresetsDoNotDuplicateIDs() {
+    let st = CatalogSettings(favouriteFolders: [desktop, desktop],
+                             imageFitPresets: [500_000, 500_000, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                             videoFitPresets: [1_000_000, 1_000_000], pdfFitPresets: [1_000_000, 1_000_000])
+    for name in ["a.png", "a.mp4", "a.pdf"] {
+        let c = SliceCatalog.content(for: [item(name)], wheel: .tools, capabilities: .everything, settings: st)
+        let ids = allIDs(c)
+        #expect(Set(ids).count == ids.count)
+        #expect(c.slices.first { $0.title == "COMPRESS" }!.children.count <= 10)
+    }
+}
 @Test func idsUniqueAcrossFiles() {
     for names in [["a.mp4"], ["a.wav"], ["a.pdf"], ["a.pdf","b.pdf"], ["a.png","b.pdf"]] {
         let ids = allIDs(content(.tools, names, .everything))
