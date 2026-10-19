@@ -63,6 +63,10 @@ public enum Archiver {
     }
 
     /// Unpacks `archive` into a new folder inside `temp`.
+    ///
+    /// Safety note: this relies on the defaults of ditto and bsdtar, which skip `../` and absolute
+    /// entries and do not write through symlinks planted by the archive. Do not add flags that
+    /// change that (for example tar `-P`); ArchiveTests pins it with hostile zip and tar fixtures.
     public static func unpack(_ archive: DroppedItem, temp: URL) async throws -> Unpacked {
         try Task.checkCancellation()
         let folder = temp.appending(path: "x", directoryHint: .isDirectory)

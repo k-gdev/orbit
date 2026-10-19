@@ -109,4 +109,67 @@ import Testing
         let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
         #expect(Set(names) == ["fallback", "broken.zip"])
     }
+
+    // MARK: Hostile archives
+    // Archiver.unpack relies on the safe defaults of bsdtar and ditto (they refuse `../` and absolute
+    // entries and do not follow symlinks planted by the archive). These tests pin that behaviour.
+
+    /// A sandbox shaped like a job: `base/jobs/temp` is the temp directory, and `base` must stay
+    /// free of anything but `jobs`, with `root` unchanged, after a hostile archive is unpacked.
+    private func unpackHostile(_ build: (URL, URL) -> URL, ext: String, abs: URL) async -> (unpacked: [String]?, base: URL, before: Set<String>) {
+        let base = root.appending(path: "sandbox-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let temp = base.appending(path: "jobs/temp", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let archive = build(base, abs)
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        let unpacked = try? await Archiver.unpack(DroppedItem(url: archive), temp: temp)
+        return (unpacked?.items.map(\.lastPathComponent), base, before)
+    }
+
+    private func assertContained(_ r: (unpacked: [String]?, base: URL, before: Set<String>), abs: URL, sourceLocation: SourceLocation = #_sourceLocation) {
+        let fm = FileManager.default
+        let baseKids = Set((try? fm.contentsOfDirectory(atPath: r.base.path)) ?? [])
+        #expect(baseKids.subtracting(["jobs", "hostile"]).isEmpty, "escaped into base: \(baseKids)", sourceLocation: sourceLocation)
+        #expect(Set((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).subtracting(r.before).isEmpty,
+                "escaped into the folder above base", sourceLocation: sourceLocation)
+        #expect(!fm.fileExists(atPath: abs.path), "absolute entry was written", sourceLocation: sourceLocation)
+        let jobsKids = (try? fm.contentsOfDirectory(atPath: r.base.appending(path: "jobs").path)) ?? []
+        #expect(jobsKids == ["temp"], "escaped into jobs: \(jobsKids)", sourceLocation: sourceLocation)
+    }
+
+    @Test func zipWithDotDotAndAbsoluteEntriesStaysInside() async throws {
+        let abs = root.appending(path: "abs-zip-\(UUID().uuidString).txt")
+        let r = await unpackHostile({ base, abs in
+            let a = base.deletingLastPathComponent().appending(path: "hostile-\(UUID().uuidString).zip")
+            Fixtures.hostileZip([("ok.txt", "ok"), ("../../../escape-up.txt", "x"), ("../../../../escape-up2.txt", "x"),
+                                 (abs.path, "x")], at: a)
+            return a
+        }, ext: "zip", abs: abs)
+        assertContained(r, abs: abs)
+        try? FileManager.default.removeItem(at: abs)
+    }
+
+    @Test func tarWithDotDotAbsoluteAndSymlinkEntriesStaysInside() async throws {
+        let abs = root.appending(path: "abs-tar-\(UUID().uuidString).txt")
+        let outside = root.appending(path: "outside-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let r = await unpackHostile({ base, abs in
+            let a = base.deletingLastPathComponent().appending(path: "hostile-\(UUID().uuidString).tar")
+            Fixtures.hostileTar([
+                .init(name: "ok.txt", link: nil, data: "ok"),
+                .init(name: "../../../escape-up.txt", link: nil, data: "x"),
+                .init(name: abs.path, link: nil, data: "x"),
+                .init(name: "link", link: outside.path, data: ""),
+                .init(name: "link/through.txt", link: nil, data: "x"),
+                .init(name: "uplink", link: "../../..", data: ""),
+                .init(name: "uplink/through2.txt", link: nil, data: "x"),
+            ], at: a)
+            return a
+        }, ext: "tar", abs: abs)
+        assertContained(r, abs: abs)
+        #expect((try FileManager.default.contentsOfDirectory(atPath: outside.path)).isEmpty,
+                "a file was written through a symlink")
+        try? FileManager.default.removeItem(at: abs)
+        try? FileManager.default.removeItem(at: outside)
+    }
 }
