@@ -26,6 +26,20 @@ import Testing
         #expect(px(img, 5, 95) == .white)
     }
 
+    @Test func fractionalBlackoutCoversEveryTouchedPixelExactly() throws {
+        // x 10.5..<60.5, y 10.25..<40.75: the integral rect is x 10..<61, y 10..<41.
+        let img = try MarkupRenderer.render(Fixtures.editWhite(200, 100),
+                                            MarkupDocument(elements: [.blackout(CGRect(x: 10.5, y: 10.25, width: 50, height: 30.5))]))
+        #expect(px(img, 10, 20) == .black)
+        #expect(px(img, 60, 20) == .black)
+        #expect(px(img, 30, 10) == .black)
+        #expect(px(img, 30, 40) == .black)
+        #expect(px(img, 9, 20) == .white)
+        #expect(px(img, 61, 20) == .white)
+        #expect(px(img, 30, 9) == .white)
+        #expect(px(img, 30, 41) == .white)
+    }
+
     @Test func cropThenResize() throws {
         let img = try MarkupRenderer.render(Fixtures.editWhite(200, 100),
                                             MarkupDocument(crop: CGRect(x: 0, y: 0, width: 100, height: 50),

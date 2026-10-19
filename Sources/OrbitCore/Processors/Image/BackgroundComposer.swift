@@ -8,7 +8,7 @@ public enum BackgroundComposer {
     public static func compose(subject: CGImage, original: CGImage?, style: BackgroundStyle) throws -> CGImage {
         let w = subject.width, h = subject.height
         let rect = CGRect(x: 0, y: 0, width: w, height: h)
-        let ctx = try MarkupRenderer.makeContext(width: w, height: h, opaque: true)
+        let ctx = try ImageBitmap.makeContext(width: w, height: h, opaque: true)
 
         // Translucent backgrounds land on white so the output stays opaque.
         ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
@@ -16,11 +16,11 @@ public enum BackgroundComposer {
 
         switch style {
         case .solid(let color):
-            ctx.setFillColor(MarkupRenderer.cgColor(color))
+            ctx.setFillColor(ImageBitmap.cgColor(color))
             ctx.fill(rect)
         case .gradient(let top, let bottom):
             let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-            let colors = [MarkupRenderer.cgColor(top), MarkupRenderer.cgColor(bottom)] as CFArray
+            let colors = [ImageBitmap.cgColor(top), ImageBitmap.cgColor(bottom)] as CFArray
             guard let gradient = CGGradient(colorsSpace: space, colors: colors, locations: [0, 1]) else {
                 throw OrbitError.unsupported("Orbit couldn't draw this background.")
             }

@@ -29,7 +29,7 @@ public enum ImageCompressor {
         }
 
         var image = try ImageFile.loadOriented(src)
-        if format == .jpg, ImageFile.hasAlpha(image) { image = try flattened(image) }
+        if format == .jpg, ImageFile.hasAlpha(image) { image = try ImageBitmap.flattenedOnWhite(image) }
         let properties = ImageConverter.carriedProperties(from: ImageFile.properties(src), for: format)
         let isLossy = lossy.contains(format)
 
@@ -87,32 +87,11 @@ public enum ImageCompressor {
         return data as Data
     }
 
-    private static func context(width: Int, height: Int, opaque: Bool) throws -> CGContext {
-        let info = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
-        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: info) else {
-            throw OrbitError.unsupported("Orbit couldn't prepare this image.")
-        }
-        ctx.interpolationQuality = .high
-        return ctx
-    }
-
     private static func scaled(_ image: CGImage, by factor: Double) throws -> CGImage {
         let w = max(1, Int((Double(image.width) * factor).rounded()))
         let h = max(1, Int((Double(image.height) * factor).rounded()))
-        let ctx = try context(width: w, height: h, opaque: !ImageFile.hasAlpha(image))
+        let ctx = try ImageBitmap.makeContext(width: w, height: h, opaque: !ImageFile.hasAlpha(image))
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let result = ctx.makeImage() else { throw OrbitError.unsupported("Orbit couldn't prepare this image.") }
-        return result
-    }
-
-    private static func flattened(_ image: CGImage) throws -> CGImage {
-        let ctx = try context(width: image.width, height: image.height, opaque: true)
-        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(rect)
-        ctx.draw(image, in: rect)
         guard let result = ctx.makeImage() else { throw OrbitError.unsupported("Orbit couldn't prepare this image.") }
         return result
     }

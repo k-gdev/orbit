@@ -120,7 +120,7 @@ public struct ImageProcessor: Processor {
                            edit: (CGImage) throws -> CGImage) throws -> URL {
         let format = OutputFormat(rawValue: item.formatKey).flatMap { Self.editFormats.contains($0) ? $0 : nil } ?? .png
         var image = try edit(try ImageFile.loadOriented(item.url))
-        if format == .jpg || format == .bmp { image = try Self.opaque(image) }
+        if format == .jpg || format == .bmp { image = try ImageBitmap.flattenedOnWhite(image) }
         let quality: Double? = switch format {
         case .jpg: context.options.jpegQuality
         case .heic: context.options.heicQuality
@@ -146,7 +146,7 @@ public struct ImageProcessor: Processor {
     /// True when at least one pixel is not fully opaque.
     static func hasTransparentPixels(_ image: CGImage) -> Bool {
         guard ImageFile.hasAlpha(image),
-              let ctx = try? MarkupRenderer.makeContext(width: image.width, height: image.height, opaque: false),
+              let ctx = try? ImageBitmap.makeContext(width: image.width, height: image.height, opaque: false),
               let data = ctx.data else { return false }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         let bytes = data.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * image.height)
@@ -155,16 +155,6 @@ public struct ImageProcessor: Processor {
             for x in 0..<image.width where bytes[row + x * 4 + 3] != 255 { return true }
         }
         return false
-    }
-
-    private static func opaque(_ image: CGImage) throws -> CGImage {
-        let ctx = try MarkupRenderer.makeContext(width: image.width, height: image.height, opaque: true)
-        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(rect)
-        ctx.draw(image, in: rect)
-        guard let result = ctx.makeImage() else { throw OrbitError.unsupported("Orbit couldn't prepare this image.") }
-        return result
     }
 
     private static func compressTarget(preset: Preset?, parameters: ToolParameters) throws -> CompressTarget {

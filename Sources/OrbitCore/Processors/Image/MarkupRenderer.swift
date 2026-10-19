@@ -13,13 +13,13 @@ public enum MarkupRenderer {
         var result = image
 
         if !document.elements.isEmpty {
-            let ctx = try makeContext(width: image.width, height: image.height, opaque: opaque)
+            let ctx = try ImageBitmap.makeContext(width: image.width, height: image.height, opaque: opaque)
             ctx.draw(image, in: bounds)
             // From here on, coordinates are pixels with the origin at the top left.
             ctx.translateBy(x: 0, y: CGFloat(image.height))
             ctx.scaleBy(x: 1, y: -1)
             for element in document.elements { draw(element, in: ctx) }
-            guard let marked = ctx.makeImage() else { throw failure }
+            guard let marked = ctx.makeImage() else { throw ImageBitmap.failure }
             result = marked
         }
 
@@ -35,30 +35,14 @@ public enum MarkupRenderer {
             let w = Int(size.width.rounded()), h = Int(size.height.rounded())
             guard w >= 1, h >= 1 else { throw OrbitError.unsupported("The new size must be at least 1 pixel.") }
             if w != result.width || h != result.height {
-                let ctx = try makeContext(width: w, height: h, opaque: opaque)
+                let ctx = try ImageBitmap.makeContext(width: w, height: h, opaque: opaque)
                 ctx.interpolationQuality = .high
                 ctx.draw(result, in: CGRect(x: 0, y: 0, width: w, height: h))
-                guard let resized = ctx.makeImage() else { throw failure }
+                guard let resized = ctx.makeImage() else { throw ImageBitmap.failure }
                 result = resized
             }
         }
         return result
-    }
-
-    private static let failure = OrbitError.unsupported("Orbit couldn't draw on this image.")
-
-    /// An sRGB 8-bit bitmap context.
-    static func makeContext(width: Int, height: Int, opaque: Bool) throws -> CGContext {
-        let info = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
-        guard width > 0, height > 0,
-              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: info) else { throw failure }
-        return ctx
-    }
-
-    static func cgColor(_ c: RGBA) -> CGColor {
-        CGColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: c.a)
     }
 
     private static func draw(_ element: MarkupElement, in ctx: CGContext) {
@@ -67,11 +51,12 @@ public enum MarkupRenderer {
         switch element {
         case .blackout(let rect):
             ctx.setBlendMode(.normal)
+            ctx.setShouldAntialias(false)
             ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
-            ctx.fill(rect)
+            ctx.fill(rect.standardized.integral)
 
         case .box(let rect, let color, let width):
-            ctx.setStrokeColor(cgColor(color))
+            ctx.setStrokeColor(ImageBitmap.cgColor(color))
             ctx.setLineWidth(width)
             ctx.setLineJoin(.miter)
             ctx.stroke(rect)
@@ -83,8 +68,8 @@ public enum MarkupRenderer {
             let ux = dx / length, uy = dy / length
             let head = min(max(width * 4, 14), length)
             let base = CGPoint(x: to.x - ux * head * 0.8, y: to.y - uy * head * 0.8)
-            ctx.setStrokeColor(cgColor(color))
-            ctx.setFillColor(cgColor(color))
+            ctx.setStrokeColor(ImageBitmap.cgColor(color))
+            ctx.setFillColor(ImageBitmap.cgColor(color))
             ctx.setLineWidth(width)
             ctx.setLineCap(.round)
             ctx.move(to: from)
@@ -99,8 +84,8 @@ public enum MarkupRenderer {
 
         case .marker(let points, let color, let width):
             guard let first = points.first else { return }
-            ctx.setStrokeColor(cgColor(color))
-            ctx.setFillColor(cgColor(color))
+            ctx.setStrokeColor(ImageBitmap.cgColor(color))
+            ctx.setFillColor(ImageBitmap.cgColor(color))
             ctx.setLineWidth(width)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
@@ -112,11 +97,11 @@ public enum MarkupRenderer {
             }
 
         case .text(let string, let origin, let size, let color):
-            drawText(string, topLeft: origin, size: size, color: cgColor(color), in: ctx)
+            drawText(string, topLeft: origin, size: size, color: ImageBitmap.cgColor(color), in: ctx)
 
         case .step(let number, let center, let color):
             let r = stepDiameter / 2
-            ctx.setFillColor(cgColor(color))
+            ctx.setFillColor(ImageBitmap.cgColor(color))
             ctx.fillEllipse(in: CGRect(x: center.x - r, y: center.y - r, width: stepDiameter, height: stepDiameter))
             drawText(String(number), centeredAt: center, size: 20, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
                      bold: true, in: ctx)
