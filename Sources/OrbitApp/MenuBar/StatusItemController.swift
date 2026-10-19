@@ -8,12 +8,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let settings: SettingsStore
     private let wheel: WheelController
     private let coordinator: JobCoordinator
+    private let showSettings: () -> Void
     private var debugItem: NSMenuItem?
     private var enabledItem: NSMenuItem?
     private var recentItem: NSMenuItem?
     private var cancellables: Set<AnyCancellable> = []
 
-    init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController) {
+    init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController, showSettings: @escaping () -> Void) {
+        self.showSettings = showSettings
         self.settings = settings
         self.coordinator = coordinator
         self.wheel = wheel
@@ -41,6 +43,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let about = NSMenuItem(title: "About Orbit", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
+        let prefs = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
         menu.addItem(.separator())
         let enabled = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
         enabled.target = self
@@ -129,6 +134,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    @objc private func openSettings() {
+        showSettings()
     }
 
     @objc private func quit() {
