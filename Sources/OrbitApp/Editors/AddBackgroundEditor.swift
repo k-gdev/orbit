@@ -24,6 +24,8 @@ final class BackgroundModel: ObservableObject {
     @Published private(set) var status = Status.loading
     @Published private(set) var image: EditorImage?
     @Published private(set) var preview: CGImage?
+    /// Why the last preview render failed; nil when it succeeded. The preview area shows it.
+    @Published private(set) var previewError: String?
     @Published var mode = Mode.solid { didSet { scheduleRender() } }
     @Published var solid = Color.white { didSet { scheduleRender() } }
     @Published var gradientTop = Color(red: 1, green: 0.78, blue: 0.35) { didSet { scheduleRender() } }
@@ -32,6 +34,10 @@ final class BackgroundModel: ObservableObject {
 
     private var subject: CGImage?
     private var loop: PreviewLoop?
+    /// Composes the preview; replaced in the live check to make a render fail.
+    var composer: @Sendable (CGImage, CGImage, OrbitCore.BackgroundStyle) throws -> CGImage = {
+        try BackgroundComposer.compose(subject: $0, original: $1, style: $2)
+    }
 
     /// The style for the proxy preview.
     private var previewStyle: OrbitCore.BackgroundStyle {
@@ -81,14 +87,25 @@ final class BackgroundModel: ObservableObject {
     func scheduleRender() {
         guard let original = image?.proxy, let subject else { return }
         let style = previewStyle
-        if loop == nil { loop = PreviewLoop { [weak self] in self?.preview = $0 } }
-        loop?.submit { try? BackgroundComposer.compose(subject: subject, original: original, style: style) }
+        let compose = composer
+        if loop == nil { loop = PreviewLoop { [weak self] in self?.receive($0) } }
+        loop?.submit { try compose(subject, original, style) }
+    }
+
+    private func receive(_ result: Result<CGImage, Error>) {
+        switch result {
+        case .success(let image):
+            preview = image
+            previewError = nil
+        case .failure(let error):
+            previewError = "Couldn't render the preview: \(error.localizedDescription)"
+        }
     }
 
     /// Renders synchronously (headless snapshots).
     func renderNow() {
         guard let original = image?.proxy, let subject else { return }
-        preview = try? BackgroundComposer.compose(subject: subject, original: original, style: previewStyle)
+        receive(Result { try composer(subject, original, previewStyle) })
     }
 }
 
@@ -134,7 +151,9 @@ struct AddBackgroundEditor: View {
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
             case .ready:
-                EmptyView()
+                if let error = model.previewError {
+                    PreviewErrorBanner(message: error).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
             }
         }
         .frame(height: 280)

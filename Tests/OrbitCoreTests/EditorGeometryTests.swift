@@ -152,4 +152,23 @@ import Testing
         #expect(EditorGeometry.centeredRect(aspect: 4.0 / 3.0, within: CGSize(width: 100, height: 200))
             == CGRect(x: 0, y: 63, width: 100, height: 75))
     }
+
+    // A panel measured at zero height is invisible (the fix-round-1 defect), so the size is never empty.
+
+    @Test func panelSizeUsesTheMeasuredHeight() {
+        #expect(EditorGeometry.panelSize(width: 480, measuredHeight: 612) == CGSize(width: 480, height: 612))
+    }
+
+    @Test func panelSizeNeverCollapsesToZeroHeight() {
+        for measured in [0, 1, 40, -5, CGFloat.nan, CGFloat.infinity] as [CGFloat] {
+            let size = EditorGeometry.panelSize(width: 480, measuredHeight: measured)
+            #expect(size.width == 480)
+            #expect(size.height >= EditorGeometry.minimumPanelHeight)
+            #expect(size.height.isFinite)
+        }
+    }
+
+    @Test func panelSizeNeverCollapsesToZeroWidth() {
+        #expect(EditorGeometry.panelSize(width: 0, measuredHeight: 300).width >= 1)
+    }
 }

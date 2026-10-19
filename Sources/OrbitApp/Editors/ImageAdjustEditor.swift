@@ -10,10 +10,14 @@ final class AdjustModel: ObservableObject {
     @Published var loadError: String?
     @Published var settings = AdjustSettings() { didSet { scheduleRender() } }
     @Published private(set) var preview: CGImage?
+    /// Why the last preview render failed; nil when it succeeded. The preview area shows it.
+    @Published private(set) var previewError: String?
     /// True while the pointer is held down on the preview.
     @Published var showOriginal = false
 
     private var loop: PreviewLoop?
+    /// Renders the preview; replaced in the live check to make a render fail.
+    var renderer: @Sendable (CGImage, AdjustSettings) throws -> CGImage = { try AdjustRenderer.render($0, $1) }
 
     var isIdentity: Bool { settings == AdjustSettings() }
 
@@ -29,14 +33,25 @@ final class AdjustModel: ObservableObject {
     func scheduleRender() {
         guard let source = image?.proxy else { return }
         let current = settings
-        if loop == nil { loop = PreviewLoop { [weak self] in self?.preview = $0 } }
-        loop?.submit { try? AdjustRenderer.render(source, current) }
+        let render = renderer
+        if loop == nil { loop = PreviewLoop { [weak self] in self?.receive($0) } }
+        loop?.submit { try render(source, current) }
+    }
+
+    private func receive(_ result: Result<CGImage, Error>) {
+        switch result {
+        case .success(let image):
+            preview = image
+            previewError = nil
+        case .failure(let error):
+            previewError = "Couldn't render the preview: \(error.localizedDescription)"
+        }
     }
 
     /// Renders synchronously (headless snapshots).
     func renderNow() {
         guard let image else { return }
-        preview = try? AdjustRenderer.render(image.proxy, settings)
+        receive(Result { try renderer(image.proxy, settings) })
     }
 
     /// Size of the result in pixels, after any quarter turn.
@@ -105,6 +120,8 @@ struct ImageAdjustEditor: View {
                 }
                 if let error = model.loadError {
                     Text(error).font(.system(size: 13)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error = model.previewError {
+                    PreviewErrorBanner(message: error).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
             }
             .frame(height: 280)

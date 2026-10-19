@@ -28,7 +28,8 @@ enum EditorRouter {
         case .imageMarkup:
             let images = imageItems(in: items)
             guard !images.isEmpty else { return coordinator.showError(notBuilt) }
-            openMarkup(images, index: 0, action: action, coordinator: coordinator, center: nil)
+            openMarkup(images, index: 0, action: action, options: { coordinator.settings.jobOptions },
+                       submit: { coordinator.run($0, near: NSEvent.mouseLocation) }, center: nil)
         case .imageAdjust:
             openAdjust(items, action: action, coordinator: coordinator)
         case .addBackground:
@@ -44,27 +45,29 @@ enum EditorRouter {
 
     /// Markup is per image (its marks, crop and size are in that image's pixels): with several images the
     /// editor opens for each in turn, in the same place, after Apply. Closing it with × stops the run.
-    private static func openMarkup(_ images: [DroppedItem], index: Int, action: SliceAction,
-                                   coordinator: JobCoordinator, center: CGPoint?) {
+    /// `submit` runs the job (the coordinator's `run`); the live check passes a recorder.
+    @discardableResult
+    static func openMarkup(_ images: [DroppedItem], index: Int, action: SliceAction, options: @escaping () -> JobOptions,
+                           submit: @escaping (JobRequest) -> Void, center: CGPoint?) -> EditorWindowController {
         let item = images[index]
         let model = MarkupModel()
         let next = Box<CGPoint?>(nil)
         let title = images.count > 1 ? "Markup \(index + 1) of \(images.count)" : "Markup"
-        let window = Box<EditorWindowController?>(nil)
-        window.value = EditorWindowController.present(width: ImageMarkupEditor.width, center: center, onClose: {
+        // Nothing here may hold the controller strongly: the hosting view (owned by the controller's panel) keeps these
+        // closures, so a strong reference would leak the controller, panel, model and proxy on every session.
+        let controller = EditorWindowController.present(width: ImageMarkupEditor.width, center: center, onClose: {
             if let point = next.value, index + 1 < images.count {
-                openMarkup(images, index: index + 1, action: action, coordinator: coordinator, center: point)
+                openMarkup(images, index: index + 1, action: action, options: options, submit: submit, center: point)
             }
-        }, content: { close in
+        }, content: { close, center in
             ImageMarkupEditor(title: title, model: model, onClose: close, onApply: { document in
-                let request = JobRequest(items: [item], action: action, parameters: .markup(document),
-                                         options: coordinator.settings.jobOptions)
-                coordinator.run(request, near: NSEvent.mouseLocation)
-                next.value = window.value?.center
+                submit(JobRequest(items: [item], action: action, parameters: .markup(document), options: options()))
+                next.value = center()
                 close()
             })
         })
         Task { await model.load(item.url) }
+        return controller
     }
 
     private static func openAdjust(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
@@ -72,7 +75,7 @@ enum EditorRouter {
         guard let first = images.first else { return coordinator.showError(notBuilt) }
         let model = AdjustModel()
         let title = images.count > 1 ? "Adjust \(images.count) Photos" : "Adjust Photo"
-        EditorWindowController.present(width: ImageAdjustEditor.width, content: { close in
+        EditorWindowController.present(width: ImageAdjustEditor.width, content: { close, _ in
             ImageAdjustEditor(title: title, model: model, onClose: close, onApply: { settings in
                 let request = JobRequest(items: images, action: action, parameters: .adjust(settings),
                                          options: coordinator.settings.jobOptions)
@@ -88,7 +91,7 @@ enum EditorRouter {
         guard let first = images.first else { return coordinator.showError(notBuilt) }
         let model = BackgroundModel()
         let title = images.count > 1 ? "Add Background to \(images.count)" : "Add Background"
-        EditorWindowController.present(width: AddBackgroundEditor.width, content: { close in
+        EditorWindowController.present(width: AddBackgroundEditor.width, content: { close, _ in
             AddBackgroundEditor(title: title, model: model, onClose: close, onApply: { style in
                 let request = JobRequest(items: images, action: action, parameters: .background(style),
                                          options: coordinator.settings.jobOptions)

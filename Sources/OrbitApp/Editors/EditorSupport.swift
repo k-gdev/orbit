@@ -88,26 +88,40 @@ extension RGBA {
 /// Renders previews off the main thread. Requests made while one is rendering collapse into the latest one.
 @MainActor
 final class PreviewLoop {
-    private struct Box: @unchecked Sendable { let image: CGImage? }
+    private struct Outcome: @unchecked Sendable { let result: Result<CGImage, Error> }
 
     private var rendering = false
-    private var pending: (@Sendable () -> CGImage?)?
-    private let deliver: (CGImage) -> Void
+    private var pending: (@Sendable () throws -> CGImage)?
+    private let deliver: (Result<CGImage, Error>) -> Void
 
-    init(deliver: @escaping (CGImage) -> Void) { self.deliver = deliver }
+    /// `deliver` gets every finished render, or the error it failed with (so a failure is shown, not swallowed).
+    init(deliver: @escaping (Result<CGImage, Error>) -> Void) { self.deliver = deliver }
 
-    func submit(_ work: @escaping @Sendable () -> CGImage?) {
+    func submit(_ work: @escaping @Sendable () throws -> CGImage) {
         pending = work
         guard !rendering else { return }
         rendering = true
         Task {
             while let work = pending {
                 pending = nil
-                let result = await Task.detached(priority: .userInitiated) { Box(image: work()) }.value
-                if let image = result.image { deliver(image) }
+                let outcome = await Task.detached(priority: .userInitiated) { Outcome(result: Result { try work() }) }.value
+                deliver(outcome.result)
             }
             rendering = false
         }
+    }
+}
+
+/// What the preview area says when a render fails.
+struct PreviewErrorBanner: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 12, weight: .medium)).multilineTextAlignment(.center)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.regularMaterial))
+            .padding(10)
     }
 }
 

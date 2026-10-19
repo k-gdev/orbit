@@ -119,6 +119,20 @@ public enum EditorGeometry {
         return CGSize(width: w, height: max(1, (w * original.height / original.width).rounded()))
     }
 
+    /// An editor panel is never shorter than this: a measured height below it means the measurement failed.
+    public static let minimumPanelHeight: CGFloat = 120
+    /// The height used when the content could not be measured.
+    public static let fallbackPanelHeight: CGFloat = 480
+
+    /// The size of an editor panel `width` wide whose content measured `measuredHeight`. A measurement that is not
+    /// finite or is below `minimumPanelHeight` (a hosting view with no sizing options measures 0) falls back to
+    /// `fallbackPanelHeight`, so the panel can never open with an empty frame.
+    public static func panelSize(width: CGFloat, measuredHeight: CGFloat) -> CGSize {
+        let w = width.isFinite ? max(1, width) : 1
+        let usable = measuredHeight.isFinite && measuredHeight >= minimumPanelHeight
+        return CGSize(width: w, height: usable ? measuredHeight : fallbackPanelHeight)
+    }
+
     /// The size with this height and the original's aspect ratio (at least 1 × 1).
     public static func size(forHeight height: Double, keepingAspectOf original: CGSize) -> CGSize {
         guard original.width > 0, original.height > 0 else { return CGSize(width: 1, height: max(1, height.rounded())) }
