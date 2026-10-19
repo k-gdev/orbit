@@ -436,6 +436,39 @@ private func peakDB(_ s: [Float]) -> Double {
         #expect(await AudioMetadata.read(o, ffmpeg: ff).first { $0.key == .title }?.value == "Keep Me")
     }
 
+    /// Ogg and Opus keep their tags on the audio stream rather than the file, so they need their own check.
+    private func streamTagged(_ f: OutputFormat, title: String, artist: String? = nil) async throws -> URL {
+        let out = root.appending(path: "tagged-\(UUID().uuidString.prefix(6)).\(f.fileExtension)")
+        var tags = ["-metadata", "title=\(title)"]
+        if let artist { tags += ["-metadata", "artist=\(artist)"] }
+        try await ff.run(inputs: [tone("src-\(UUID().uuidString.prefix(6)).wav", amplitude: 0.1)],
+                         args: FFmpegRecipes.args(for: f) + tags, output: out, duration: nil, progress: { _ in })
+        return out
+    }
+
+    @Test(.enabled(if: Fixtures.hasFFmpeg), arguments: [OutputFormat.ogg, .opus])
+    func ffmpegEncodedOggAndOpusResultsKeepTheirStreamTags(f: OutputFormat) async throws {
+        let src = try await streamTagged(f, title: "Stream Title", artist: "Stream Artist")
+        #expect(await AudioMetadata.read(src, ffmpeg: ff).first { $0.key == .title }?.value == "Stream Title")
+        for (id, preset) in [(ToolID.normalize, nil), (.channels, Preset.channels(.toMono))] as [(ToolID, Preset?)] {
+            let o = try await tool(src, id, preset: preset)
+            #expect(o.pathExtension == f.fileExtension)
+            let fields = await AudioMetadata.read(o, ffmpeg: ff)
+            #expect(fields.first { $0.key == .title }?.value == "Stream Title")
+            #expect(fields.first { $0.key == .artist }?.value == "Stream Artist")
+        }
+    }
+
+    @Test(.enabled(if: Fixtures.hasFFmpeg), arguments: [OutputFormat.ogg, .opus])
+    func editingAnOggOrOpusTitleReplacesTheOldOne(f: OutputFormat) async throws {
+        let src = try await streamTagged(f, title: "Old Title", artist: "Band")
+        let o = try await tool(src, .metadata, .metadata(["title": "New Title", "album": "LP"]))
+        let fields = await AudioMetadata.read(o, ffmpeg: ff)
+        #expect(fields.first { $0.key == .title }?.value == "New Title")
+        #expect(fields.first { $0.key == .album }?.value == "LP")
+        #expect(fields.first { $0.key == .artist }?.value == "Band")
+    }
+
     @Test func toolsNeedFFmpegForFormatsOnlyItWrites() async throws {
         let wav = tone("g.wav", amplitude: 0.1)
         let fake = root.appending(path: "fake.mp3")

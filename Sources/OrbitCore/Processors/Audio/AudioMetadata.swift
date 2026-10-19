@@ -14,6 +14,8 @@ public enum AudioMetadata {
     private static let artworkIdentifiers: [AVMetadataIdentifier] = [.commonIdentifierArtwork, .iTunesMetadataCoverArt]
     private static let ffmpegKeys: [MetadataKey: String] = [.title: "title", .artist: "artist", .album: "album"]
     private static let labels: [MetadataKey: String] = [.title: "Title", .artist: "Artist", .album: "Album"]
+    /// Formats that keep their tags on the audio stream rather than on the file.
+    private static let streamTaggedFormats: Set<String> = ["ogg", "opus"]
     /// Formats ffmpeg can attach a picture to.
     private static let artworkFormats: Set<String> = ["mp3", "flac"]
 
@@ -197,7 +199,11 @@ public enum AudioMetadata {
             }
             args += ["-map_metadata", "0", "-c", "copy"]
             if item.formatKey == "mp3" { args += ["-id3v2_version", "3"] }
-            for (key, value) in tags { args += ["-metadata", "\(ffmpegKeys[key]!)=\(value)"] }
+            for (key, value) in tags {
+                args += ["-metadata", "\(ffmpegKeys[key]!)=\(value)"]
+                // Ogg and Opus write the tags already on the audio stream and ignore the file-level ones.
+                if streamTaggedFormats.contains(item.formatKey) { args += ["-metadata:s:a:0", "\(ffmpegKeys[key]!)=\(value)"] }
+            }
             let seconds = try? await ffmpeg.duration(of: item.url)
             try await ffmpeg.run(inputs: inputs, args: args, output: output, duration: seconds, progress: { _ in })
         }

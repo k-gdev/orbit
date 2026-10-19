@@ -136,7 +136,10 @@ public enum AudioTools {
             try write(to: processed, as: .wav, progress: work)
             let encodeKbps: Int? = { if case .compress = op { kbps } else { nil } }()
             try await ffmpeg.run(inputs: [processed, item.url],
-                                 args: ["-map", "0:a", "-map_metadata", "1"] + AudioConverter.recipe(for: format, kbps: encodeKbps),
+                                 // `-map_metadata 1` copies the file-level tags; Ogg and Opus keep theirs on the audio stream, so copy
+                                 // those too (harmless for formats without stream-level tags).
+                                 args: ["-map", "0:a", "-map_metadata", "1", "-map_metadata:s:a:0", "1:s:a:0"]
+                                     + AudioConverter.recipe(for: format, kbps: encodeKbps),
                                  output: output, duration: seconds,
                                  progress: { progress(1 - encodeShare + $0 * encodeShare) })
         }
