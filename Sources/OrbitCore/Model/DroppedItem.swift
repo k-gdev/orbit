@@ -39,6 +39,9 @@ public enum FileClassifier {
         "markdown": "md", "tar.gz": "tgz", "tgz": "tgz",
     ]
 
+    private static let isoBMFFExtensions: Set<String> = ["mp4", "m4v", "m4a", "mov", "heic", "avif"]
+    private static let isoBMFFSniffKeys: Set<String> = ["heic", "avif", "mov", "mp4", "m4a"]
+
     private static let zipBasedKeys: Set<String> = ["docx", "xlsx", "pptx", "epub", "ods", "pages", "key", "numbers"]
 
     public static func classify(_ url: URL) -> (type: UTType, category: FileCategory, formatKey: String) {
@@ -59,6 +62,8 @@ public enum FileClassifier {
         if let sniffed = sniff(url) {
             if sniffed == "zip" {
                 if !zipBasedKeys.contains(extKey) { key = "zip" }
+            } else if isoBMFFSniffKeys.contains(sniffed), isoBMFFExtensions.contains(extKey) {
+                // ISO-BMFF brands are ambiguous (an .m4a may carry isom): keep the extension.
             } else {
                 key = sniffed
             }

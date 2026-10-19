@@ -102,3 +102,36 @@ func classifiesByExtension(name: String, key: String, cat: FileCategory) {
     for k in ["mp4", "mov", "m4v", "m4a", "aac", "wav", "aiff", "flac"] { #expect(MediaSupport.isNativelyWritable(formatKey: k)) }
     for k in ["mkv", "mp3", "ogg", "png", "xyz"] { #expect(!MediaSupport.isNativelyWritable(formatKey: k)) }
 }
+
+private func writeFtyp(_ brand: String, to url: URL) throws {
+    var data = Data([0, 0, 0, 0x18]); data.append(Data("ftyp".utf8)); data.append(Data(brand.utf8)); data.append(Data(count: 4))
+    try data.write(to: url)
+}
+
+@Test func isomBrandedM4AStaysAudio() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appending(path: "a.m4a")
+    try writeFtyp("isom", to: url)
+    let item = DroppedItem(url: url)
+    #expect(item.formatKey == "m4a")
+    #expect(item.category == .audio)
+}
+
+@Test func mp42BrandedM4VStaysVideo() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appending(path: "a.m4v")
+    try writeFtyp("mp42", to: url)
+    let item = DroppedItem(url: url)
+    #expect(item.formatKey == "m4v")
+    #expect(item.category == .video)
+}
+
+@Test func extensionlessIsomSniffsToMP4() throws {
+    let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appending(path: "clip")
+    try writeFtyp("isom", to: url)
+    #expect(DroppedItem(url: url).formatKey == "mp4")
+    let jpg = dir.appending(path: "clip.jpg")
+    try writeFtyp("isom", to: jpg)
+    #expect(DroppedItem(url: jpg).formatKey == "mp4")
+}
