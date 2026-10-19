@@ -242,6 +242,37 @@ import Testing
         #expect(try String(contentsOf: existing, encoding: .utf8) == "mine")
     }
 
+    /// The iWork app only ever opens a private copy, so the user's own open window (and file) is
+    /// never exported from, re-pointed by Save As, or closed without saving.
+    @Test func bridgeOpensAPrivateCopy() async throws {
+        let deck = Fixtures.file("deck.key/Index.zip", "slides", in: root).deletingLastPathComponent()
+        let seen = SeenArguments()
+        let bridge = IWorkBridge(capabilities: .everything, runScript: { script, argv in
+            let copy = URL(fileURLWithPath: argv[0])
+            seen.record(argv: argv, script: script,
+                        content: try? String(contentsOf: copy.appending(path: "Index.zip"), encoding: .utf8))
+            return ""
+        })
+        try await bridge.export(deck, app: .keynote, format: .pdf, to: root.appending(path: "deck.pdf"))
+        let argv = try #require(seen.argv)
+        #expect(argv[0] != deck.path)
+        #expect(URL(fileURLWithPath: argv[0]).lastPathComponent == "deck.key")
+        #expect(seen.content == "slides")
+        #expect(argv[1] == root.appending(path: "deck.pdf").path)
+        #expect(!FileManager.default.fileExists(atPath: argv[0]), "the private copy is removed afterwards")
+        #expect(seen.script?.contains("with timeout of 1800 seconds") == true)
+        #expect(try String(contentsOf: deck.appending(path: "Index.zip"), encoding: .utf8) == "slides")
+    }
+
+    private final class SeenArguments: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: (argv: [String], script: String, content: String?)?
+        func record(argv: [String], script: String, content: String?) { lock.withLock { stored = (argv, script, content) } }
+        var argv: [String]? { lock.withLock { stored?.argv } }
+        var script: String? { lock.withLock { stored?.script } }
+        var content: String? { lock.withLock { stored?.content } }
+    }
+
     @Test func pagesScript() {
         let s = IWorkBridge.script(app: .pages, bundleID: "com.apple.Pages", format: .pdf)
         #expect(s.contains("tell application id \"com.apple.Pages\"") && s.contains("as PDF") && s.contains("on run argv") && !s.contains("/Users"))
