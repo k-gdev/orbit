@@ -6,6 +6,7 @@ MainActor.assumeIsolated {
     HUDSnapshot.runIfRequested(CommandLine.arguments)
     PerformCommand.runIfRequested(CommandLine.arguments)
     SettingsSnapshot.runIfRequested(CommandLine.arguments)
+    EditorSnapshot.runIfRequested(CommandLine.arguments)
 }
 
 let app = NSApplication.shared

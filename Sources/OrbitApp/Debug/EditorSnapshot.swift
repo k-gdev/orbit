@@ -1,0 +1,122 @@
+import AppKit
+import OrbitCore
+import SwiftUI
+
+/// Hidden command-line mode (rulings R21/R22): renders an image editor offscreen to a PNG.
+///
+///     Orbit --snapshot-editor <markup|adjust|addbg> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]
+///
+/// Uses sample edits on the given image and a flat glass stand-in; refuses to overwrite a PNG unless `--replace`.
+enum EditorSnapshot {
+    static let flag = "--snapshot-editor"
+    static let usage = "usage: Orbit --snapshot-editor <markup|adjust|addbg> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]"
+
+    struct Failure: Error, CustomStringConvertible { let description: String }
+
+    @MainActor
+    static func runIfRequested(_ arguments: [String]) {
+        guard let start = arguments.firstIndex(of: flag) else { return }
+        let args = Array(arguments[(start + 1)...])
+        guard args.count >= 3, ["markup", "adjust", "addbg"].contains(args[0]) else {
+            FileHandle.standardError.write(Data("\(usage)\n".utf8))
+            exit(64)
+        }
+        let input = URL(fileURLWithPath: args[1]), output = URL(fileURLWithPath: args[2])
+        let replace = args.dropFirst(3).contains("--replace")
+        let tool = args.firstIndex(of: "--tool").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        do {
+            try render(kind: args[0], image: input, to: output, replace: replace, tool: tool)
+            print("wrote \(output.path)")
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("snapshot failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    @MainActor
+    static func render(kind: String, image url: URL, to output: URL, replace: Bool, tool: String? = nil) throws {
+        guard output.pathExtension.lowercased() == "png" else { throw Failure(description: "output must be a .png") }
+        if FileManager.default.fileExists(atPath: output.path), !replace {
+            throw Failure(description: "\(output.path) exists (pass --replace to overwrite it)")
+        }
+        let editor: AnyView
+        let width: CGFloat
+        switch kind {
+        case "markup":
+            editor = AnyView(ImageMarkupEditor(title: "Markup", model: try markupModel(url, tool: tool), onClose: {}, onApply: { _ in }))
+            width = ImageMarkupEditor.width
+        case "adjust":
+            editor = AnyView(ImageAdjustEditor(title: "Adjust Photo", model: try adjustModel(url), onClose: {}, onApply: { _ in }))
+            width = ImageAdjustEditor.width
+        default:
+            editor = AnyView(AddBackgroundEditor(title: "Add Background", model: try backgroundModel(url), onClose: {}, onApply: { _ in }))
+            width = AddBackgroundEditor.width
+        }
+        let view = editor
+            .frame(width: width)
+            .padding(40)
+            .background(LinearGradient(colors: [Color(red: 0.94, green: 0.70, blue: 0.23), Color(red: 1.0, green: 0.42, blue: 0.33),
+                                                Color(red: 0.66, green: 0.61, blue: 0.85)],
+                                       startPoint: .topTrailing, endPoint: .bottomLeading))
+            .environment(\.glassRendering, .flat)
+            .environment(\.colorScheme, .light)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let rendered = renderer.cgImage,
+              let png = NSBitmapImageRep(cgImage: rendered).representation(using: .png, properties: [:]) else {
+            throw Failure(description: "rendering failed")
+        }
+        try png.write(to: output, options: replace ? .atomic : .withoutOverwriting)
+    }
+
+    // MARK: Sample edits
+
+    @MainActor
+    private static func markupModel(_ url: URL, tool: String?) throws -> MarkupModel {
+        let image = try EditorImage.load(url)
+        let model = MarkupModel()
+        model.set(image: image)
+        let w = image.pixelSize.width, h = image.pixelSize.height
+        let red = RGBA(r: 1, g: 0.23, b: 0.19, a: 1)
+        model.tool = .arrow
+        let line = 6 * max(max(w, h) / 1000, 0.6)
+        model.setElements([
+            .box(CGRect(x: w * 0.12, y: h * 0.40, width: w * 0.30, height: h * 0.30), color: red, width: line),
+            .arrow(from: CGPoint(x: w * 0.40, y: h * 0.25), to: CGPoint(x: w * 0.30, y: h * 0.42), color: red, width: line),
+            .step(1, at: CGPoint(x: w * 0.12, y: h * 0.40), color: red),
+            .text("Look here", at: CGPoint(x: w * 0.42, y: h * 0.18), size: 34 * max(max(w, h) / 1000, 0.6), color: red),
+            .blackout(CGRect(x: w * 0.62, y: h * 0.62, width: w * 0.24, height: h * 0.14)),
+        ])
+        model.setAspect(CropAspect.all[1])
+        switch tool {
+        case "resize": model.tool = .resize; model.setResize(percent: 50)
+        case "arrow": model.tool = .arrow
+        case "text": model.tool = .text
+        case "blackout": model.tool = .blackout
+        default: model.tool = .crop
+        }
+        return model
+    }
+
+    @MainActor
+    private static func adjustModel(_ url: URL) throws -> AdjustModel {
+        let model = AdjustModel()
+        model.image = try EditorImage.load(url)
+        model.settings = AdjustSettings(exposure: 0.3, contrast: 1.1, saturation: 1.25, warmth: 0.2)
+        model.renderNow()
+        return model
+    }
+
+    @MainActor
+    private static func backgroundModel(_ url: URL) throws -> BackgroundModel {
+        let image = try EditorImage.load(url)
+        let subject = image.hasTransparency ? image.proxy : try EditorImage.make(from: BackgroundRemover.cutout(url)).proxy
+        let model = BackgroundModel()
+        model.set(image: image, subject: subject)
+        model.mode = .gradient
+        model.renderNow()
+        return model
+    }
+}
