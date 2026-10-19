@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import OrbitCore
 
 @MainActor
@@ -6,23 +7,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let settings: SettingsStore
     private let wheel: WheelController
+    private let coordinator: JobCoordinator
     private var debugItem: NSMenuItem?
+    private var enabledItem: NSMenuItem?
+    private var recentItem: NSMenuItem?
+    private var cancellables: Set<AnyCancellable> = []
 
-    init(settings: SettingsStore = SettingsStore()) {
+    init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController) {
         self.settings = settings
+        self.coordinator = coordinator
+        self.wheel = wheel
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        wheel = WheelController(settings: settings)
         super.init()
-        Haptics.settings = settings
-        wheel.onSelect = { slice, _ in
-            Log.info("selected \(slice.id)") // Task 10 routes this to the job coordinator.
-        }
-        if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "circle.circle", accessibilityDescription: "Orbit")
-            image?.isTemplate = true
-            button.image = image
-        }
+        setIcon(busy: false)
+        coordinator.$activeJobCount
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] count in self?.setIcon(busy: count > 0) }
+            .store(in: &cancellables)
         statusItem.menu = makeMenu()
+    }
+
+    /// `circle.dotted` while a job runs, `circle.circle` otherwise.
+    private func setIcon(busy: Bool) {
+        guard let button = statusItem.button else { return }
+        let image = NSImage(systemSymbolName: busy ? "circle.dotted" : "circle.circle", accessibilityDescription: "Orbit")
+        image?.isTemplate = true
+        button.image = image
     }
 
     private func makeMenu() -> NSMenu {
@@ -31,6 +41,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let about = NSMenuItem(title: "About Orbit", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
+        menu.addItem(.separator())
+        let enabled = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
+        enabled.target = self
+        menu.addItem(enabled)
+        enabledItem = enabled
+        let recent = NSMenuItem(title: "Recent results", action: nil, keyEquivalent: "")
+        recent.submenu = NSMenu(title: "Recent results")
+        menu.addItem(recent)
+        recentItem = recent
         menu.addItem(.separator())
         let debug = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
         debug.submenu = makeDebugMenu()
@@ -48,12 +67,49 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let showWheel = NSMenuItem(title: "Show Wheel for File…", action: #selector(showWheelForFile), keyEquivalent: "")
         showWheel.target = self
         menu.addItem(showWheel)
+        let rescan = NSMenuItem(title: "Rescan Helpers", action: #selector(rescanHelpers), keyEquivalent: "")
+        rescan.target = self
+        menu.addItem(rescan)
         return menu
     }
 
     /// The Debug submenu appears only when ⌥ is held as the menu opens.
     func menuNeedsUpdate(_ menu: NSMenu) {
         debugItem?.isHidden = !NSEvent.modifierFlags.contains(.option)
+        enabledItem?.state = settings.isEnabled ? .on : .off
+        rebuildRecents()
+    }
+
+    private func rebuildRecents() {
+        guard let submenu = recentItem?.submenu else { return }
+        submenu.removeAllItems()
+        let entries = coordinator.recents.entries
+        if entries.isEmpty {
+            let none = NSMenuItem(title: "No recent results", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            submenu.addItem(none)
+            return
+        }
+        for entry in entries {
+            let item = NSMenuItem(title: entry.title, action: #selector(openRecent(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.id
+            submenu.addItem(item)
+        }
+    }
+
+    @objc private func toggleEnabled() {
+        settings.isEnabled.toggle()
+    }
+
+    @objc private func openRecent(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let entry = coordinator.recents.entries.first(where: { $0.id == id }) else { return }
+        coordinator.openRecent(entry)
+    }
+
+    @objc private func rescanHelpers() {
+        coordinator.rescan()
     }
 
     @objc private func showWheelForFile() {
