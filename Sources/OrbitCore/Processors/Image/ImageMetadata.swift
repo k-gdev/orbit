@@ -199,7 +199,8 @@ public enum ImageMetadata {
         if props[kCGImagePropertyGPSDictionary] != nil { return false }
         if locationOnly { return true }
         if let orientation, ((props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1) != orientation { return false }
-        if let data = try? Data(contentsOf: url), JPEGSegments.hasEmbeddedThumbnail(data) { return false }
+        if let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.starts(with: [0xFF, 0xD8]),
+           JPEGSegments.hasEmbeddedThumbnail(data) { return false }
         let gone: [CFString] = [kCGImagePropertyExifDictionary, kCGImagePropertyExifAuxDictionary, kCGImagePropertyTIFFDictionary,
                                 kCGImagePropertyIPTCDictionary, kCGImagePropertyPNGDictionary, kCGImagePropertyMakerAppleDictionary]
         for key in gone {
