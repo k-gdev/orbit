@@ -36,6 +36,7 @@ public enum MediaExport {
         _ asset: AVAsset, preset: String, fileType: AVFileType, to output: URL,
         videoComposition: AVVideoComposition? = nil, audioMix: AVAudioMix? = nil,
         timeRange: CMTimeRange? = nil, metadata: [AVMetadataItem]? = nil,
+        metadataItemFilter: AVMetadataItemFilter? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
         guard let session = AVAssetExportSession(asset: asset, presetName: preset) else {
@@ -47,6 +48,7 @@ public enum MediaExport {
         session.audioMix = audioMix
         if let timeRange { session.timeRange = timeRange }
         if let metadata { session.metadata = metadata }
+        if let metadataItemFilter { session.metadataItemFilter = metadataItemFilter }
         let box = SessionBox(session)
 
         try Task.checkCancellation()
