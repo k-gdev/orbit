@@ -1,15 +1,18 @@
 import AppKit
 import OrbitCore
+import PDFKit
 import SwiftUI
 
 /// Hidden command-line mode (rulings R21/R22): renders an image editor offscreen to a PNG.
 ///
-///     Orbit --snapshot-editor <markup|adjust|addbg> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]
+///     Orbit --snapshot-editor <markup|adjust|addbg|metadata|compress> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]
+///     Orbit --snapshot-editor <redact|organize|split> <pdf file> <out.png> [--replace]
 ///
-/// Uses sample edits on the given image and a flat glass stand-in; refuses to overwrite a PNG unless `--replace`.
+/// Uses sample edits on the given file and a flat glass stand-in; refuses to overwrite a PNG unless `--replace`.
 enum EditorSnapshot {
     static let flag = "--snapshot-editor"
-    static let usage = "usage: Orbit --snapshot-editor <markup|adjust|addbg> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]"
+    static let kinds = ["markup", "adjust", "addbg", "metadata", "compress", "redact", "organize", "split"]
+    static let usage = "usage: Orbit --snapshot-editor <\(kinds.joined(separator: "|"))> <file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]"
 
     struct Failure: Error, CustomStringConvertible { let description: String }
 
@@ -17,7 +20,7 @@ enum EditorSnapshot {
     static func runIfRequested(_ arguments: [String]) {
         guard let start = arguments.firstIndex(of: flag) else { return }
         let args = Array(arguments[(start + 1)...])
-        guard args.count >= 3, ["markup", "adjust", "addbg"].contains(args[0]) else {
+        guard args.count >= 3, kinds.contains(args[0]) else {
             FileHandle.standardError.write(Data("\(usage)\n".utf8))
             exit(64)
         }
@@ -50,9 +53,47 @@ enum EditorSnapshot {
         case "adjust":
             editor = AnyView(ImageAdjustEditor(title: "Adjust Photo", model: try adjustModel(url), onClose: {}, onApply: { _ in }))
             width = ImageAdjustEditor.width
-        default:
+        case "addbg":
             editor = AnyView(AddBackgroundEditor(title: "Add Background", model: try backgroundModel(url), onClose: {}, onApply: { _ in }))
             width = AddBackgroundEditor.width
+        case "metadata":
+            let model = MetadataModel(allowsArtwork: false, loader: { ImageMetadata.read($0) })
+            model.set(fields: ImageMetadata.read(url))
+            model.drafts[.artist] = "Kevo"
+            editor = AnyView(MetadataEditor(title: "Metadata", model: model, onClose: {}, onApply: { _ in }, onRemoveLocation: {}))
+            width = MetadataEditor.width
+        case "compress":
+            let model = CompressCustomModel()
+            model.load(url)
+            model.percent = 60
+            editor = AnyView(CompressCustomPanel(title: "Compress", model: model, onClose: {}, onApply: { _ in }))
+            width = CompressCustomPanel.width
+        case "redact":
+            let model = RedactModel()
+            model.load(url)
+            // One box over the second text line of the sample PDF (page space, origin bottom left).
+            if let page = model.document?.page(at: 0) {
+                let bounds = page.bounds(for: .cropBox)
+                model.addForSnapshot(pageIndex: 0, rect: CGRect(x: bounds.minX + 70, y: bounds.maxY - 168, width: 300, height: 20))
+            }
+            editor = AnyView(PDFRedactEditor(title: "Redact", model: model, onClose: {}, onApply: { _ in }))
+            width = PDFRedactEditor.width
+        case "organize":
+            let model = OrganizeModel()
+            guard let document = PDFDocument(url: url) else { throw Failure(description: "can't read \(url.path)") }
+            model.set(document: document)
+            // Reversed, with one page turned.
+            for index in 0..<document.pageCount { model.move(index, to: 0) }
+            if let first = model.pages.first { model.rotate(first.id) }
+            editor = AnyView(PDFOrganizeEditor(title: "Organize Pages", model: model, onClose: {}, onApply: { _ in }))
+            width = PDFOrganizeEditor.width
+        default:
+            guard let document = PDFDocument(url: url) else { throw Failure(description: "can't read \(url.path)") }
+            let model = SplitModel()
+            model.set(pageCount: document.pageCount)
+            model.text = "1-2, 4"
+            editor = AnyView(PDFSplitEditor(title: "Split PDF", model: model, onClose: {}, onApply: { _ in }))
+            width = PDFSplitEditor.width
         }
         let view = editor
             .frame(width: width)
