@@ -27,7 +27,7 @@ public enum UndoPerformer {
                     target = OutputNamer.uniqueURL(
                         in: move.from.deletingLastPathComponent(),
                         base: OutputNamer.stem(of: move.from),
-                        ext: move.from.pathExtension,
+                        ext: OutputNamer.fullExtension(of: move.from),
                         exists: { fm.fileExists(atPath: $0.path) }
                     )
                 }

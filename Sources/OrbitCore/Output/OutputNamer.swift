@@ -8,6 +8,11 @@ public enum OutputNamer {
         return url.deletingPathExtension().lastPathComponent
     }
 
+    /// Extension consistent with `stem(of:)`: `tar.gz` for `.tar.gz` names, else the last extension.
+    public static func fullExtension(of url: URL) -> String {
+        url.lastPathComponent.lowercased().hasSuffix(".tar.gz") ? "tar.gz" : url.pathExtension
+    }
+
     /// `base.ext`, then `base-2.ext`, `base-3.ext`... An empty `ext` means no dot (folders).
     public static func uniqueURL(in folder: URL, base: String, ext: String, exists: (URL) -> Bool) -> URL {
         func make(_ name: String) -> URL {

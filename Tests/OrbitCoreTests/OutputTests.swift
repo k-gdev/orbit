@@ -93,3 +93,15 @@ private func makeTempDir() throws -> URL {
     #expect(try String(contentsOf: tmp.appending(path: "a-2.txt"), encoding: .utf8) == "moved")
     #expect(!FileManager.default.fileExists(atPath: moved.path))
 }
+
+@Test func undoMoveBackKeepsTarGzExtension() throws {
+    let tmp = try makeTempDir(); defer { try? FileManager.default.removeItem(at: tmp) }
+    let orig = tmp.appending(path: "backup.tar.gz")
+    let moved = tmp.appending(path: "dest/backup.tar.gz")
+    try FileManager.default.createDirectory(at: moved.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("new".utf8).write(to: orig)
+    try Data("moved".utf8).write(to: moved)
+    try UndoPerformer.perform(.moveBack([FileMove(from: orig, to: moved)]))
+    #expect(try String(contentsOf: tmp.appending(path: "backup-2.tar.gz"), encoding: .utf8) == "moved")
+    #expect(!FileManager.default.fileExists(atPath: moved.path))
+}
