@@ -22,8 +22,12 @@ struct SettingsContent: View {
     @State private var loginOn = LoginItem.isEnabled
     @State private var loginError: String?
     @State private var triggerMessage: [WheelKind: String] = [:]
+    /// True when drawn by `SettingsSnapshot`, whose `ImageRenderer` can't draw AppKit-backed controls.
+    private let renderingForSnapshot: Bool
 
-    init(settings: SettingsStore, capabilities: Capabilities, rescan: @escaping () -> Capabilities) {
+    init(settings: SettingsStore, capabilities: Capabilities, rescan: @escaping () -> Capabilities,
+         renderingForSnapshot: Bool = false) {
+        self.renderingForSnapshot = renderingForSnapshot
         self.settings = settings
         self._capabilities = State(initialValue: capabilities)
         self.rescan = rescan
@@ -220,6 +224,43 @@ struct SettingsContent: View {
             Text(loginError).font(.caption).foregroundStyle(.red).textSelection(.enabled)
         }
         Toggle("Haptic feedback", isOn: $settings.hapticsEnabled)
+        accentRow
+    }
+
+    /// The accent colour: a colour well, its hex, and a reset. `ImageRenderer` can't draw `ColorPicker`
+    /// (it is an AppKit control), so `renderingForSnapshot` swaps in a plain swatch of the same size.
+    private var accentRow: some View {
+        HStack(spacing: 10) {
+            Text("Accent colour")
+            Spacer(minLength: 0)
+            Group {
+                if renderingForSnapshot {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(HexColor.parse(settings.accentHex)?.color ?? .clear)
+                        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(Color.primary.opacity(0.25), lineWidth: 1))
+                        .frame(width: 38, height: 22)
+                } else {
+                    ColorPicker("Accent colour", selection: accentBinding, supportsOpacity: false)
+                        .labelsHidden()
+                }
+            }
+            Text("#" + settings.accentHex)
+                .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+            Button("Reset to default") { settings.accentHex = SettingsStore.defaultAccentHex }
+                .disabled(settings.accentHex == SettingsStore.defaultAccentHex)
+        }
+    }
+
+    private var accentBinding: Binding<Color> {
+        Binding(
+            get: { HexColor.parse(settings.accentHex)?.color ?? OrbitTheme.accent },
+            set: { color in
+                guard let rgba = NSColor(color).usingColorSpace(.sRGB).map({
+                    RGBA(r: Double($0.redComponent), g: Double($0.greenComponent), b: Double($0.blueComponent), a: 1)
+                }) else { return }
+                settings.accentHex = HexColor.format(rgba)
+            })
     }
 
     private func setLogin(_ on: Bool) {

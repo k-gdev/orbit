@@ -350,7 +350,7 @@ struct MediaRangeEditor: View {
                     .disabled(!model.canAddRange).opacity(model.canAddRange ? 1 : 0.4)
             }
             .frame(height: 30)
-            chipArea(empty: model.ranges.isEmpty, hint: "Drag the orange handles over a part, then Add range. Each range becomes a beep.") {
+            chipArea(empty: model.ranges.isEmpty, hint: "Drag the handles over a part, then Add range. Each range becomes a beep.") {
                 ForEach(Array(model.ranges.enumerated()), id: \.offset) { index, range in
                     RemovableChip(title: "\(TimeFormat.string(range.lowerBound)) – \(TimeFormat.string(range.upperBound))") {
                         model.removeRange(at: index)
@@ -398,7 +398,7 @@ struct RemovableChip: View {
         }
         .foregroundStyle(.white)
         .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 4)
-        .background(Capsule().fill(EditorStyle.accent))
+        .background(Capsule().fill(OrbitTheme.accent))
     }
 }
 

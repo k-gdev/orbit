@@ -29,7 +29,7 @@ struct ToastView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 if content.isError {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(ProgressPanelView.accent)
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(OrbitTheme.accent)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(content.message)

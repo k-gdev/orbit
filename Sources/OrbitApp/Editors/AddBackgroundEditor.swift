@@ -15,11 +15,11 @@ final class BackgroundModel: ObservableObject {
     }
 
     static let blurRange: ClosedRange<Double> = 0...40
-    static let presets: [(name: String, rgba: RGBA)] = [
+    static var presets: [(name: String, rgba: RGBA)] { [
         ("White", RGBA(r: 1, g: 1, b: 1, a: 1)),
         ("Black", RGBA(r: 0, g: 0, b: 0, a: 1)),
-        ("Orbit orange", EditorStyle.accentRGBA),
-    ]
+        ("Orbit accent", OrbitTheme.accentRGBA),
+    ] }
 
     @Published private(set) var status = Status.loading
     @Published private(set) var image: EditorImage?
@@ -184,7 +184,7 @@ struct AddBackgroundEditor: View {
                         .frame(width: 28, height: 28)
                         .overlay(Circle().stroke(Color.primary.opacity(0.25), lineWidth: 1))
                         .padding(3)
-                        .overlay(Circle().stroke(EditorStyle.accent, lineWidth: chosen ? 2 : 0))
+                        .overlay(Circle().stroke(OrbitTheme.accent, lineWidth: chosen ? 2 : 0))
                 }
                 .buttonStyle(.plain)
                 .help(preset.name)
@@ -192,7 +192,7 @@ struct AddBackgroundEditor: View {
             OrbitColorWell(color: Binding(get: { model.solid },
                                           set: { model.solid = $0; model.mode = .solid }), help: "Custom color")
                 .padding(3)
-                .overlay(Circle().stroke(EditorStyle.accent,
+                .overlay(Circle().stroke(OrbitTheme.accent,
                                          lineWidth: model.mode == .solid && !BackgroundModel.presets.contains { $0.rgba == RGBA(model.solid) } ? 2 : 0))
         }
     }
@@ -206,7 +206,7 @@ struct AddBackgroundEditor: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.25), lineWidth: 1))
                     .padding(3)
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(EditorStyle.accent, lineWidth: model.mode == .gradient ? 2 : 0))
+                        .stroke(OrbitTheme.accent, lineWidth: model.mode == .gradient ? 2 : 0))
             }
             .buttonStyle(.plain)
             .help("Use the gradient")

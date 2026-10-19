@@ -21,7 +21,7 @@ struct WaveformView: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.07))
                 if let selection {
-                    Rectangle().fill(EditorStyle.accent.opacity(0.12))
+                    Rectangle().fill(OrbitTheme.accent.opacity(0.12))
                         .frame(width: max(x(selection.upperBound) - x(selection.lowerBound), 0), height: height)
                         .offset(x: x(selection.lowerBound))
                 }
@@ -59,7 +59,7 @@ struct WaveformView: View {
                                   width: barWidth, height: h)
                 let marked = ranges.contains { $0.contains(t) }
                 let kept = selection.map { $0.contains(t) } ?? true
-                let color: Color = marked ? .red : (kept ? EditorStyle.accent : Color.primary.opacity(0.28))
+                let color: Color = marked ? .red : (kept ? OrbitTheme.accent : Color.primary.opacity(0.28))
                 context.fill(Path(roundedRect: rect, cornerRadius: min(barWidth / 2, 1.5)), with: .color(color))
             }
         }

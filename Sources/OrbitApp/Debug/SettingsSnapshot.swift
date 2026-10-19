@@ -43,7 +43,7 @@ enum SettingsSnapshot {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = SettingsStore(defaults: defaults)
         let capabilities = HelperLocator().locate(customFFmpegPath: nil)
-        let view = SettingsContent(settings: settings, capabilities: capabilities, rescan: { capabilities })
+        let view = SettingsContent(settings: settings, capabilities: capabilities, rescan: { capabilities }, renderingForSnapshot: true)
             .frame(width: 560)
             .background(Color(nsColor: dark ? .black : .white))
             .environment(\.colorScheme, dark ? .dark : .light)

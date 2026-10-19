@@ -7,7 +7,6 @@ struct WheelView: View {
     @ObservedObject var model: WheelModel
     @Environment(\.colorScheme) private var colorScheme
 
-    static let accent = Color(red: 1, green: 0x5C / 255, blue: 0x1A / 255)
     static let highlightSpring = Animation.spring(response: 0.28, dampingFraction: 0.72)
 
     private var geometry: WheelGeometry { model.geometry }
@@ -102,8 +101,8 @@ struct PetalView: View {
 
     @ViewBuilder private var fill: some View {
         switch emphasis {
-        case .highlighted: shape.fill(WheelView.accent)
-        case .parentOfHighlight: shape.fill(WheelView.accent.opacity(0.55))
+        case .highlighted: shape.fill(OrbitTheme.accent)
+        case .parentOfHighlight: shape.fill(OrbitTheme.accent.opacity(0.55))
         case .normal: GlassBackground(shape: shape)
         }
     }

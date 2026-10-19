@@ -74,7 +74,7 @@ struct PDFSplitEditor: View {
                     Text(SplitModel.chipTitle(range))
                         .font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
                         .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().fill(EditorStyle.accent))
+                        .background(Capsule().fill(OrbitTheme.accent))
                 }
             }
         }

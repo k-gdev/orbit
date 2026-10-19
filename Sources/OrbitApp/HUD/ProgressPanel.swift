@@ -11,7 +11,7 @@ final class ProgressModel: ObservableObject {
 }
 
 /// A glass rounded panel: × at top left, the title, the file name (with `n of m` for
-/// batches) and a 4 pt orange bar.
+/// batches) and a 4 pt accent bar.
 struct ProgressPanelView: View {
     let title: String
     let fileName: String
@@ -20,7 +20,6 @@ struct ProgressPanelView: View {
     let onCancel: () -> Void
 
     static let width: CGFloat = 360
-    static let accent = Color(red: 1.0, green: 0.40, blue: 0.06)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -51,7 +50,7 @@ struct ProgressPanelView: View {
                     .frame(height: 4)
                     .overlay(alignment: .leading) {
                         GeometryReader { proxy in
-                            Capsule().fill(Self.accent)
+                            Capsule().fill(OrbitTheme.accent)
                                 .frame(width: proxy.size.width * min(max(fraction, 0), 1))
                                 .animation(.linear(duration: 0.2), value: fraction)
                         }

@@ -75,7 +75,7 @@ private final class FloatTileView: NSView, NSDraggingSource {
             badge.textColor = .white
             badge.alignment = .center
             badge.wantsLayer = true
-            badge.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            badge.layer?.backgroundColor = NSColor(OrbitTheme.accent).cgColor
             badge.layer?.cornerRadius = 9
             let width = max(18, badge.intrinsicContentSize.width + 10)
             badge.frame = NSRect(x: bounds.maxX - width - 4, y: 4, width: width, height: 18)

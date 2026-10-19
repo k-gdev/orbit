@@ -4,10 +4,8 @@ import OrbitCore
 import SwiftUI
 
 /// What the editors share: the 1024 px preview proxy, color conversion, and the small controls drawn in
-/// SwiftUI (so they match the hero's orange sliders and also render in headless snapshots).
+/// SwiftUI (so they match the accent-coloured sliders and also render in headless snapshots).
 enum EditorStyle {
-    static let accent = Color(red: 1, green: 0x5C / 255, blue: 0x1A / 255)
-    static let accentRGBA = RGBA(r: 1, g: 0x5C / 255, b: 0x1A / 255, a: 1)
     /// Long edge of the previews every editor renders.
     static let proxyLongEdge = 1024
 }
@@ -127,7 +125,7 @@ struct PreviewErrorBanner: View {
 
 // MARK: Controls
 
-/// An orange slider like the hero's. Drawn in SwiftUI.
+/// An accent-coloured slider. Drawn in SwiftUI.
 struct OrbitSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
@@ -139,7 +137,7 @@ struct OrbitSlider: View {
             let fraction = (value - range.lowerBound) / (range.upperBound - range.lowerBound)
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.primary.opacity(0.14)).frame(height: 4)
-                Capsule().fill(EditorStyle.accent).frame(width: Self.knob / 2 + width * fraction, height: 4)
+                Capsule().fill(OrbitTheme.accent).frame(width: Self.knob / 2 + width * fraction, height: 4)
                 Circle().fill(Color.white)
                     .frame(width: Self.knob, height: Self.knob)
                     .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
@@ -166,7 +164,7 @@ struct OrbitSwitch: View {
 
     var body: some View {
         Button { isOn.toggle() } label: {
-            Capsule().fill(isOn ? EditorStyle.accent : Color.primary.opacity(0.18))
+            Capsule().fill(isOn ? OrbitTheme.accent : Color.primary.opacity(0.18))
                 .frame(width: 38, height: 22)
                 .overlay(alignment: isOn ? .trailing : .leading) {
                     Circle().fill(Color.white).frame(width: 18, height: 18).padding(2)
@@ -213,7 +211,7 @@ struct ChoiceChip: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(selected ? Color.white : Color.primary)
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(Capsule().fill(selected ? EditorStyle.accent : Color.primary.opacity(0.09)))
+                .background(Capsule().fill(selected ? OrbitTheme.accent : Color.primary.opacity(0.09)))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -238,7 +236,7 @@ struct ToolButton: View {
             .foregroundStyle(selected ? Color.white : Color.primary)
             .frame(minWidth: 52, maxWidth: expands ? .infinity : nil).padding(.vertical, 6).padding(.horizontal, 4)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(selected ? EditorStyle.accent : Color.primary.opacity(0.07)))
+                .fill(selected ? OrbitTheme.accent : Color.primary.opacity(0.07)))
             .opacity(enabled ? 1 : 0.4)
             .contentShape(Rectangle())
         }

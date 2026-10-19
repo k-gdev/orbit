@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("Orbit launched")
         let settings = SettingsStore()
         Haptics.settings = settings
+        OrbitTheme.shared.bind(to: settings)
         let coordinator = JobCoordinator(settings: settings)
         let wheel = WheelController(settings: settings)
         wheel.capabilities = { [weak coordinator] in coordinator?.capabilities ?? Capabilities() }

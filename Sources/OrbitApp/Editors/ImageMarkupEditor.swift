@@ -458,7 +458,7 @@ struct ImageMarkupEditor: View {
                 NumberField(value: Binding(get: { model.resizeWidth }, set: { model.setResize(width: $0) }))
                 Button { model.lockAspect.toggle() } label: {
                     Image(systemName: model.lockAspect ? "lock.fill" : "lock.open")
-                        .font(.system(size: 12)).foregroundStyle(model.lockAspect ? EditorStyle.accent : Color.secondary)
+                        .font(.system(size: 12)).foregroundStyle(model.lockAspect ? OrbitTheme.accent : Color.secondary)
                 }
                 .buttonStyle(.plain).help(model.lockAspect ? "Keep the proportions" : "Change width and height separately")
                 NumberField(value: Binding(get: { model.resizeHeight }, set: { model.setResize(height: $0) }))

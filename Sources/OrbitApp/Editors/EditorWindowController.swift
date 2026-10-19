@@ -2,7 +2,7 @@ import AppKit
 import OrbitCore
 import SwiftUI
 
-/// The glass rounded panel every editor sits in: × at top left, a centered title, and an orange
+/// The glass rounded panel every editor sits in: × at top left, a centered title, and an accent
 /// Apply at bottom right (the hero's "Crop Video" window).
 struct EditorShell<Content: View, Leading: View>: View {
     let title: String
@@ -57,7 +57,7 @@ struct EditorShell<Content: View, Leading: View>: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16).padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(EditorStyle.accent))
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(OrbitTheme.accent))
                     .opacity(canApply ? 1 : 0.45)
                     .contentShape(Rectangle())
             }

@@ -107,10 +107,10 @@ struct ScrubberView: View {
                     .offset(x: x(r.lowerBound), y: top)
             }
             if let selection {
-                Rectangle().fill(EditorStyle.accent.opacity(0.28))
+                Rectangle().fill(OrbitTheme.accent.opacity(0.28))
                     .frame(width: max(x(selection.upperBound) - x(selection.lowerBound), 0), height: Self.barHeight)
-                    .overlay(alignment: .top) { Rectangle().fill(EditorStyle.accent).frame(height: 2) }
-                    .overlay(alignment: .bottom) { Rectangle().fill(EditorStyle.accent).frame(height: 2) }
+                    .overlay(alignment: .top) { Rectangle().fill(OrbitTheme.accent).frame(height: 2) }
+                    .overlay(alignment: .bottom) { Rectangle().fill(OrbitTheme.accent).frame(height: 2) }
                     .offset(x: x(selection.lowerBound), y: top)
                 handle(at: x(selection.lowerBound), top: top)
                 handle(at: x(selection.upperBound), top: top)
@@ -127,7 +127,7 @@ struct ScrubberView: View {
     }
 
     private func handle(at centerX: CGFloat, top: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(EditorStyle.accent)
+        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(OrbitTheme.accent)
             .frame(width: Self.handleWidth, height: Self.barHeight)
             .overlay { Capsule().fill(Color.white.opacity(0.9)).frame(width: 2, height: 14) }
             .offset(x: centerX - Self.handleWidth / 2, y: top)
