@@ -100,7 +100,7 @@ public final class JobRunner: Sendable {
         return JobResult(
             outputs: outputs,
             summary: Self.summary(unitCount: units.count, failureCount: failures.count, done: done, outputCount: outputs.count),
-            undo: Self.undo(done: done, outputs: outputs, ledger: ledger),
+            undo: Self.undo(action: action, done: done, outputs: outputs, ledger: ledger),
             usedFallbackFolder: usedFallback,
             clipboardText: texts.isEmpty ? nil : texts.joined(separator: "\n"),
             failures: failures)
@@ -170,7 +170,7 @@ public final class JobRunner: Sendable {
     }
 
     /// Move-back records are concatenated; otherwise undo trashes the outputs (never a source).
-    private static func undo(done: [ProcessorOutput], outputs: [URL], ledger: JobLedger) -> UndoRecord? {
+    private static func undo(action: SliceAction, done: [ProcessorOutput], outputs: [URL], ledger: JobLedger) -> UndoRecord? {
         var moves: [FileMove] = []
         var movedSomething = false
         for output in done {
@@ -180,6 +180,8 @@ public final class JobRunner: Sendable {
             }
         }
         if movedSomething { return .moveBack(moves) }
+        // Move To's outputs are the user's own files in their new place (R18): never offer to trash them.
+        if case .action(.moveTo, _) = action { return nil }
         let trashable = outputs.filter { !ledger.isSource($0) }
         return trashable.isEmpty ? nil : .trash(trashable)
     }

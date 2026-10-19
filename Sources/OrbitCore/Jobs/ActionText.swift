@@ -104,9 +104,11 @@ extension SliceAction {
         case .convert:
             return false
         case .tool(let tool, _):
-            return tool == .collage || tool == .merge || tool == .join
+            // R17: Read QR gets every image at once and reports one summary.
+            return tool == .collage || tool == .merge || tool == .join || tool == .readQR
         case .action(let action, _):
-            return action == .archive
+            // R17/R18: Copy Path, Copy To and Move To handle the whole selection in one unit.
+            return action == .archive || action == .copyPath || action == .copyTo || action == .moveTo
         }
     }
 

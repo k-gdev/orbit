@@ -388,13 +388,57 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
     }
 
     @Test func moveBackRecordsAreConcatenated() async throws {
-        func moved(_ url: URL) -> FileMove { FileMove(from: url, to: URL(filePath: "/elsewhere/\(url.lastPathComponent)")) }
+        // Concatenation spans units, so this uses a per-item action (Move To itself is one unit, R18).
+        @Sendable func moved(_ url: URL) -> FileMove { FileMove(from: url, to: URL(filePath: "/elsewhere/\(url.lastPathComponent)")) }
         let moving = FakeProcessor { r, _ in
-            let move = FileMove(from: r.items[0].url, to: URL(filePath: "/elsewhere/\(r.items[0].url.lastPathComponent)"))
-            return ProcessorOutput(outputs: [move.to], undo: .moveBack([move]))
+            let moves = r.items.map { moved($0.url) }
+            return ProcessorOutput(outputs: moves.map(\.to), undo: .moveBack(moves))
         }
-        let r = try await runner([moving]).run(req(["a.txt", "b.txt"], .action(.moveTo, nil)), progress: { _ in })
+        let r = try await runner([moving]).run(req(["a.txt", "b.txt"], .tool(.compress, nil)), progress: { _ in })
+        #expect(moving.units.count == 2)
         #expect(r.undo == .moveBack(sources.map(moved)))
+    }
+
+    // MARK: Whole-selection actions (R17, R18)
+
+    @Test(arguments: [
+        SliceAction.action(.copyPath, .pathStyle(.posix)),
+        .tool(.readQR, nil),
+        .action(.copyTo, .folder(URL(filePath: "/nonexistent/Dest", directoryHint: .isDirectory))),
+        .action(.moveTo, .folder(URL(filePath: "/nonexistent/Dest", directoryHint: .isDirectory))),
+    ])
+    func wholeSelectionIsOneUnit(action: SliceAction) async throws {
+        let handler = FakeProcessor { r, _ in ProcessorOutput(hint: .text("Handled \(r.items.count) files")) }
+        let r = try await runner([handler]).run(req(["f10.png", "f2.png", "f1.png"], action), progress: { _ in })
+        #expect(handler.units.map { $0.map(\.url.lastPathComponent) } == [["f1.png", "f2.png", "f10.png"]])
+        #expect(r.summary == "Handled 3 files")
+        #expect(r.failures.isEmpty && trashLog.isEmpty)
+    }
+
+    @Test func moveDestinationsAreNeverTrashed() async throws {
+        let dest = root.appending(path: "dest", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)
+        let request = req(["a.txt", "b.txt"], .action(.moveTo, .folder(dest)))
+        // Stands in for Task 25's ActionProcessor: it names destinations itself, without reserving them.
+        func mover(then outcome: OrbitError?) -> FakeProcessor {
+            FakeProcessor { r, _ in
+                let placed = try r.items.map { try write(dest.appending(path: "moved-\($0.url.lastPathComponent)")) }
+                if let outcome { throw outcome }
+                return ProcessorOutput(outputs: placed)
+            }
+        }
+        let r = try await runner([mover(then: nil)]).run(request, progress: { _ in })
+        #expect(r.outputs.count == 2 && r.undo == nil)   // no move-back record: never `.trash` the user's files
+        for (index, outcome) in [OrbitError.unsupported("disk full"), .cancelled].enumerated() {
+            try FileManager.default.removeItem(at: dest)   // the test's own stand-in files
+            try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)
+            await #expect(throws: outcome, "case \(index)") {
+                try await self.runner([mover(then: outcome)]).run(request, progress: { _ in })
+            }
+            #expect(try listing(dest) == ["moved-a.txt", "moved-b.txt"], "case \(index)")
+        }
+        #expect(trashLog.isEmpty)
+        expectSourcesIntact()
     }
 
     @Test func noOutputsMeansNoUndo() async throws {
@@ -438,10 +482,14 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
         #expect(!SliceAction.convert(.pdf).isCombining(for: [images[0]]))
         #expect(!SliceAction.convert(.pdf).isCombining(for: mixed))
         #expect(!SliceAction.convert(.png).isCombining(for: images))
-        for tool in [ToolID.collage, .merge, .join] { #expect(SliceAction.tool(tool, nil).isCombining(for: [images[0]])) }
+        for tool in [ToolID.collage, .merge, .join, .readQR] { #expect(SliceAction.tool(tool, nil).isCombining(for: [images[0]])) }
         #expect(!SliceAction.tool(.compress, nil).isCombining(for: images))
-        #expect(SliceAction.action(.archive, .archive(.zip)).isCombining(for: [images[0]]))
-        #expect(!SliceAction.action(.copyTo, nil).isCombining(for: images))
+        for action in [ActionID.archive, .copyPath, .copyTo, .moveTo] {
+            #expect(SliceAction.action(action, nil).isCombining(for: [images[0]]), "\(action)")
+        }
+        for action in [ActionID.float, .airDrop, .terminal] {
+            #expect(!SliceAction.action(action, nil).isCombining(for: images), "\(action)")
+        }
         for f in [OutputFormat.zip, .tar, .tgz] {
             #expect(SliceAction.convert(f).isCombining(for: mixed))
             #expect(SliceAction.convert(f).isCombining(for: [DroppedItem(url: dir)]))
