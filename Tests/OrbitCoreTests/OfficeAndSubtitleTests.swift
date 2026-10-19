@@ -92,6 +92,35 @@ import Testing
         #expect(SubtitleConverter.srt(cues) == "1\n01:01:01,235 --> 100:00:00,000\nx\n")
     }
 
+    @Test func absurdTimestampsAreRejectedNotTrapped() {
+        let huge = "1\n00:00:99999999999999999999 --> 00:00:02,000\nBad\n\n2\n00:00:01,000 --> 00:00:02,000\nGood\n"
+        #expect(SubtitleConverter.parse(huge, format: .srt) == [Cue(start: 1, end: 2, text: "Good")])
+        let vtt = "WEBVTT\n\n00:01.000 --> 99999999999999999999:00:00.000\nBad\n\n00:03.000 --> 00:04.000\nGood\n"
+        #expect(SubtitleConverter.parse(vtt, format: .vtt) == [Cue(start: 3, end: 4, text: "Good")])
+        // Cues built by hand can be absurd too; formatting must clamp instead of crashing.
+        let extremes = [Cue(start: .infinity, end: 1e300, text: "x"), Cue(start: .nan, end: -5, text: "y")]
+        #expect(SubtitleConverter.srt(extremes).contains("99:59:59,999") == false)
+        #expect(SubtitleConverter.srt(extremes).contains("00:00:00,000"))
+    }
+
+    @Test func textDecodingHandlesEveryByteOrderMark() {
+        let text = "Grüße, Orbit"
+        func bytes(_ bom: [UInt8], _ encoding: String.Encoding) -> Data { Data(bom) + text.data(using: encoding)! }
+        #expect(TextDecoding.string(from: bytes([0xFF, 0xFE], .utf16LittleEndian)) == text)
+        #expect(TextDecoding.string(from: bytes([0xFE, 0xFF], .utf16BigEndian)) == text)
+        #expect(TextDecoding.string(from: bytes([0xFF, 0xFE, 0x00, 0x00], .utf32LittleEndian)) == text)
+        #expect(TextDecoding.string(from: bytes([0x00, 0x00, 0xFE, 0xFF], .utf32BigEndian)) == text)
+        #expect(TextDecoding.string(from: bytes([0xEF, 0xBB, 0xBF], .utf8)) == text)
+        #expect(TextDecoding.string(from: Data([0x63, 0x61, 0x66, 0xE9])) == "café")   // Latin-1 / Windows-1252
+        #expect(TextDecoding.string(from: Data([0x81, 0x8D])).count == 2)              // undefined in 1252: Latin-1 last resort
+    }
+
+    @Test func utf32SubtitleIsDecoded() async throws {
+        let src = Fixtures.encodedText(Self.srt, "u32.srt", encoding: .utf32LittleEndian, bom: [0xFF, 0xFE, 0x00, 0x00], in: root)
+        let o = try #require(try await run(src, .convert(.txt), caps: .none).outputs.first)
+        #expect(try text(o) == "Hello there\nBye\n")
+    }
+
     @Test(arguments: [OutputFormat.vtt, .txt])
     func srtFileConverts(f: OutputFormat) async throws {
         let src = Fixtures.text(Self.srt, "movie.srt", in: root)

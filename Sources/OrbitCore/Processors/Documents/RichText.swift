@@ -37,8 +37,8 @@ public enum RichText {
             return try await MainActor.run {
                 MainThreadBox(try load(url, .html, extra: [.characterEncoding: String.Encoding.utf8.rawValue]))
             }.value
-        case "txt": return plain(try decodeText(Data(contentsOf: url)))
-        case "md": return try markdown(try decodeText(Data(contentsOf: url)))
+        case "txt": return plain(try TextDecoding.string(from: Data(contentsOf: url)))
+        case "md": return try markdown(try TextDecoding.string(from: Data(contentsOf: url)))
         case "textclipping": return plain(try clippingText(url))
         case "pages": return try await readPages(url, iwork: iwork)
         default: throw OrbitError.unsupported("Orbit can't read this kind of document.")
@@ -76,19 +76,6 @@ public enum RichText {
         NSAttributedString(string: text, attributes: [.font: bodyFont])
     }
 
-    /// UTF-8 (strictly), UTF-16/32 by byte-order mark, then Windows-1252, then Latin-1 (which accepts any bytes).
-    private static func decodeText(_ data: Data) -> String {
-        let bytes = [UInt8](data.prefix(4))
-        if bytes.starts(with: [0xFF, 0xFE, 0x00, 0x00]) || bytes.starts(with: [0x00, 0x00, 0xFE, 0xFF]),
-           let s = String(data: data, encoding: .utf32) { return s }
-        if bytes.starts(with: [0xFF, 0xFE]) || bytes.starts(with: [0xFE, 0xFF]),
-           let s = String(data: data, encoding: .utf16) { return s }
-        if let s = String(data: data, encoding: .utf8) {
-            return s.hasPrefix("\u{FEFF}") ? String(s.dropFirst()) : s
-        }
-        return String(data: data, encoding: .windowsCP1252) ?? String(data: data, encoding: .isoLatin1) ?? ""
-    }
-
     // MARK: Text clippings
 
     /// A .textClipping is a property list whose `UTI-Data` dictionary maps type identifiers to the text,
@@ -102,7 +89,7 @@ public enum RichText {
             if let s = types[key] as? String { return s }
             guard let bytes = types[key] as? Data else { continue }
             if key.hasPrefix("public.utf16"), let s = String(data: bytes, encoding: .utf16) { return s }
-            return decodeText(bytes)
+            return TextDecoding.string(from: bytes)
         }
         throw failure
     }

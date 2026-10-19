@@ -82,7 +82,7 @@ public struct SpreadsheetProcessor: Processor {
     private func readRows(_ item: DroppedItem, bridge: IWorkBridge, context: JobContext) async throws -> [[String]] {
         switch item.formatKey {
         case "csv", "tsv":
-            let text = TextDecoder.string(from: try Data(contentsOf: item.url))
+            let text = TextDecoding.string(from: try Data(contentsOf: item.url))
             return DelimitedText.parse(text, delimiter: item.formatKey == "csv" ? "," : "\t")
         case "ods":
             return try await ODSReader.read(item.url)
@@ -93,7 +93,7 @@ public struct SpreadsheetProcessor: Processor {
             try await bridge.export(item.url, app: .numbers, format: .csv,
                                     to: folder.appending(path: "sheet.csv", directoryHint: .notDirectory))
             guard let csv = Self.firstCSV(in: folder) else { throw OrbitError.unsupported("Numbers didn't export any data.") }
-            return DelimitedText.parse(TextDecoder.string(from: try Data(contentsOf: csv)), delimiter: ",")
+            return DelimitedText.parse(TextDecoding.string(from: try Data(contentsOf: csv)), delimiter: ",")
         }
     }
 

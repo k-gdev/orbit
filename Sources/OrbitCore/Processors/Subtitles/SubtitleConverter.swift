@@ -113,15 +113,22 @@ public enum SubtitleConverter {
         for field in fields.dropLast() {
             guard !field.isEmpty, field.allSatisfy(\.isASCII), let n = Int(field) else { return nil }
             total = total * 60 + Double(n)
+            if total >= maxSeconds { return nil }
         }
         guard let last = fields.last, !last.isEmpty,
               last.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }),
               last.filter({ $0 == "." }).count <= 1, let s = Double(last) else { return nil }
-        return total * 60 + s
+        let result = total * 60 + s
+        // Reject absurd stamps (up to 99:59:59.999 is accepted) so later Int conversions can't overflow.
+        return result.isFinite && result < maxSeconds ? result : nil
     }
 
+    /// 100 hours: the largest value the `HH:MM:SS` layout is expected to hold.
+    private static let maxSeconds = 360_000.0
+
     private static func timestamp(_ seconds: Double, separator: String) -> String {
-        let ms = max(0, Int((seconds * 1000).rounded()))
+        let clamped = seconds.isNaN ? 0 : min(max(seconds, 0), maxSeconds)
+        let ms = Int((clamped * 1000).rounded())
         return "\(pad(ms / 3_600_000, 2)):\(pad(ms / 60_000 % 60, 2)):\(pad(ms / 1000 % 60, 2))\(separator)\(pad(ms % 1000, 3))"
     }
 
