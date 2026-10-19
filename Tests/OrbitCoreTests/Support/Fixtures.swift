@@ -150,9 +150,10 @@ extension Fixtures {
         return out
     }
 
-    /// A small JPEG with GPS (37.33 N, 122.03 W), Make `OrbitCam`, Model `X1`, BodySerialNumber `SN-12345` and DateTimeOriginal.
+    /// A small JPEG with GPS (37.33 N, 122.03 W), Make `OrbitCam`, Model `X1`, BodySerialNumber `SN-12345`,
+    /// DateTimeOriginal `2024:05:06 07:08:09`, IPTC byline `IPTC Secret` and an XMP packet with dc:subject `XMP Secret`.
     static func jpegWithMetadata(in dir: URL) -> URL {
-        let src = image("meta-src-\(UUID().uuidString).png", w: 64, h: 48, in: dir)
+        let src = image("meta-src-\(UUID().uuidString).png", w: 64, h: 48, noise: true, in: dir)
         defer { try? FileManager.default.removeItem(at: src) }
         let cg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(src as CFURL, nil)!, 0, nil)!
         let out = dir.appending(path: "photo-\(UUID().uuidString.prefix(6)).jpg", directoryHint: .notDirectory)
@@ -162,9 +163,48 @@ extension Fixtures {
                                              kCGImagePropertyExifDateTimeOriginal: "2024:05:06 07:08:09"],
             kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 37.33, kCGImagePropertyGPSLatitudeRef: "N",
                                             kCGImagePropertyGPSLongitude: 122.03, kCGImagePropertyGPSLongitudeRef: "W"],
+            kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCByline: ["IPTC Secret"]],
         ]
-        writeImage(cg, to: out, type: .jpeg, properties: props)
+        let xmp = CGImageMetadataCreateMutable()
+        CGImageMetadataRegisterNamespaceForPrefix(xmp, kCGImageMetadataNamespaceDublinCore, kCGImageMetadataPrefixDublinCore, nil)
+        CGImageMetadataSetValueWithPath(xmp, nil, "dc:subject" as CFString, ["XMP Secret"] as CFArray)
+        // ImageIO drops IPTC given next to an XMP tree, so write the properties first and merge the XMP in a second pass.
+        let plain = dir.appending(path: "plain-\(UUID().uuidString).jpg", directoryHint: .notDirectory)
+        defer { try? FileManager.default.removeItem(at: plain) }
+        writeImage(cg, to: plain, type: .jpeg, properties: props)
+        guard let source = CGImageSourceCreateWithURL(plain as CFURL, nil),
+              let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            preconditionFailure("Fixtures.jpegWithMetadata: no destination")
+        }
+        let options: [CFString: Any] = [kCGImageDestinationMetadata: xmp, kCGImageDestinationMergeMetadata: true]
+        guard CGImageDestinationCopyImageSource(dest, source, options as CFDictionary, nil) else {
+            preconditionFailure("Fixtures.jpegWithMetadata: copy failed")
+        }
         return out
+    }
+
+    /// A small PNG with tEXt/iTXt `Author` = `PNG Secret` and `Description` = `PNG Description Secret`.
+    static func pngWithText(in dir: URL) -> URL {
+        let src = image("png-src-\(UUID().uuidString).png", w: 40, h: 30, noise: true, in: dir)
+        defer { try? FileManager.default.removeItem(at: src) }
+        let cg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(src as CFURL, nil)!, 0, nil)!
+        let out = dir.appending(path: "text-\(UUID().uuidString.prefix(6)).png", directoryHint: .notDirectory)
+        writeImage(cg, to: out, type: .png, properties: [
+            kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGAuthor: "PNG Secret",
+                                            kCGImagePropertyPNGDescription: "PNG Description Secret"],
+        ])
+        return out
+    }
+
+    /// Decoded RGBA bytes of the first image (for pixel-identity checks).
+    static func decodedPixels(_ url: URL) -> Data {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              let ctx = CGContext(data: nil, width: cg.width, height: cg.height, bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return Data() }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        return Data(bytes: data, count: cg.width * cg.height * 4)
     }
 
     /// A PNG QR code for `text`, with a quiet zone.

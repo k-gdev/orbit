@@ -116,18 +116,41 @@ import Testing
 
     // MARK: Metadata
 
+    private func contains(_ data: Data, _ text: String) -> Bool { data.range(of: Data(text.utf8)) != nil }
+
     @Test func stripAll() async throws {
         let src = Fixtures.jpegWithMetadata(in: root)
         let before = Fixtures.bytes(src)
-        #expect(before.range(of: Data("SN-12345".utf8)) != nil)
+        let secrets = ["XMP Secret", "IPTC Secret", "SN-12345", "OrbitCam", "2024:05:06 07:08:09"]
+        for secret in secrets { #expect(contains(before, secret), "fixture should contain \(secret)") }
         let out = try #require(try await run([src], .tool(.metadata, .metadataStripAll)).outputs.first)
         let d = Fixtures.bytes(out)
-        #expect(d.range(of: Data("SN-12345".utf8)) == nil && d.range(of: Data("OrbitCam".utf8)) == nil)
-        #expect(ImageMetadata.read(out).first { $0.key == .gpsLatitude } == nil)
-        #expect(ImageMetadata.read(out).first { $0.key == .cameraMake } == nil)
+        for secret in secrets { #expect(!contains(d, secret), "stripped file still contains \(secret)") }
+        let f = ImageMetadata.read(out)
+        #expect(f.first { $0.key == .gpsLatitude } == nil && f.first { $0.key == .gpsLongitude } == nil)
+        #expect(f.first { $0.key == .cameraMake } == nil && f.first { $0.key == .serialNumber } == nil)
+        #expect(f.first { $0.key == .artist }?.value == "")
         #expect(out.lastPathComponent.hasSuffix("-clean.jpg"))
         #expect(Fixtures.size(out) == CGSize(width: 64, height: 48))
         #expect(Fixtures.bytes(src) == before)
+    }
+
+    @Test func stripAllKeepsPixels() async throws {
+        let src = Fixtures.jpegWithMetadata(in: root)
+        let out = try #require(try await run([src], .tool(.metadata, .metadataStripAll)).outputs.first)
+        #expect(Fixtures.decodedPixels(out) == Fixtures.decodedPixels(src))
+        let edited = try #require(try await run([src], .tool(.metadata, nil), parameters: .metadata(["artist": "Kevo"])).outputs.first)
+        #expect(Fixtures.decodedPixels(edited) == Fixtures.decodedPixels(src))
+    }
+
+    @Test func stripAllPNGText() async throws {
+        let src = Fixtures.pngWithText(in: root)
+        #expect(contains(Fixtures.bytes(src), "PNG Secret") && contains(Fixtures.bytes(src), "PNG Description Secret"))
+        let out = try #require(try await run([src], .tool(.metadata, .metadataStripAll)).outputs.first)
+        let d = Fixtures.bytes(out)
+        #expect(!contains(d, "PNG Secret") && !contains(d, "PNG Description Secret"))
+        #expect(out.pathExtension == "png" && Fixtures.size(out) == CGSize(width: 40, height: 30))
+        #expect(Fixtures.decodedPixels(out) == Fixtures.decodedPixels(src))
     }
 
     @Test func stripLocationKeepsCamera() async throws {
@@ -135,7 +158,8 @@ import Testing
         let f = ImageMetadata.read(out)
         #expect(f.first { $0.key == .gpsLatitude } == nil && f.first { $0.key == .gpsLongitude } == nil)
         #expect(f.first { $0.key == .cameraMake }?.value == "OrbitCam")
-        #expect(Fixtures.bytes(out).range(of: Data("SN-12345".utf8)) != nil)
+        let d = Fixtures.bytes(out)
+        #expect(contains(d, "SN-12345") && contains(d, "OrbitCam"))
     }
 
     @Test func readsFields() {
