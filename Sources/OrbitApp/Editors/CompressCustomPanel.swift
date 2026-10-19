@@ -17,27 +17,40 @@ final class CompressCustomModel: ObservableObject {
     @Published var percent = 50.0
     @Published var amount = 500.0
     @Published var unit = Unit.kilobytes
-    /// Size of the file on disk, in bytes; 0 when unknown.
-    @Published private(set) var originalBytes: Int64 = 0
+    /// Sizes of the files on disk, in bytes, in item order; 0 when unknown.
+    @Published private(set) var sizes: [Int64] = []
 
-    func load(_ url: URL) {
-        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0
-        set(originalBytes: Int64(size))
+    func load(_ urls: [URL]) {
+        set(sizes: urls.map { url in
+            Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0)
+        })
     }
 
-    func set(originalBytes: Int64) { self.originalBytes = originalBytes }
+    func load(_ url: URL) { load([url]) }
 
-    /// What the job gets, or nil when the inputs make no sense (no size to take a percentage of, or an empty size).
-    var target: CompressTarget? {
+    func set(sizes: [Int64]) { self.sizes = sizes }
+    func set(originalBytes: Int64) { set(sizes: [originalBytes]) }
+
+    var fileCount: Int { sizes.count }
+    /// Size of the first file; what the summary shows for a single file.
+    var originalBytes: Int64 { sizes.first ?? 0 }
+
+    var spec: CompressPlan.Spec? {
         switch mode {
         case .percent:
-            guard originalBytes > 0 else { return nil }
-            return .fitUnder(max(1, Int64((Double(originalBytes) * (1 - percent / 100)).rounded())))
+            return .percentSmaller(percent)
         case .size:
             let bytes = (amount * unit.rawValue).rounded()
-            return bytes >= 1 && bytes < Double(Int64.max) ? .fitUnder(Int64(bytes)) : nil
+            return bytes >= 1 && bytes < Double(Int64.max) ? .underBytes(Int64(bytes)) : nil
         }
     }
+
+    /// The jobs to submit. Percent mode gives one job per file, each with its own target (a percentage is
+    /// relative to that file's size); Under size gives one job for all files. Empty when the inputs make no sense.
+    var jobs: [CompressPlan.Job] { spec.map { CompressPlan.jobs(for: $0, sizes: sizes) } ?? [] }
+
+    /// The target for the first file, or nil when the inputs make no sense.
+    var target: CompressTarget? { spec.flatMap { CompressPlan.target($0, forBytes: originalBytes) } }
 
     var targetBytes: Int64? {
         if case .fitUnder(let bytes)? = target { return bytes }
@@ -57,11 +70,11 @@ struct CompressCustomPanel: View {
     let title: String
     @ObservedObject var model: CompressCustomModel
     let onClose: () -> Void
-    let onApply: (CompressTarget) -> Void
+    let onApply: ([CompressPlan.Job]) -> Void
 
     var body: some View {
-        EditorShell(title: title, applyTitle: "Compress", canApply: model.target != nil, onClose: onClose,
-                    onApply: { if let target = model.target { onApply(target) } }) {
+        EditorShell(title: title, applyTitle: "Compress", canApply: !model.jobs.isEmpty, onClose: onClose,
+                    onApply: { let jobs = model.jobs; if !jobs.isEmpty { onApply(jobs) } }) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 8) {
                     ChoiceChip(title: "Percent smaller", selected: model.mode == .percent) { model.mode = .percent }
@@ -101,11 +114,23 @@ struct CompressCustomPanel: View {
     @ViewBuilder
     private var summary: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if model.originalBytes > 0 {
-                Text("Now \(CompressCustomModel.describe(model.originalBytes))")
-            }
-            if let bytes = model.targetBytes {
-                Text("Aims for under \(CompressCustomModel.describe(bytes))")
+            if model.fileCount > 1 {
+                Text("\(model.fileCount) files, now \(CompressCustomModel.describe(model.sizes.reduce(0, +))) in all")
+                switch model.mode {
+                case .percent:
+                    Text("Each file aims for \(Int(model.percent))% smaller than it is now")
+                case .size:
+                    if let bytes = model.targetBytes {
+                        Text("Each file aims for under \(CompressCustomModel.describe(bytes))")
+                    }
+                }
+            } else {
+                if model.originalBytes > 0 {
+                    Text("Now \(CompressCustomModel.describe(model.originalBytes))")
+                }
+                if let bytes = model.targetBytes {
+                    Text("Aims for under \(CompressCustomModel.describe(bytes))")
+                }
             }
         }
         .font(.system(size: 12)).foregroundStyle(.secondary)

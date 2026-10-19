@@ -68,6 +68,11 @@ final class RedactModel: ObservableObject {
         hasSelection = false
     }
 
+    /// Page space is PDFKit's: the page's *unrotated* media-box coordinates (points, origin at the media box's bottom left;
+    /// `/Rotate` and the crop box are not applied, which is also where `PDFSelection.bounds(for:)` and annotation bounds live).
+    /// `bounds(for: .cropBox)` is in that same space, so clamping against it is consistent. Task 22's rasterizer must read
+    /// `PDFRedaction.rects` in this space and apply the page's rotation itself.
+    ///
     /// Marks `rect` (page space) on `page`. Empty rectangles are ignored; the rectangle is kept inside the page.
     func add(page: PDFPage, rect: CGRect) {
         guard let document else { return }
@@ -181,7 +186,7 @@ private struct FlatPageStandIn: View {
 // MARK: Live page view
 
 /// Page view with a transparent layer on top that, in Draw Box mode, takes the mouse and rubber-bands a rectangle.
-private final class RedactContainer: NSView {
+final class RedactContainer: NSView {
     let pdfView = PDFView()
     let overlay = BoxOverlay()
 
@@ -196,18 +201,22 @@ private final class RedactContainer: NSView {
             view.autoresizingMask = [.width, .height]
             addSubview(view)
         }
+        overlay.pageView = pdfView
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("not used") }
 }
 
-private final class BoxOverlay: NSView {
+final class BoxOverlay: NSView {
     var isDrawing = false {
         didSet {
             discardCursorRects()
             window?.invalidateCursorRects(for: self)
         }
     }
+    /// The page view underneath. The overlay claims every event in Draw Box mode, so the events it does not use itself
+    /// (scroll wheel, pinch) are handed on: otherwise the person could not scroll to the rest of a page, or to another page.
+    weak var pageView: PDFView?
     /// Called with the finished rectangle (in this view's coordinates) and where the drag began.
     var onBox: ((CGRect, CGPoint) -> Void)?
 
@@ -215,6 +224,20 @@ private final class BoxOverlay: NSView {
     private var current: CGRect?
 
     override func hitTest(_ point: NSPoint) -> NSView? { isDrawing ? super.hitTest(point) : nil }
+
+    override func scrollWheel(with event: NSEvent) {
+        if let scrollView = pageView?.firstDescendant(ofType: NSScrollView.self) {
+            scrollView.scrollWheel(with: event)
+        } else if let pageView {
+            pageView.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        if let pageView { pageView.magnify(with: event) } else { super.magnify(with: event) }
+    }
 
     override func resetCursorRects() {
         if isDrawing { addCursorRect(bounds, cursor: .crosshair) }
@@ -250,6 +273,15 @@ private final class BoxOverlay: NSView {
         let outline = NSBezierPath(rect: current.insetBy(dx: 0.5, dy: 0.5))
         outline.lineWidth = 1
         outline.stroke()
+    }
+}
+
+extension NSView {
+    func firstDescendant<T: NSView>(ofType type: T.Type) -> T? {
+        for subview in subviews {
+            if let match = subview as? T ?? subview.firstDescendant(ofType: type) { return match }
+        }
+        return nil
     }
 }
 

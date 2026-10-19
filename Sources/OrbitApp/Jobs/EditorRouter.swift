@@ -193,17 +193,27 @@ enum EditorRouter {
     }
 
     private static func openCompressCustom(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
-        guard let item = items.first else { return coordinator.showError(notBuilt) }
+        guard !items.isEmpty else { return coordinator.showError(notBuilt) }
         let model = CompressCustomModel()
-        model.load(item.url)
+        model.load(items.map(\.url))
         EditorWindowController.present(width: CompressCustomPanel.width, content: { close, _ in
-            CompressCustomPanel(title: "Compress", model: model, onClose: close, onApply: { target in
-                let request = JobRequest(items: items, action: action, parameters: .compress(target),
-                                         options: coordinator.settings.jobOptions)
-                coordinator.run(request, near: NSEvent.mouseLocation)
+            CompressCustomPanel(title: "Compress", model: model, onClose: close, onApply: { jobs in
+                for request in compressRequests(jobs, items: items, action: action, options: coordinator.settings.jobOptions) {
+                    coordinator.run(request, near: NSEvent.mouseLocation)
+                }
                 close()
             })
         })
+    }
+
+    /// One request per planned job: in Percent mode each file has its own target, so a batch is never fitted to
+    /// the first file's size.
+    static func compressRequests(_ jobs: [CompressPlan.Job], items: [DroppedItem], action: SliceAction,
+                                 options: JobOptions) -> [JobRequest] {
+        jobs.map { job in
+            JobRequest(items: job.indices.map { items[$0] }, action: action, parameters: .compress(job.target),
+                       options: options)
+        }
     }
 
     private final class Box<T> {
