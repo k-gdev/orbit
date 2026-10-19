@@ -2,8 +2,47 @@ import Foundation
 
 public struct FFmpeg: Sendable {
     public let executable: URL
+    /// Whether h264_videotoolbox accepts `-q:v` here: only when ffmpeg runs as arm64 (FFmpeg's
+    /// `vtenc_qscale_enabled` is `TARGET_CPU_ARM64`). An Intel Mac, or an x86_64-only ffmpeg under
+    /// Rosetta, needs a bitrate instead.
+    public let videoToolboxQScale: Bool
 
-    public init(executable: URL) { self.executable = executable }
+    public init(executable: URL) {
+        self.init(executable: executable, videoToolboxQScale: Self.runsAsARM64(executable))
+    }
+
+    public init(executable: URL, videoToolboxQScale: Bool) {
+        self.executable = executable
+        self.videoToolboxQScale = videoToolboxQScale
+    }
+
+    /// True when Orbit runs as arm64 and the executable has an arm64 slice, so the child runs as arm64.
+    static func runsAsARM64(_ executable: URL) -> Bool {
+        #if arch(arm64)
+        return hasARM64Slice(executable)
+        #else
+        return false
+        #endif
+    }
+
+    /// Reads the Mach-O header (thin or universal) for an arm64 slice.
+    static func hasARM64Slice(_ executable: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: executable.resolvingSymlinksInPath()) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 4096), data.count >= 8 else { return false }
+        let b = [UInt8](data)
+        func be32(_ i: Int) -> UInt32 { i + 4 <= b.count ? UInt32(b[i]) << 24 | UInt32(b[i + 1]) << 16 | UInt32(b[i + 2]) << 8 | UInt32(b[i + 3]) : 0 }
+        func le32(_ i: Int) -> UInt32 { i + 4 <= b.count ? UInt32(b[i + 3]) << 24 | UInt32(b[i + 2]) << 16 | UInt32(b[i + 1]) << 8 | UInt32(b[i]) : 0 }
+        let arm64: UInt32 = 0x0100_000C
+        switch be32(0) {
+        case 0xCAFE_BABE, 0xCAFE_BABF: // universal: big-endian fat_arch (20 bytes) or fat_arch_64 (32 bytes)
+            let stride = be32(0) == 0xCAFE_BABE ? 20 : 32
+            let count = Int(min(be32(4), 64))
+            return (0..<count).contains { be32(8 + $0 * stride) == arm64 }
+        default:
+            return le32(0) == 0xFEED_FACF && le32(4) == arm64 // thin 64-bit Mach-O, little-endian
+        }
+    }
 
     /// ffmpeg treats a leading `-` as an option; the `file:` prefix prevents that.
     public static func pathArg(_ url: URL) -> String { "file:" + url.path }
@@ -33,6 +72,13 @@ public struct FFmpeg: Sendable {
             throw OrbitError.processFailed(tool: tool, code: 1, stderr: String(result.stderr.suffix(2000)))
         }
         progress(1)
+    }
+
+    /// True for `run`'s refusal to write over an existing output. That file isn't Orbit's, so a retry
+    /// must never remove it.
+    public static func isExistingOutputRefusal(_ error: any Error) -> Bool {
+        guard case .processFailed(_, _, let stderr)? = error as? OrbitError else { return false }
+        return stderr == "Output file already exists." || stderr.contains("already exists. Exiting.")
     }
 
     public static func progressFraction(line: String, duration: Double) -> Double? {

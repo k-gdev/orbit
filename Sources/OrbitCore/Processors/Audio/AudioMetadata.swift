@@ -94,14 +94,14 @@ public enum AudioMetadata {
     // MARK: Strip
 
     /// Copies the audio to `output` without any tags or cover art. m4a is re-wrapped without re-encoding;
-    /// AAC (ADTS) streams carry no tags and are copied; everything else goes through ffmpeg (`-c copy`),
-    /// except that wav, aiff and flac are rewritten natively when ffmpeg isn't installed.
+    /// AAC (ADTS) streams are copied with any ID3v2/ID3v1 blocks cut off; everything else goes through
+    /// ffmpeg (`-c copy`), except that wav, aiff and flac are rewritten natively when ffmpeg isn't installed.
     public static func strip(_ item: DroppedItem, to output: URL, ffmpeg: FFmpeg?) async throws {
         switch item.formatKey {
         case "m4a":
             try await remuxWithoutTags(item.url, to: output)
         case "aac":
-            try FileManager.default.copyItem(at: item.url, to: output)
+            try strippingID3(try Data(contentsOf: item.url)).write(to: output, options: .withoutOverwriting)
         default:
             if let ffmpeg {
                 let seconds = try? await ffmpeg.duration(of: item.url)
@@ -114,6 +114,24 @@ public enum AudioMetadata {
                 throw OrbitError.helperMissing(.ffmpeg)
             }
         }
+    }
+
+    /// `data` without leading ID3v2 tags (10-byte header, syncsafe size, optional 10-byte footer) or a
+    /// trailing 128-byte ID3v1 "TAG" block. ADTS frames themselves carry no metadata.
+    static func strippingID3(_ data: Data) -> Data {
+        let b = [UInt8](data)
+        var start = 0
+        while start + 10 <= b.count, b[start] == 0x49, b[start + 1] == 0x44, b[start + 2] == 0x33, // "ID3"
+              b[(start + 6)...(start + 9)].allSatisfy({ $0 < 0x80 }) {
+            let size = b[(start + 6)...(start + 9)].reduce(0) { $0 << 7 | Int($1) }
+            let footer = b[start + 5] & 0x10 != 0 ? 10 : 0
+            let next = start + 10 + size + footer
+            guard next <= b.count else { break }
+            start = next
+        }
+        var end = b.count
+        if end - start >= 128, b[end - 128] == 0x54, b[end - 127] == 0x41, b[end - 126] == 0x47 { end -= 128 } // "TAG"
+        return Data(b[start..<end])
     }
 
     /// Re-wraps the AAC samples of an m4a in a new file with no metadata. (An export session with an empty

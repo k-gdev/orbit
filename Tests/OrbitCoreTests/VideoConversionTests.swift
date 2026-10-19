@@ -110,6 +110,78 @@ import Testing
         }
     }
 
+    /// FFmpeg only allows `-q:v` for h264_videotoolbox when it runs as arm64; elsewhere a bitrate is used.
+    @Test func videoToolboxRecipesUseABitrateWithoutQScale() {
+        for f in [OutputFormat.mp4, .mov] {
+            #expect(FFmpegRecipes.args(for: f, qscale: true).contains("-q:v"))
+            let intel = FFmpegRecipes.args(for: f, qscale: false)
+            #expect(!intel.contains("-q:v") && intel.contains("-b:v") && intel.contains("h264_videotoolbox"))
+        }
+        #expect(!FFmpegRecipes.mkvFallback(qscale: false).contains("-q:v"))
+        for ext in ["mkv", "mp4", "mov", "m4v"] {
+            let args = VideoToolsFFmpeg.reencodeArgs(for: URL(fileURLWithPath: "/x/a.\(ext)"), qscale: false)
+            #expect(!args.contains("-q:v") && args.contains("-b:v"), "\(ext)")
+        }
+        #expect(FFmpeg(executable: URL(fileURLWithPath: "/x"), videoToolboxQScale: false).videoToolboxQScale == false)
+    }
+
+    @Test func machOSliceDetection() throws {
+        func header(_ bytes: [UInt8]) throws -> URL {
+            let url = root.appending(path: "bin-\(UUID().uuidString)")
+            try Data(bytes + [UInt8](repeating: 0, count: 64)).write(to: url)
+            return url
+        }
+        let thinARM = try header([0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01])
+        let thinIntel = try header([0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01])
+        let fatIntel = try header([0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 1, 0x01, 0x00, 0x00, 0x07] + [UInt8](repeating: 0, count: 16))
+        let fatBoth = try header([0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2, 0x01, 0x00, 0x00, 0x07] + [UInt8](repeating: 0, count: 16)
+                                 + [0x01, 0x00, 0x00, 0x0C] + [UInt8](repeating: 0, count: 16))
+        #expect(FFmpeg.hasARM64Slice(thinARM) && FFmpeg.hasARM64Slice(fatBoth))
+        #expect(!FFmpeg.hasARM64Slice(thinIntel) && !FFmpeg.hasARM64Slice(fatIntel))
+        #expect(!FFmpeg.hasARM64Slice(root.appending(path: "missing")))
+        #if arch(arm64)
+        #expect(FFmpeg.hasARM64Slice(URL(fileURLWithPath: "/bin/ls")))
+        #endif
+    }
+
+    /// The MKV retry never removes a file that was already at the output path (it isn't Orbit's).
+    @Test(.enabled(if: Fixtures.hasFFmpeg)) func mkvRetryLeavesAStrangersFileAlone() async throws {
+        let src = await clip()
+        let existing = Fixtures.file("taken.mkv", "mine", in: root)
+        await #expect(throws: OrbitError.self) {
+            try await VideoConverter.convert(DroppedItem(url: src), to: .mkv, output: existing,
+                                             ffmpeg: FFmpeg(executable: Fixtures.ffmpeg!), progress: { _ in })
+        }
+        #expect(try String(contentsOf: existing, encoding: .utf8) == "mine")
+        #expect(FFmpeg.isExistingOutputRefusal(OrbitError.processFailed(tool: "ffmpeg", code: 1, stderr: "Output file already exists.")))
+        #expect(!FFmpeg.isExistingOutputRefusal(OrbitError.processFailed(tool: "ffmpeg", code: 1, stderr: "Invalid data")))
+    }
+
+    /// ffmpeg's palette pass buffers every frame, so the ffmpeg GIF path shares the native frame budget.
+    @Test func ffmpegGIFArgsCapFrames() {
+        let args = FFmpegRecipes.gif(fps: 4.5, size: CGSize(width: 480, height: 270), frames: 600)
+        #expect(args.contains { $0.hasPrefix("fps=4.5,scale=480:270:flags=lanczos,split") })
+        let frames = try? #require(args.firstIndex(of: "-frames:v"))
+        #expect(frames.map { args[$0 + 1] } == "600")
+    }
+
+    @Test(.enabled(if: Fixtures.hasFFmpeg)) func ffmpegGIFRefusesALongClip() async throws {
+        let long = root.appending(path: "long.mkv")
+        _ = try await ProcessRunner.run(Fixtures.ffmpeg!, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                                           "color=c=red:s=64x48:r=2:d=320", "-c:v", "mpeg4", FFmpeg.pathArg(long)])
+        await #expect(throws: OrbitError.unsupported("long.mkv is too long for a GIF (5 minutes at most).")) {
+            _ = try await self.run(long, .convert(.gif))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".gif") }.isEmpty)
+    }
+
+    @Test(.enabled(if: Fixtures.hasFFmpeg)) func ffmpegGIFFromMKV() async throws {
+        let o = try await run(await Fixtures.mkv(seconds: 2, in: root), .convert(.gif)).outputs[0]
+        let src = try #require(CGImageSourceCreateWithURL(o as CFURL, nil))
+        #expect(CGImageSourceGetCount(src) > 10 && CGImageSourceGetCount(src) <= 25)
+        #expect(Fixtures.size(o) == CGSize(width: 320, height: 240))
+    }
+
     @Test(.enabled(if: Fixtures.hasFFmpeg), arguments: [OutputFormat.mkv, .webm, .avi, .wmv, .mp3])
     func ffmpegOutputs(f: OutputFormat) async throws {
         let o = try await run(await clip(), .convert(f)).outputs[0]

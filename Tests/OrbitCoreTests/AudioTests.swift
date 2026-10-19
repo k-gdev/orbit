@@ -581,6 +581,24 @@ private func peakDB(_ s: [Float]) -> Double {
         #expect(clean.pathExtension == "aac" && bytes(clean) == bytes(aac))
     }
 
+    /// "Strip all" on an ADTS .aac file with ID3 tags (as some rippers and podcast tools write them)
+    /// removes the leading ID3v2 and trailing ID3v1 blocks and leaves the AAC frames byte for byte.
+    @Test func aacStripRemovesID3Tags() async throws {
+        let aac = try await run(tone("a.wav", amplitude: 0.1), .convert(.aac)).outputs[0]
+        let frames = try Data(contentsOf: aac)
+        func syncsafe(_ n: Int) -> [UInt8] { [UInt8((n >> 21) & 0x7F), UInt8((n >> 14) & 0x7F), UInt8((n >> 7) & 0x7F), UInt8(n & 0x7F)] }
+        let title = Array("Secret Title".utf8)
+        let frame: [UInt8] = Array("TIT2".utf8) + [0, 0, 0, UInt8(title.count + 1), 0, 0, 0] + title
+        let id3v2 = Array("ID3".utf8) + [3, 0, 0] + syncsafe(frame.count) + frame
+        let id3v1 = Array("TAG".utf8) + Array("Secret v1".utf8) + [UInt8](repeating: 0, count: 128 - 3 - 9)
+        let tagged = root.appending(path: "tagged.aac")
+        try Data(id3v2 + [UInt8](frames) + id3v1).write(to: tagged)
+        let clean = try await tool(tagged, .metadata, preset: .metadataStripAll)
+        #expect(try Data(contentsOf: clean) == frames)
+        #expect(AudioMetadata.strippingID3(Data(id3v2 + [UInt8](frames) + id3v1)) == frames)
+        #expect(AudioMetadata.strippingID3(frames) == frames)
+    }
+
     // MARK: Waveform
 
     @Test func waveformCoversEdgeCases() async throws {

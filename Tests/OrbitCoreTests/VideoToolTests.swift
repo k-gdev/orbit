@@ -96,11 +96,11 @@ private enum SharedClipsCleanup {
 
     private func tool(_ src: URL, _ id: ToolID, _ parameters: ToolParameters = .none, preset: Preset? = nil,
                       caps: Capabilities = Fixtures.caps) async throws -> URL {
-        try await toolResult(src, id, parameters, preset: preset, caps: caps).outputs[0]
+        try #require(try await toolResult(src, id, parameters, preset: preset, caps: caps).outputs.first)
     }
 
     private func toolMulti(_ srcs: [URL], _ id: ToolID, caps: Capabilities = Fixtures.caps) async throws -> URL {
-        try await toolMultiResult(srcs, id, caps: caps).outputs[0]
+        try #require(try await toolMultiResult(srcs, id, caps: caps).outputs.first)
     }
 
     /// Frame 0 of `out` shows the same picture as frame 0 of `src` shifted by `offset` (a crop origin). The test clips
@@ -398,7 +398,9 @@ private enum SharedClipsCleanup {
 
     @Test func compressRotatedWithoutTranslationKeepsThePicture() async throws {
         let src = await Fixtures.videoRotatedWithoutTranslation("rot-0.mov", seconds: 1, w: 320, h: 240, in: root)
-        let o = try await tool(src, .compress, preset: .compress(.fitUnder(300_000)))
+        // VideoTools directly: the plain test clip is already under 300 KB, which a job skips (R35).
+        let o = root.appending(path: "rot-0-compressed.mov")
+        _ = try await VideoTools.compress(src, target: .fitUnder(300_000), to: o, progress: { _ in })
         #expect(try fileSize(o) <= 300_000)
         #expect(try await MediaInfo.videoSize(o) == CGSize(width: 320, height: 240))
         try await expectSamePicture(src: src, out: o, offset: .zero)
@@ -406,7 +408,8 @@ private enum SharedClipsCleanup {
 
     @Test func compressWhenTheAudioIsLongerThanTheVideo() async throws {
         let src = await Fixtures.videoWithLongerAudio("long-audio.mov", videoSeconds: 2, audioSeconds: 2.3, w: 320, h: 240, in: root)
-        let o = try await tool(src, .compress, preset: .compress(.fitUnder(300_000)))
+        let o = root.appending(path: "long-audio-compressed.mov")
+        _ = try await VideoTools.compress(src, target: .fitUnder(300_000), to: o, progress: { _ in })
         #expect(try fileSize(o) <= 300_000)
         #expect(try await MediaInfo.hasAudio(o))
         #expect(abs(try await dur(o) - 2) < 0.4)
@@ -537,6 +540,66 @@ private enum SharedClipsCleanup {
         #expect(abs(try await ff.duration(of: o) - 1) < 0.2)
         let joined = try await toolMulti([src, src], .join)
         #expect(abs(await Fixtures.streamFacts(joined).duration - 4) < 0.3)
+    }
+
+    // MARK: Join only stream-copies matching clips; stream-copy tools keep every track
+
+    @Test func streamSignatureIgnoresBitratesButNotCodecs() {
+        let a = """
+          Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, progressive), 320x240 [SAR 1:1 DAR 4:3], 412 kb/s, 30 fps, 30 tbr, 15360 tbn (default)
+          Stream #0:1[0x2](eng): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, stereo, fltp, 128 kb/s (default)
+        """
+        let sameButBitrate = a.replacingOccurrences(of: "412 kb/s", with: "990 kb/s").replacingOccurrences(of: "128 kb/s", with: "96 kb/s")
+        let otherCodecs = """
+          Stream #0:0: Video: mpeg4 (Simple Profile), yuv420p, 320x240 [SAR 1:1 DAR 4:3], 30 fps, 30 tbr, 1k tbn
+          Stream #0:1: Audio: opus, 48000 Hz, stereo, fltp (default)
+        """
+        let rotated = a.replacingOccurrences(of: "(default)\n", with: "(default)\n      Side data:\n        displaymatrix: rotation of -90.00 degrees\n")
+        let sig = VideoToolsFFmpeg.streamSignature(a)
+        #expect(sig.contains("h264 (High)") && sig.contains("44100 Hz") && !sig.contains("kb/s"))
+        #expect(VideoToolsFFmpeg.streamSignature(sameButBitrate) == sig)
+        #expect(VideoToolsFFmpeg.streamSignature(otherCodecs) != sig)
+        #expect(VideoToolsFFmpeg.streamSignature(rotated) != sig)
+    }
+
+    /// Two MKVs with the same size but different codecs: a stream copy would exit 0 and write a file
+    /// whose second half can't be decoded, so they are re-encoded.
+    @Test(.enabled(if: Fixtures.hasFFmpeg)) func joinMKVsWithDifferentCodecsReencodes() async throws {
+        let a = await Fixtures.mkv(named: "a.mkv", seconds: 1, in: root)
+        let b = root.appending(path: "b.mkv")
+        try await ff.run(inputs: [a], args: ["-c:v", "mpeg4", "-c:a", "libopus", "-ar", "48000"], output: b,
+                         duration: nil, progress: { _ in })
+        let o = try await toolMulti([a, b], .join)
+        let check = try await ProcessRunner.runCapturing(Fixtures.ffmpeg!, ["-v", "error", "-i", FFmpeg.pathArg(o), "-f", "null", "-"])
+        #expect(check.stderr.isEmpty, "decode errors: \(check.stderr.prefix(300))")
+        #expect(abs(await Fixtures.streamFacts(o).duration - 2) < 0.3)
+    }
+
+    /// An MKV with two audio tracks (as a film with two languages would have).
+    private func twoAudioMKV() async throws -> URL {
+        let one = await Fixtures.mkv(named: "one.mkv", seconds: 2, in: root)
+        let two = root.appending(path: "two.mkv")
+        _ = try await ProcessRunner.run(Fixtures.ffmpeg!, ["-hide_banner", "-loglevel", "error", "-i", FFmpeg.pathArg(one),
+                                                           "-map", "0:v", "-map", "0:a", "-map", "0:a", "-c", "copy", FFmpeg.pathArg(two)])
+        try FileManager.default.removeItem(at: one)
+        return two
+    }
+
+    private func audioTrackCount(_ url: URL) async throws -> Int {
+        let r = try await ProcessRunner.runCapturing(Fixtures.ffmpeg!, ["-hide_banner", "-i", FFmpeg.pathArg(url)])
+        return r.stderr.split(whereSeparator: \.isNewline).filter { $0.contains("Stream #") && $0.contains("Audio:") }.count
+    }
+
+    @Test(.enabled(if: Fixtures.hasFFmpeg)) func streamCopyToolsKeepEveryAudioTrack() async throws {
+        let src = try await twoAudioMKV()
+        #expect(try await audioTrackCount(src) == 2)
+        #expect(try await audioTrackCount(try await tool(src, .removeMetadata)) == 2)
+        #expect(try await audioTrackCount(try await tool(src, .trim, .timeRange(0...1))) == 2)
+        let parts = try await toolResult(src, .split, .splitPoints([1])).outputs
+        for part in parts { #expect(try await audioTrackCount(part) == 2) }
+        let muted = try await tool(src, .mute)
+        #expect(try await audioTrackCount(muted) == 0)
+        #expect(await Fixtures.streamFacts(muted).videoSize == CGSize(width: 320, height: 240))
     }
 
     @Test func atempoChainsStayInsideTheFilterRange() {

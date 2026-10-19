@@ -13,6 +13,10 @@ public enum VideoToolsFFmpeg {
         /// The size on screen (rotation applied); nil when there is no video.
         public var videoSize: CGSize?
         public var hasAudio: Bool
+        /// Codec, profile, pixel format, frame size, frame rate and rotation of each video stream, and
+        /// codec, sample rate, channel layout and sample format of each audio stream (bitrates left out).
+        /// Clips can be joined by stream copy only when these match.
+        public var streams: String = ""
     }
 
     public static func probe(_ url: URL, ffmpeg: FFmpeg) async throws -> Probe {
@@ -20,7 +24,41 @@ public enum VideoToolsFFmpeg {
         guard let duration = FFmpeg.parseDuration(result.stderr) else {
             throw OrbitError.unsupported("Couldn't read the duration of \(url.lastPathComponent).")
         }
-        return Probe(duration: duration, videoSize: parseVideoSize(result.stderr), hasAudio: FFmpeg.hasAudioStream(result.stderr))
+        return Probe(duration: duration, videoSize: parseVideoSize(result.stderr), hasAudio: FFmpeg.hasAudioStream(result.stderr),
+                     streams: streamSignature(result.stderr))
+    }
+
+    /// One normalized line per video and audio stream of `ffmpeg -i` output: the stream description with
+    /// bitrates, timebases, codec tags and disposition removed, plus the video's rotation.
+    static func streamSignature(_ stderr: String) -> String {
+        let codecTag = try! NSRegularExpression(pattern: #"\s*\([^()]*/ 0x[0-9A-Fa-f]+\)"#)
+        let disposition = try! NSRegularExpression(pattern: #"\s*\((default|forced|attached pic|dependent|hearing impaired|visual impaired|original|dub|comment|lyrics|karaoke|clean effects|captions|descriptions|metadata)\)"#)
+        let rotation = try! NSRegularExpression(pattern: #"rotation of (-?\d+(?:\.\d+)?) degrees"#)
+        var lines: [String] = []
+        let all = stderr.components(separatedBy: .newlines)
+        for (index, line) in all.enumerated() where line.contains("Stream #") {
+            guard let kind = ["Video: ", "Audio: "].first(where: { line.contains($0) }),
+                  let start = line.range(of: kind) else { continue }
+            var text = String(line[start.upperBound...])
+            for re in [codecTag, disposition] {
+                text = re.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
+            }
+            let fields = text.components(separatedBy: ", ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { field in
+                !(field.hasSuffix(" kb/s") || field.hasSuffix(" tbr") || field.hasSuffix(" tbn") || field.hasSuffix(" tbc"))
+            }
+            var signature = kind + fields.joined(separator: ", ")
+            if kind == "Video: " {
+                // Side data (e.g. "displaymatrix: rotation of -90.00 degrees") follows on the next lines.
+                for next in all.dropFirst(index + 1).prefix(while: { !$0.contains("Stream #") }) {
+                    let ns = next as NSString
+                    if let m = rotation.firstMatch(in: next, range: NSRange(location: 0, length: ns.length)) {
+                        signature += ", rotation \(ns.substring(with: m.range(at: 1)))"
+                    }
+                }
+            }
+            lines.append(signature)
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// The first video stream's size from `ffmpeg -i` output, swapped when the stream is rotated a quarter turn.
@@ -70,12 +108,14 @@ public enum VideoToolsFFmpeg {
 
     public static func mute(_ src: URL, to output: URL, ffmpeg: FFmpeg, progress: @escaping Progress) async throws {
         let duration = try? await ffmpeg.duration(of: src)
-        try await ffmpeg.run(inputs: [src], args: ["-c", "copy", "-an"], output: output, duration: duration, progress: progress)
+        // Every stream but the audio (other subtitle tracks, attachments) is kept.
+        try await ffmpeg.run(inputs: [src], args: ["-map", "0", "-map", "-0:a", "-dn", "-c", "copy"], output: output,
+                             duration: duration, progress: progress)
     }
 
     public static func removeMetadata(_ src: URL, to output: URL, ffmpeg: FFmpeg, progress: @escaping Progress) async throws {
         let duration = try? await ffmpeg.duration(of: src)
-        try await ffmpeg.run(inputs: [src], args: ["-map_metadata", "-1", "-c", "copy"], output: output,
+        try await ffmpeg.run(inputs: [src], args: ["-map", "0", "-dn", "-map_metadata", "-1", "-c", "copy"], output: output,
                              duration: duration, progress: progress)
     }
 
@@ -84,9 +124,10 @@ public enum VideoToolsFFmpeg {
     public static func speed(_ src: URL, factor: Double, to output: URL, ffmpeg: FFmpeg, progress: @escaping Progress) async throws {
         guard factor.isFinite, factor > 0 else { throw OrbitError.unsupported("Choose a speed first.") }
         let info = try await probe(src, ffmpeg: ffmpeg)
-        var args = ["-filter:v", "setpts=PTS/\(number(factor))"]
+        // -sn: subtitles can't be retimed by a filter, so they would drift out of sync.
+        var args = ["-sn", "-filter:v", "setpts=PTS/\(number(factor))"]
         if info.hasAudio { args += ["-filter:a", atempoChain(factor).joined(separator: ",")] }
-        try await ffmpeg.run(inputs: [src], args: args + reencodeArgs(for: output), output: output,
+        try await ffmpeg.run(inputs: [src], args: args + reencodeArgs(for: output, qscale: ffmpeg.videoToolboxQScale), output: output,
                              duration: info.duration / factor, progress: progress)
     }
 
@@ -98,7 +139,7 @@ public enum VideoToolsFFmpeg {
         let width = Int(VideoTools.evenFloor(area.width)), height = Int(VideoTools.evenFloor(area.height))
         guard !area.isNull, width >= 2, height >= 2 else { throw OrbitError.unsupported("The crop area is outside this video.") }
         let x = min(Int(area.minX.rounded()), Int(size.width) - width), y = min(Int(area.minY.rounded()), Int(size.height) - height)
-        try await ffmpeg.run(inputs: [src], args: ["-vf", "crop=\(width):\(height):\(x):\(y)"] + reencodeArgs(for: output),
+        try await ffmpeg.run(inputs: [src], args: ["-vf", "crop=\(width):\(height):\(x):\(y)"] + reencodeArgs(for: output, qscale: ffmpeg.videoToolboxQScale),
                              output: output, duration: info.duration, progress: progress)
     }
 
@@ -125,7 +166,9 @@ public enum VideoToolsFFmpeg {
         }
         guard let size = probes[0].videoSize else { throw OrbitError.unsupported("There is no video in this file.") }
         let total = probes.reduce(0) { $0 + $1.duration }
-        let copyable = probes.allSatisfy { $0.videoSize == size && $0.hasAudio == probes[0].hasAudio }
+        // The concat demuxer doesn't check codecs: clips whose streams differ in any way that matters
+        // (codec, profile, pixel format, size, frame rate, rotation, audio format) are re-encoded.
+        let copyable = probes.allSatisfy { $0.videoSize == size && $0.hasAudio == probes[0].hasAudio && $0.streams == probes[0].streams }
 
         if copyable {
             let list = try scratch().appending(path: "list.txt", directoryHint: .notDirectory)
@@ -134,7 +177,8 @@ public enum VideoToolsFFmpeg {
                 try await ffmpeg.run(inputs: [], args: ["-f", "concat", "-safe", "0", "-i", FFmpeg.pathArg(list), "-c", "copy"],
                                      output: output, duration: total, progress: progress)
                 return
-            } catch let error where !(error is CancellationError) && (error as? OrbitError) != .cancelled {
+            } catch let error where !(error is CancellationError) && (error as? OrbitError) != .cancelled
+                        && !FFmpeg.isExistingOutputRefusal(error) {
                 Log.info("Joining by stream copy failed, re-encoding: \(error)")
                 try? FileManager.default.removeItem(at: output)
             }
@@ -153,7 +197,8 @@ public enum VideoToolsFFmpeg {
         let concat = "\(pads)concat=n=\(srcs.count):v=1:a=\(withAudio ? 1 : 0)[v]\(withAudio ? "[a]" : "")"
         var args = ["-filter_complex", (chains + [concat]).joined(separator: ";"), "-map", "[v]"]
         if withAudio { args += ["-map", "[a]"] }
-        try await ffmpeg.run(inputs: srcs, args: args + reencodeArgs(for: output), output: output, duration: total, progress: progress)
+        try await ffmpeg.run(inputs: srcs, args: args + reencodeArgs(for: output, qscale: ffmpeg.videoToolboxQScale),
+                             output: output, duration: total, progress: progress)
     }
 
     /// The concat demuxer's list file: one `file '<path>'` line per clip.
@@ -185,8 +230,10 @@ public enum VideoToolsFFmpeg {
 
     // MARK: Arguments
 
+    /// `-map 0`: every stream is kept (ffmpeg's default picks one video, one audio and one subtitle
+    /// stream, dropping other language tracks and attachments). Data streams can't always be muxed.
     private static func trimArgs(_ start: Double, _ end: Double) -> [String] {
-        ["-ss", number(start), "-to", number(end), "-c", "copy"]
+        ["-ss", number(start), "-to", number(end), "-map", "0", "-dn", "-c", "copy"]
     }
 
     /// `atempo` only takes 0.5 to 2 reliably, so other factors are chained: 4 is 2 then 2, 0.25 is 0.5 then 0.5.
@@ -201,12 +248,12 @@ public enum VideoToolsFFmpeg {
 
     /// Codecs for a re-encode into the output's container: the format's own recipe (MKV, whose recipe is a
     /// stream copy, gets h264/aac).
-    static func reencodeArgs(for output: URL) -> [String] {
+    static func reencodeArgs(for output: URL, qscale: Bool = true) -> [String] {
         let ext = output.pathExtension.lowercased()
-        if ext == "mkv" { return FFmpegRecipes.mkvFallback }
+        if ext == "mkv" { return FFmpegRecipes.mkvFallback(qscale: qscale) }
         let format = ext == "m4v" ? OutputFormat.mp4 : (OutputFormat(rawValue: ext) ?? .mp4)
-        let args = FFmpegRecipes.args(for: format)
-        return args.isEmpty || args == ["-c", "copy"] ? FFmpegRecipes.args(for: .mp4) : args
+        let args = FFmpegRecipes.args(for: format, qscale: qscale)
+        return args.isEmpty || args == ["-c", "copy"] ? FFmpegRecipes.args(for: .mp4, qscale: qscale) : args
     }
 
     /// Codecs for a bitrate-targeted encode into the output's container; `audioKbps` nil means no audio stream.
