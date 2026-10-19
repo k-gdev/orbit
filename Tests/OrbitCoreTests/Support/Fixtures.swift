@@ -133,3 +133,76 @@ extension Fixtures {
         guard CGImageDestinationFinalize(dest) else { preconditionFailure("Fixtures.writeImage: finalize failed") }
     }
 }
+
+// MARK: - Image tools
+
+import CoreImage
+import CoreImage.CIFilterBuiltins
+
+extension Fixtures {
+    /// A noisy JPEG (hard to compress) at JPEG quality `q`.
+    static func noisyJPEG(_ w: Int, _ h: Int, q: Double = 0.9, in dir: URL) -> URL {
+        let noisy = image("noisy-src-\(UUID().uuidString).png", w: w, h: h, noise: true, in: dir)
+        defer { try? FileManager.default.removeItem(at: noisy) }
+        let cg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(noisy as CFURL, nil)!, 0, nil)!
+        let out = dir.appending(path: "noisy-\(UUID().uuidString.prefix(6)).jpg", directoryHint: .notDirectory)
+        writeImage(cg, to: out, type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: q])
+        return out
+    }
+
+    /// A small JPEG with GPS (37.33 N, 122.03 W), Make `OrbitCam`, Model `X1`, BodySerialNumber `SN-12345` and DateTimeOriginal.
+    static func jpegWithMetadata(in dir: URL) -> URL {
+        let src = image("meta-src-\(UUID().uuidString).png", w: 64, h: 48, in: dir)
+        defer { try? FileManager.default.removeItem(at: src) }
+        let cg = CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(src as CFURL, nil)!, 0, nil)!
+        let out = dir.appending(path: "photo-\(UUID().uuidString.prefix(6)).jpg", directoryHint: .notDirectory)
+        let props: [CFString: Any] = [
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "OrbitCam", kCGImagePropertyTIFFModel: "X1"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifBodySerialNumber: "SN-12345",
+                                             kCGImagePropertyExifDateTimeOriginal: "2024:05:06 07:08:09"],
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 37.33, kCGImagePropertyGPSLatitudeRef: "N",
+                                            kCGImagePropertyGPSLongitude: 122.03, kCGImagePropertyGPSLongitudeRef: "W"],
+        ]
+        writeImage(cg, to: out, type: .jpeg, properties: props)
+        return out
+    }
+
+    /// A PNG QR code for `text`, with a quiet zone.
+    static func qr(_ text: String, in dir: URL, name: String = "qr.png") -> URL {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        let code = filter.outputImage!.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let side = Int(code.extent.width) + 80
+        let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        let rendered = CIContext().createCGImage(code, from: code.extent)!
+        ctx.interpolationQuality = .none
+        ctx.draw(rendered, in: CGRect(x: 40, y: 40, width: code.extent.width, height: code.extent.height))
+        let url = dir.appending(path: name, directoryHint: .notDirectory)
+        writeImage(ctx.makeImage()!, to: url, type: .png, properties: nil)
+        return url
+    }
+
+    static func bytes(_ url: URL) -> Data { (try? Data(contentsOf: url)) ?? Data() }
+
+    /// The fraction of pixels with alpha 0 and with alpha 255.
+    static func alphaHistogram(_ url: URL) -> (transparent: Double, opaque: Double) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              let ctx = CGContext(data: nil, width: cg.width, height: cg.height, bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return (0, 0) }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        let p = data.bindMemory(to: UInt8.self, capacity: cg.width * cg.height * 4)
+        var clear = 0, solid = 0
+        for i in 0..<(cg.width * cg.height) {
+            let a = p[i * 4 + 3]
+            if a == 0 { clear += 1 } else if a == 255 { solid += 1 }
+        }
+        let total = Double(cg.width * cg.height)
+        return (Double(clear) / total, Double(solid) / total)
+    }
+}
