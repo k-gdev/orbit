@@ -4,6 +4,8 @@ import Foundation
 public enum ProcessorRegistry {
     public static func standard(capabilities: Capabilities) -> [any Processor] {
         // Each processor task appends its processor here.
-        []
+        [
+            ImageProcessor(),
+        ]
     }
 }
