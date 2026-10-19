@@ -8,7 +8,8 @@ public enum DelimitedText {
         var field = ""
         var inQuotes = false
         var fieldStarted = false  // distinguishes an empty trailing line from a row with one empty field
-        let chars = Array(text.unicodeScalars)
+        var chars = Array(text.unicodeScalars)
+        if chars.first == "\u{FEFF}" { chars.removeFirst() }  // Excel-exported UTF-8 BOM
         let delim = delimiter.unicodeScalars.first ?? ","
         var i = 0
 

@@ -3,12 +3,23 @@ import Foundation
 /// How spreadsheet writers decide whether a cell is a number.
 enum SpreadsheetNumber {
     /// The canonical numeric text for `text`, or nil when it should stay text.
-    /// Rejects "nan"/"inf"/hex forms Swift's `Double(_:)` would accept, and leading-zero codes such as "007".
+    /// Only plain decimals (`-?digits[.digits]`) whose digits survive a Double round trip are numbers; anything
+    /// else (leading "+", exponent forms, "-0", leading-zero codes such as "007", more than 15 significant
+    /// digits, "nan"/"inf"/hex) stays text so identifiers are never altered.
     static func canonical(_ text: String) -> String? {
-        guard !text.isEmpty, text.unicodeScalars.allSatisfy({ "0123456789+-.eE".unicodeScalars.contains($0) }),
-              let d = Double(text), d.isFinite else { return nil }
-        let digits = text.drop { $0 == "+" || $0 == "-" }
-        if digits.count > 1, digits.first == "0", digits.dropFirst().first?.isNumber == true { return nil }
+        let body = text.hasPrefix("-") ? String(text.dropFirst()) : text
+        let parts = body.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        guard !parts.isEmpty, parts.count <= 2,
+              parts.allSatisfy({ $0.unicodeScalars.allSatisfy { ("0"..."9").contains($0) } }) else { return nil }
+        let intPart = parts[0], frac = parts.count == 2 ? parts[1] : ""
+        if intPart.isEmpty && frac.isEmpty { return nil }
+        if parts.count == 2 && frac.isEmpty { return nil }
+        if intPart.count > 1, intPart.first == "0" { return nil }
+        let sig = (intPart + frac).drop { $0 == "0" }
+        let trimmed = frac.isEmpty ? String(sig) : String(sig.reversed().drop { $0 == "0" }.reversed())
+        if trimmed.count > 15 { return nil }
+        guard let d = Double(text), d.isFinite else { return nil }
+        if d == 0 && text.hasPrefix("-") { return nil }
         if d == d.rounded(), abs(d) < 1e15 { return String(Int64(d)) }
         return "\(d)"
     }

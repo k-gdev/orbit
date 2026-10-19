@@ -45,6 +45,30 @@ import Testing
         for xml in [sheet, wb] { #expect(XMLDocumentCheck.isWellFormed(xml)) }
     }
 
+    @Test func spreadsheetNumberKeepsIdentifiersAsText() {
+        for t in ["+15551234567", "1E5", "1e5", "-0", "-0.0", "1234567890123456", "0.1234567890123456", "007", "nan", "0x10", "1.", ".", "-", "1.2.3", "--1", ""] {
+            #expect(SpreadsheetNumber.canonical(t) == nil, "\(t) should stay text")
+        }
+        #expect(SpreadsheetNumber.canonical("3") == "3")
+        #expect(SpreadsheetNumber.canonical("-12") == "-12")
+        #expect(SpreadsheetNumber.canonical("1.5") == "1.5")
+        #expect(SpreadsheetNumber.canonical("0.25") == "0.25")
+        #expect(SpreadsheetNumber.canonical("123456789012345") == "123456789012345")
+    }
+
+    @Test func xlsxKeepsIdentifierTextCells() async throws {
+        let o = tmp.appending(path: "id.xlsx")
+        try await XLSXWriter.write(rows: [["+15551234567", "1E5", "-0", "1234567890123456789"]], sheetName: "S", to: o)
+        let sheet = try await Fixtures.unzipRead(o, "xl/worksheets/sheet1.xml")
+        for t in ["+15551234567", "1E5", "-0", "1234567890123456789"] { #expect(sheet.contains(">\(t)<")) }
+        #expect(!sheet.contains("<v>"))
+    }
+
+    @Test func csvStripsLeadingBOM() {
+        #expect(DelimitedText.parse("\u{FEFF}name,age\nA,1\n", delimiter: ",") == [["name", "age"], ["A", "1"]])
+        #expect(DelimitedText.parse("\u{FEFF}\"q\",b\n", delimiter: ",") == [["q", "b"]])
+    }
+
     @Test func xlsxRefusesToOverwrite() async throws {
         let o = tmp.appending(path: "x.xlsx")
         try Data("mine".utf8).write(to: o)
