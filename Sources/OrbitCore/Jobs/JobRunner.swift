@@ -38,15 +38,6 @@ public final class JobRunner: Sendable {
             JobRequest(items: $0, action: action, parameters: request.parameters, options: request.options)
         }
 
-        // Route every unit before doing any work, so an unsupported batch writes nothing.
-        let routes: [(any Processor)?] = try units.map { unit in
-            if !combining, Self.isAlreadyInTargetFormat(unit) { return nil }
-            guard let processor = processors.first(where: { $0.canHandle(unit) }) else {
-                throw OrbitError.unsupported(Self.unsupportedMessage)
-            }
-            return processor
-        }
-
         let ledger = JobLedger(sources: items.map(\.url), trash: trash)
         let reporter = ProgressReporter(unitCount: units.count, sink: progress)
         defer {
@@ -62,14 +53,26 @@ public final class JobRunner: Sendable {
         var failures: [JobFailure] = []
         var firstError: (any Error)?
         var usedFallback = false
+        func recordFailure(_ error: any Error, unit: JobRequest, title: String) {
+            let first = unit.items[0]
+            Log.error("\(title) failed for \(first.url.lastPathComponent): \(error.localizedDescription)")
+            failures.append(JobFailure(url: first.url, message: error.localizedDescription))
+            if firstError == nil { firstError = error }
+        }
 
         for (index, unit) in units.enumerated() {
             let first = unit.items[0]
             let title = action.progressTitle(for: first.category)
             let fileName = first.url.lastPathComponent
             if Task.isCancelled { throw cancelled() }
-            guard let processor = routes[index] else {
+            if !combining, Self.isAlreadyInTargetFormat(unit) {
                 // Ruling R11: already in the target format. Counts as done; nothing is written.
+                reporter.finish(index, title: title, fileName: fileName)
+                continue
+            }
+            guard let processor = processors.first(where: { $0.canHandle(unit) }) else {
+                // Ruling R20: no processor for this unit is a unit failure; the batch carries on.
+                recordFailure(OrbitError.unsupported(Self.unsupportedMessage), unit: unit, title: title)
                 reporter.finish(index, title: title, fileName: fileName)
                 continue
             }
@@ -86,9 +89,7 @@ public final class JobRunner: Sendable {
                 ledger.removeTempDirectories(unit: index)
                 if Self.isCancellation(error) || Task.isCancelled { throw cancelled() }
                 ledger.discard(unit: index)
-                Log.error("\(title) failed for \(fileName): \(error.localizedDescription)")
-                failures.append(JobFailure(url: first.url, message: error.localizedDescription))
-                if firstError == nil { firstError = error }
+                recordFailure(error, unit: unit, title: title)
             }
             reporter.finish(index, title: title, fileName: fileName)
         }
@@ -129,6 +130,7 @@ public final class JobRunner: Sendable {
                     [OutputNamer.uniqueURL(in: folder, base: name, ext: ext, exists: taken)]
                 }[0]
             },
+            claimDestination: { destination, base, ext in ledger.claim(in: destination, base: base, ext: ext) },
             tempDirectory: { try ledger.makeTempDirectory(unit: unit) })
     }
 
@@ -201,9 +203,10 @@ private func existsOnDisk(_ url: URL) -> Bool {
     return fm.fileExists(atPath: url.path) || (try? fm.attributesOfItem(atPath: url.path)) != nil
 }
 
-/// Names reserved by every job running in this process, so two jobs writing beside the same
-/// source never get the same name. A job releases its names when it ends; by then its outputs
-/// exist on disk and the disk check covers them.
+/// Names held by every job running in this process: output reservations and claimed destinations
+/// (R19). Two jobs never get the same name, so one job's moved or copied file can't land on another
+/// job's pending reservation and then be trashed by its cleanup. A job releases its names when it
+/// ends; by then its files exist on disk and the disk check covers them.
 private final class ActiveReservations: @unchecked Sendable {
     static let shared = ActiveReservations()
     private let lock = NSLock()
@@ -223,10 +226,12 @@ private final class ActiveReservations: @unchecked Sendable {
     }
 }
 
-/// One job's reserved URLs and scratch folders: the only list cleanup ever trashes from.
+/// One job's reserved URLs and scratch folders. `reserved` is the only list cleanup ever trashes
+/// from; `claimed` destinations are held against other jobs but never cleaned up.
 private final class JobLedger: @unchecked Sendable {
     private let lock = NSLock()
     private var reserved: [(url: URL, unit: Int)] = []
+    private var claimed: [URL] = []
     private var temps: [(url: URL, unit: Int)] = []
     private let sourceKeys: Set<String>
     private let trash: @Sendable (URL) throws -> Void
@@ -241,6 +246,16 @@ private final class JobLedger: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         reserved += urls.map { ($0, unit) }
         return urls
+    }
+
+    /// A unique `base[.ext]` in `folder`, held for the job but never trashed by its cleanup (R19).
+    func claim(in folder: URL, base: String, ext: String) -> URL {
+        let url = ActiveReservations.shared.reserve { taken in
+            [OutputNamer.uniqueURL(in: folder, base: base, ext: ext, exists: taken)]
+        }[0]
+        lock.lock(); defer { lock.unlock() }
+        claimed.append(url)
+        return url
     }
 
     func makeTempDirectory(unit: Int) throws -> URL {
@@ -276,7 +291,10 @@ private final class JobLedger: @unchecked Sendable {
     /// Ends the job: removes its scratch folders and releases its names for other jobs.
     func close() {
         removeTempDirectories()
-        ActiveReservations.shared.release(reservedURLs(unit: nil))
+        lock.lock()
+        let held = reserved.map(\.url) + claimed
+        lock.unlock()
+        ActiveReservations.shared.release(held)
     }
 
     private func reservedURLs(unit: Int?) -> [URL] {

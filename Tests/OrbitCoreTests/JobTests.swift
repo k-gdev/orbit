@@ -313,14 +313,76 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
         #expect(picky.units.isEmpty && ok.units.count == 1 && rec.units.isEmpty && r.outputs.count == 1)
     }
 
-    @Test func unroutableUnitStopsBeforeAnyWork() async throws {
-        let onlyA = FakeProcessor(accepts: { named("a.txt", in: $0) && $0.items.count == 1 })
-        let request = req(["a.txt", "b.txt"], .convert(.md))
-        await #expect(throws: OrbitError.unsupported("Orbit can't do that with this file.")) {
-            try await self.runner([onlyA]).run(request, progress: { _ in })
+    @Test func unroutableUnitIsAUnitFailure() async throws {   // R20
+        let onlyPNG = FakeProcessor(accepts: { named("a.png", in: $0) })
+        let r = try await runner([onlyPNG]).run(req(["weird.bin", "a.png"], .tool(.compress, nil)), progress: { _ in })
+        #expect(onlyPNG.units.map { $0.map(\.url.lastPathComponent) } == [["a.png"]])
+        #expect(r.outputs.map(\.lastPathComponent) == ["a-converted.txt"])
+        #expect(r.failures == [JobFailure(url: sources[0], message: "Orbit can't do that with this file.")])
+        #expect(r.summary == "1 of 2 done · 1 failed")
+        #expect(trashLog.isEmpty)
+    }
+
+    // MARK: Claimed destinations (R19)
+
+    @Test func claimsAndReservationsNeverShareAName() async throws {
+        let request = req(["a.txt"], .convert(.md))
+        let inner = runner([ok])
+        let names = Locked<[String]>([])
+        let folder = dir
+        let claimer = FakeProcessor { r, c in
+            let claimed = c.claimDestination(folder, "a-converted", "txt")         // held, not yet written
+            let innerOutput = try await inner.run(request, progress: { _ in }).outputs[0]
+            let reserved = c.outputURL(r.items[0].url, "converted", "txt")        // a claim blocks reservations too
+            let claimedAgain = c.claimDestination(folder, "a-converted", "txt")    // and a pending reservation blocks a claim
+            names.mutate { $0 = [claimed, innerOutput, reserved, claimedAgain].map(\.lastPathComponent) }
+            return ProcessorOutput()
         }
-        #expect(onlyA.units.isEmpty)
-        #expect(try listing(dir) == ["a.txt", "b.txt"])
+        _ = try await runner([claimer]).run(request, progress: { _ in })
+        #expect(names.value == ["a-converted.txt", "a-converted-2.txt", "a-converted-3.txt", "a-converted-4.txt"])
+    }
+
+    @Test func claimedDestinationsAreNeverTrashed() async throws {
+        let dest = root.appending(path: "dest", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: false)
+        let request = req(["a.txt"], .action(.moveTo, .folder(dest)))
+        for (index, outcome) in [OrbitError.unsupported("disk full"), .cancelled].enumerated() {
+            let mover = FakeProcessor { r, c in
+                // Stands in for the user's file arriving at its claimed destination.
+                _ = try write(c.claimDestination(dest, "a\(index)", "txt"), "user's file")
+                _ = try write(c.outputURL(r.items[0].url, "partial\(index)", "txt"))   // a real reservation, for contrast
+                throw outcome
+            }
+            await #expect(throws: outcome, "case \(index)") {
+                try await self.runner([mover]).run(request, progress: { _ in })
+            }
+            #expect(try String(contentsOf: dest.appending(path: "a\(index).txt"), encoding: .utf8) == "user's file", "case \(index)")
+        }
+        #expect(trashLog.map(\.lastPathComponent) == ["a-partial0.txt", "a-partial1.txt"])
+        #expect(try listing(dest) == ["a0.txt", "a1.txt"])
+        expectSourcesIntact()
+    }
+
+    @Test func claimIsReleasedWhenTheJobEnds() async throws {
+        let request = req(["a.txt"], .action(.copyTo, .folder(dir)))
+        let claimed = Locked<[String]>([])
+        let folder = dir
+        func claimer(then outcome: OrbitError?) -> FakeProcessor {
+            FakeProcessor { _, c in
+                claimed.mutate { $0.append(c.claimDestination(folder, "held", "txt").lastPathComponent) }   // never written
+                if let outcome { throw outcome }
+                return ProcessorOutput()
+            }
+        }
+        _ = try await runner([claimer(then: nil)]).run(request, progress: { _ in })
+        await #expect(throws: OrbitError.unsupported("nope")) {
+            try await self.runner([claimer(then: .unsupported("nope"))]).run(request, progress: { _ in })
+        }
+        await #expect(throws: OrbitError.cancelled) {
+            try await self.runner([claimer(then: .cancelled)]).run(request, progress: { _ in })
+        }
+        _ = try await runner([claimer(then: nil)]).run(request, progress: { _ in })
+        #expect(claimed.value == ["held.txt", "held.txt", "held.txt", "held.txt"])
     }
 
     // MARK: Cancellation

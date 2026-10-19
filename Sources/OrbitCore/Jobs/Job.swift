@@ -44,9 +44,10 @@ public struct JobRequest: Sendable {
 
 /// What `JobRunner` gives a processor for one unit of work.
 ///
-/// Every URL the output closures hand out is reserved: it is unique against files on disk and
-/// against every other reservation not yet written (in this job and in any job running at the
-/// same time), and it is registered for cleanup if the unit fails or the job is cancelled.
+/// Every URL `outputURL`, `numberedOutputURLs` and `combinedOutputURL` hand out is reserved: it is
+/// unique against files on disk and against every name held but not yet written (in this job and in
+/// any job running at the same time), and it is registered for cleanup if the unit fails or the job
+/// is cancelled. `claimDestination` is unique in the same way but is never cleaned up.
 public struct JobContext: Sendable {
     public let options: JobOptions
     public let capabilities: Capabilities
@@ -58,6 +59,11 @@ public struct JobContext: Sendable {
     public let numberedOutputURLs: @Sendable (_ source: URL, _ suffix: String, _ ext: String, _ count: Int) -> [URL]
     /// `(base ?? stem(first))[-suffix].<ext>` in the output folder; an empty `ext` names a folder.
     public let combinedOutputURL: @Sendable (_ first: URL, _ base: String?, _ suffix: String, _ ext: String) -> URL
+    /// A unique `base[.ext]` in any folder, for actions that name their own destinations (Copy To,
+    /// Move To). It is unique against disk and against every name other running jobs hold, and it
+    /// stays held until this job ends, but cleanup never trashes it: what lands there is the
+    /// user's file, and the processor rolls back its own work (R19).
+    public let claimDestination: @Sendable (_ folder: URL, _ base: String, _ ext: String) -> URL
     /// A new empty scratch folder, deleted (not trashed) when the unit ends. Outputs must not live
     /// here, and nothing the user owns may be moved into it; copy instead.
     public let tempDirectory: @Sendable () throws -> URL
@@ -67,6 +73,7 @@ public struct JobContext: Sendable {
                 outputURL: @escaping @Sendable (_ source: URL, _ suffix: String, _ ext: String) -> URL,
                 numberedOutputURLs: @escaping @Sendable (_ source: URL, _ suffix: String, _ ext: String, _ count: Int) -> [URL],
                 combinedOutputURL: @escaping @Sendable (_ first: URL, _ base: String?, _ suffix: String, _ ext: String) -> URL,
+                claimDestination: @escaping @Sendable (_ folder: URL, _ base: String, _ ext: String) -> URL,
                 tempDirectory: @escaping @Sendable () throws -> URL) {
         self.options = options
         self.capabilities = capabilities
@@ -74,6 +81,7 @@ public struct JobContext: Sendable {
         self.outputURL = outputURL
         self.numberedOutputURLs = numberedOutputURLs
         self.combinedOutputURL = combinedOutputURL
+        self.claimDestination = claimDestination
         self.tempDirectory = tempDirectory
     }
 }
