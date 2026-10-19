@@ -6,6 +6,7 @@ public enum ProcessorRegistry {
         // Each processor task appends its processor here.
         [
             ImageProcessor(),
+            ActionProcessor(),
         ]
     }
 }
