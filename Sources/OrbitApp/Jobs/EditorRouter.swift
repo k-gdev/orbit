@@ -1,8 +1,8 @@
 import AppKit
 import OrbitCore
 
-/// Opens the editor a slice asks for. Choose…, the image editors (Markup, Adjust, Add BG) and the document and
-/// utility editors (Redact, Organize, Split, Metadata, Custom compress) exist so far; Task 27 adds the media editors.
+/// Opens the editor a slice asks for: Choose…, the image editors (Markup, Adjust, Add BG), the document and utility
+/// editors (Redact, Organize, Split, Metadata, Custom compress) and the media editors (Trim, Split, Snapshot, Crop, Bleep).
 @MainActor
 enum EditorRouter {
     static let notBuilt = "This editor isn't built yet."
@@ -44,8 +44,16 @@ enum EditorRouter {
             openMetadata(items, action: action, coordinator: coordinator)
         case .compressCustom:
             openCompressCustom(items, action: action, coordinator: coordinator)
-        default:
-            coordinator.showError(notBuilt)
+        case .mediaTrim:
+            openMedia(items, mode: .trim, action: action, coordinator: coordinator)
+        case .mediaSplit:
+            openMedia(items, mode: .split, action: action, coordinator: coordinator)
+        case .videoSnapshot:
+            openMedia(items, mode: .snapshot, action: action, coordinator: coordinator)
+        case .audioBleep:
+            openMedia(items, mode: .bleep, action: action, coordinator: coordinator)
+        case .videoCrop:
+            if openVideoCrop(items, action: action, host: mediaHost(coordinator)) == nil { coordinator.showError(notBuilt) }
         }
     }
 
@@ -158,25 +166,38 @@ enum EditorRouter {
         Task { await model.load(item.url) }
     }
 
-    /// Reads audio tags for the Metadata editor. `AudioMetadata` (Task 19) is not in this build yet; when it lands, set this to
-    /// `{ AudioMetadata.read($0) }` and audio files get their editor. Until then audio is refused with a plain message.
-    static var audioMetadataLoader: MetadataLoader?
+    /// Reads audio tags for the Metadata editor, through ffmpeg for formats AVFoundation can't read (when it is installed).
+    /// `AudioMetadata.read` is async, so this is async too.
+    static var audioMetadataLoader: (@Sendable (URL, FFmpeg?) async -> [MetadataField])? = { url, ffmpeg in
+        await AudioMetadata.read(url, ffmpeg: ffmpeg)
+    }
 
     private static func openMetadata(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
         guard let item = items.first else { return coordinator.showError(notBuilt) }
-        let model: MetadataModel
         switch item.category {
         case .image:
-            model = MetadataModel(allowsArtwork: false, loader: { ImageMetadata.read($0) })
+            let model = MetadataModel(allowsArtwork: false, loader: { ImageMetadata.read($0) })
+            model.load(item.url)
+            presentMetadata(model, item: item, action: action, coordinator: coordinator)
         case .audio:
             guard let loader = audioMetadataLoader else {
                 return coordinator.showError("Editing audio metadata isn't available yet.")
             }
-            model = MetadataModel(allowsArtwork: true, loader: loader)
+            // The panel is sized once, from its content, so the tags are read before it opens.
+            let helper = coordinator.capabilities.ffmpeg.map { FFmpeg(executable: $0) }
+            Task {
+                let fields = await loader(item.url, helper)
+                let model = MetadataModel(allowsArtwork: true, loader: { _ in fields })
+                model.load(item.url)
+                presentMetadata(model, item: item, action: action, coordinator: coordinator)
+            }
         default:
-            return coordinator.showError(notBuilt)
+            coordinator.showError(notBuilt)
         }
-        model.load(item.url)
+    }
+
+    private static func presentMetadata(_ model: MetadataModel, item: DroppedItem, action: SliceAction,
+                                        coordinator: JobCoordinator) {
         EditorWindowController.present(width: MetadataEditor.width, content: { close, _ in
             MetadataEditor(title: "Metadata", model: model, onClose: close, onApply: { edits in
                 let request = JobRequest(items: [item], action: action, parameters: .metadata(edits),
@@ -190,6 +211,81 @@ enum EditorRouter {
                 close()
             })
         })
+    }
+
+    // MARK: Media editors
+
+    /// What a media editor needs from the app, so the live check can open one without a coordinator: how to make the
+    /// session (the check swaps the preview-proxy maker), the job options, and where the request goes.
+    @MainActor
+    struct MediaHost {
+        var ffmpeg: FFmpeg?
+        var options: () -> JobOptions
+        var submit: (JobRequest) -> Void
+        var makeSession: (DroppedItem) -> MediaSession
+
+        init(ffmpeg: FFmpeg?, options: @escaping () -> JobOptions, submit: @escaping (JobRequest) -> Void,
+             makeSession: ((DroppedItem) -> MediaSession)? = nil) {
+            self.ffmpeg = ffmpeg
+            self.options = options
+            self.submit = submit
+            self.makeSession = makeSession ?? { MediaSession(item: $0, ffmpeg: ffmpeg) }
+        }
+    }
+
+    private static func mediaHost(_ coordinator: JobCoordinator) -> MediaHost {
+        MediaHost(ffmpeg: coordinator.capabilities.ffmpeg.map { FFmpeg(executable: $0) },
+                  options: { coordinator.settings.jobOptions },
+                  submit: { coordinator.run($0, near: NSEvent.mouseLocation) })
+    }
+
+    /// The file a media editor opens for: the first of the wanted kinds dropped (the slice only appears for one file).
+    private static func mediaItem(in items: [DroppedItem], _ categories: Set<FileCategory>) -> DroppedItem? {
+        items.first { categories.contains($0.category) }
+    }
+
+    private static func openMedia(_ items: [DroppedItem], mode: MediaEditMode, action: SliceAction, coordinator: JobCoordinator) {
+        if openMediaRange(items, mode: mode, action: action, host: mediaHost(coordinator)) == nil {
+            coordinator.showError(notBuilt)
+        }
+    }
+
+    /// Trim, Split, Snapshot and Bleep. `onClose` stops the player however the panel closes. Nil when `items` holds
+    /// nothing this editor can open.
+    @discardableResult
+    static func openMediaRange(_ items: [DroppedItem], mode: MediaEditMode, action: SliceAction, host: MediaHost) -> EditorWindowController? {
+        let wanted: Set<FileCategory> = switch mode {
+        case .trim, .split: [.video, .audio]
+        case .snapshot: [.video]
+        case .bleep: [.audio]
+        }
+        guard let item = mediaItem(in: items, wanted) else { return nil }
+        let session = host.makeSession(item)
+        let model = MediaRangeModel(session: session, mode: mode)
+        let title = model.title(for: item.category == .audio ? "Audio" : "Video")
+        let controller = EditorWindowController.present(width: MediaRangeEditor.width, onClose: { session.stop() }, content: { close, _ in
+            MediaRangeEditor(title: title, model: model, onClose: close, onApply: { parameters in
+                host.submit(JobRequest(items: [item], action: action, parameters: parameters, options: host.options()))
+                close()
+            })
+        })
+        Task { await model.load() }
+        return controller
+    }
+
+    @discardableResult
+    static func openVideoCrop(_ items: [DroppedItem], action: SliceAction, host: MediaHost) -> EditorWindowController? {
+        guard let item = mediaItem(in: items, [.video]) else { return nil }
+        let session = host.makeSession(item)
+        let model = CropModel(session: session)
+        let controller = EditorWindowController.present(width: VideoCropEditor.width, onClose: { session.stop() }, content: { close, _ in
+            VideoCropEditor(title: "Crop Video", model: model, onClose: close, onApply: { parameters in
+                host.submit(JobRequest(items: [item], action: action, parameters: parameters, options: host.options()))
+                close()
+            })
+        })
+        Task { await model.load() }
+        return controller
     }
 
     private static func openCompressCustom(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {

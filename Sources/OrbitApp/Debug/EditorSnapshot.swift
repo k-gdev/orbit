@@ -7,12 +7,15 @@ import SwiftUI
 ///
 ///     Orbit --snapshot-editor <markup|adjust|addbg|metadata|compress> <image file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]
 ///     Orbit --snapshot-editor <redact|organize|split> <pdf file> <out.png> [--replace]
+///     Orbit --snapshot-editor <trim|msplit|snapshot|crop> <video file> <out.png> [--replace] [--tool free|1:1|4:3|16:9|9:16]
+///     Orbit --snapshot-editor <trim|msplit|bleep> <audio file> <out.png> [--replace]
 ///
 /// Uses sample edits on the given file and a flat glass stand-in; refuses to overwrite a PNG unless `--replace`.
 enum EditorSnapshot {
     static let flag = "--snapshot-editor"
-    static let kinds = ["markup", "adjust", "addbg", "metadata", "compress", "redact", "organize", "split"]
-    static let usage = "usage: Orbit --snapshot-editor <\(kinds.joined(separator: "|"))> <file> <out.png> [--replace] [--tool crop|resize|arrow|text|blackout]"
+    static let kinds = ["markup", "adjust", "addbg", "metadata", "compress", "redact", "organize", "split",
+                        "trim", "msplit", "snapshot", "bleep", "crop"]
+    static let usage = "usage: Orbit --snapshot-editor <\(kinds.joined(separator: "|"))> <file> <out.png> [--replace] [--tool <name>]"
 
     struct Failure: Error, CustomStringConvertible { let description: String }
 
@@ -87,6 +90,13 @@ enum EditorSnapshot {
             if let first = model.pages.first { model.rotate(first.id) }
             editor = AnyView(PDFOrganizeEditor(title: "Organize Pages", model: model, onClose: {}, onApply: { _ in }))
             width = PDFOrganizeEditor.width
+        case "trim", "msplit", "snapshot", "bleep":
+            let (model, title) = try mediaRangeModel(kind, url)
+            editor = AnyView(MediaRangeEditor(title: title, model: model, onClose: {}, onApply: { _ in }))
+            width = MediaRangeEditor.width
+        case "crop":
+            editor = AnyView(VideoCropEditor(title: "Crop Video", model: try cropModel(url, aspect: tool), onClose: {}, onApply: { _ in }))
+            width = VideoCropEditor.width
         default:
             guard let document = PDFDocument(url: url) else { throw Failure(description: "can't read \(url.path)") }
             let model = SplitModel()
@@ -158,6 +168,83 @@ enum EditorSnapshot {
         model.set(image: image, subject: subject)
         model.mode = .gradient
         model.renderNow()
+        return model
+    }
+
+    // MARK: Media editors
+
+    /// Runs the main run loop until `condition` holds (the sessions load asynchronously and `ImageRenderer` draws once).
+    @MainActor
+    private static func spin(until condition: () -> Bool, timeout: TimeInterval = 60) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+    }
+
+    @MainActor
+    private static func session(_ url: URL, stills: Bool) -> MediaSession {
+        let ffmpeg = HelperLocator().locate(customFFmpegPath: nil).ffmpeg.map { FFmpeg(executable: $0) }
+        let session = MediaSession(item: DroppedItem(url: url), ffmpeg: ffmpeg)
+        session.generatesStills = stills
+        return session
+    }
+
+    /// The Trim, Split, Snapshot or Bleep editor with sample edits: a trimmed middle, two split points, a bleep range.
+    @MainActor
+    private static func mediaRangeModel(_ kind: String, _ url: URL) throws -> (MediaRangeModel, String) {
+        let mode: MediaEditMode = switch kind {
+        case "trim": .trim
+        case "msplit": .split
+        case "snapshot": .snapshot
+        default: .bleep
+        }
+        let session = session(url, stills: true)
+        let model = MediaRangeModel(session: session, mode: mode)
+        var loaded = false
+        Task { await model.load(); loaded = true }
+        spin(until: { loaded })
+        guard case .ready = session.status else { throw Failure(description: "can't open \(url.lastPathComponent) (\(session.status))") }
+        let d = session.duration
+        switch mode {
+        case .trim:
+            model.setStart(d * 0.2)
+            model.setEnd(d * 0.75)
+            session.seek(to: d * 0.45)
+        case .split:
+            model.splitEvenly(into: 3)
+            session.seek(to: d * 0.5)
+        case .snapshot:
+            session.seek(to: d * 0.4)
+        case .bleep:
+            model.setStart(d * 0.2)
+            model.setEnd(d * 0.3)
+            model.addRange()
+            model.setStart(d * 0.6)
+            model.setEnd(d * 0.7)
+            session.seek(to: d * 0.65)
+        }
+        if !session.isAudio { spin(until: { false }, timeout: 1.5) }
+        let kindName = session.isAudio ? "Audio" : "Video"
+        return (model, model.title(for: kindName))
+    }
+
+    @MainActor
+    private static func cropModel(_ url: URL, aspect: String?) throws -> CropModel {
+        let session = session(url, stills: true)
+        let model = CropModel(session: session)
+        var loaded = false
+        Task { await model.load(); loaded = true }
+        spin(until: { loaded })
+        guard case .ready = session.status, session.videoSize != nil else {
+            throw Failure(description: "can't open \(url.lastPathComponent) as a video (\(session.status))")
+        }
+        session.seek(to: session.duration * 0.3)
+        if let option = VideoCropAspect.all.first(where: { $0.title.lowercased() == aspect?.lowercased() || ($0.ratio == nil && aspect == "free") }) {
+            model.setAspect(option)
+        } else {
+            // Like the hero frame: the full width, 62% of the height.
+            model.setHeightPercent(62)
+        }
+        spin(until: { false }, timeout: 1.5)
         return model
     }
 }
