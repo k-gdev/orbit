@@ -17,7 +17,7 @@ public enum ImageConverter {
             downscaled = true
         }
         if (format == .jpg || format == .bmp), ImageFile.hasAlpha(image) {
-            image = try flattenedOnWhite(image)
+            image = try ImageBitmap.flattenedOnWhite(image)
         }
 
         let quality: Double? = switch format {
@@ -63,36 +63,16 @@ public enum ImageConverter {
         Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     }
 
-    private static func context(width: Int, height: Int, opaque: Bool) throws -> CGContext {
-        let info = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
-        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: info) else {
-            throw OrbitError.unsupported("Orbit couldn't prepare this image.")
-        }
-        ctx.interpolationQuality = .high
-        return ctx
-    }
-
     private static func finish(_ ctx: CGContext) throws -> CGImage {
         guard let image = ctx.makeImage() else { throw OrbitError.unsupported("Orbit couldn't prepare this image.") }
         return image
-    }
-
-    private static func flattenedOnWhite(_ image: CGImage) throws -> CGImage {
-        let ctx = try context(width: image.width, height: image.height, opaque: true)
-        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(rect)
-        ctx.draw(image, in: rect)
-        return try finish(ctx)
     }
 
     private static func scaled(_ image: CGImage, toFit edge: Int) throws -> CGImage {
         let factor = Double(edge) / Double(max(image.width, image.height))
         let w = max(1, Int((Double(image.width) * factor).rounded()))
         let h = max(1, Int((Double(image.height) * factor).rounded()))
-        let ctx = try context(width: w, height: h, opaque: false)
+        let ctx = try ImageBitmap.makeContext(width: w, height: h, opaque: false)
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return try finish(ctx)
     }

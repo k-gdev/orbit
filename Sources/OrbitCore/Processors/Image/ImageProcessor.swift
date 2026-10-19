@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Image format conversion, several images into one PDF, and the one-shot image tools
@@ -7,7 +8,7 @@ public struct ImageProcessor: Processor {
 
     public init() {}
 
-    private static let tools: Set<ToolID> = [.removeBackground, .compress, .metadata, .readQR, .collage]
+    private static let tools: Set<ToolID> = [.removeBackground, .compress, .metadata, .readQR, .collage, .markup, .adjust, .addBackground]
 
     public func canHandle(_ request: JobRequest) -> Bool {
         guard !request.items.isEmpty, request.items.allSatisfy({ $0.category == .image }) else { return false }
@@ -85,12 +86,75 @@ public struct ImageProcessor: Processor {
                     try ImageMetadata.write(item.url, to: output, edits: edits)
                     outputs.append(output)
                 }
+            case .markup:
+                guard case .markup(let document) = request.parameters else {
+                    throw OrbitError.unsupported("There is no markup to save.")
+                }
+                outputs.append(try writeEdit(of: item, suffix: "edited", context: context) {
+                    try MarkupRenderer.render($0, document)
+                })
+            case .adjust:
+                guard case .adjust(let settings) = request.parameters else {
+                    throw OrbitError.unsupported("There are no adjustments to save.")
+                }
+                outputs.append(try writeEdit(of: item, suffix: "adjusted", context: context) {
+                    try AdjustRenderer.render($0, settings)
+                })
+            case .addBackground:
+                guard case .background(let style) = request.parameters else {
+                    throw OrbitError.unsupported("Choose a background first.")
+                }
+                outputs.append(try addBackground(to: item, style: style, context: context))
             default:
                 throw OrbitError.unsupported("Orbit can't do that with this file.")
             }
             context.progress(Double(index + 1) / Double(request.items.count))
         }
         return ProcessorOutput(outputs: outputs, hint: request.items.count == 1 ? hint : nil)
+    }
+
+    /// Formats an edited copy can be saved in as-is; svg, ico, gif and the rest become PNG.
+    private static let editFormats: Set<OutputFormat> = [.jpg, .png, .heic, .webp, .tiff, .avif, .bmp]
+
+    private func writeEdit(of item: DroppedItem, suffix: String, context: JobContext,
+                           edit: (CGImage) throws -> CGImage) throws -> URL {
+        let format = OutputFormat(rawValue: item.formatKey).flatMap { Self.editFormats.contains($0) ? $0 : nil } ?? .png
+        var image = try edit(try ImageFile.loadOriented(item.url))
+        if format == .jpg || format == .bmp { image = try ImageBitmap.flattenedOnWhite(image) }
+        let quality: Double? = switch format {
+        case .jpg: context.options.jpegQuality
+        case .heic: context.options.heicQuality
+        case .webp: context.options.webpQuality
+        case .avif: context.options.avifQuality
+        default: nil
+        }
+        let output = context.outputURL(item.url, suffix, format.fileExtension)
+        try ImageFile.write(image, to: output, format: format, quality: quality,
+                            properties: ImageConverter.carriedProperties(from: ImageFile.properties(item.url), for: format))
+        return output
+    }
+
+    private func addBackground(to item: DroppedItem, style: BackgroundStyle, context: JobContext) throws -> URL {
+        let original = try ImageFile.loadOriented(item.url)
+        let subject = Self.hasTransparentPixels(original) ? original : try BackgroundRemover.cutout(item.url)
+        let image = try BackgroundComposer.compose(subject: subject, original: original, style: style)
+        let output = context.outputURL(item.url, "bg", "png")
+        try ImageFile.write(image, to: output, format: .png, quality: nil, properties: nil)
+        return output
+    }
+
+    /// True when at least one pixel is not fully opaque.
+    static func hasTransparentPixels(_ image: CGImage) -> Bool {
+        guard ImageFile.hasAlpha(image),
+              let ctx = try? ImageBitmap.makeContext(width: image.width, height: image.height, opaque: false),
+              let data = ctx.data else { return false }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let bytes = data.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * image.height)
+        for y in 0..<image.height {
+            let row = y * ctx.bytesPerRow
+            for x in 0..<image.width where bytes[row + x * 4 + 3] != 255 { return true }
+        }
+        return false
     }
 
     private static func compressTarget(preset: Preset?, parameters: ToolParameters) throws -> CompressTarget {
