@@ -1,8 +1,8 @@
 import AppKit
 import OrbitCore
 
-/// Opens the editor a slice asks for. Choose… and the image editors (Markup, Adjust, Add BG) exist so far;
-/// Tasks 27-28 replace the rest.
+/// Opens the editor a slice asks for. Choose…, the image editors (Markup, Adjust, Add BG) and the document and
+/// utility editors (Redact, Organize, Split, Metadata, Custom compress) exist so far; Task 27 adds the media editors.
 @MainActor
 enum EditorRouter {
     static let notBuilt = "This editor isn't built yet."
@@ -34,6 +34,16 @@ enum EditorRouter {
             openAdjust(items, action: action, coordinator: coordinator)
         case .addBackground:
             openAddBackground(items, action: action, coordinator: coordinator)
+        case .pdfRedact:
+            openRedact(items, action: action, coordinator: coordinator)
+        case .pdfOrganize:
+            openOrganize(items, action: action, coordinator: coordinator)
+        case .pdfSplit:
+            openSplit(items, action: action, coordinator: coordinator)
+        case .metadataEdit:
+            openMetadata(items, action: action, coordinator: coordinator)
+        case .compressCustom:
+            openCompressCustom(items, action: action, coordinator: coordinator)
         default:
             coordinator.showError(notBuilt)
         }
@@ -100,6 +110,110 @@ enum EditorRouter {
             })
         })
         Task { await model.load(first.url) }
+    }
+
+    // MARK: Document and utility editors
+
+    private static func firstPDF(in items: [DroppedItem]) -> DroppedItem? { items.first { $0.category == .pdf } }
+
+    private static func openRedact(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
+        guard let item = firstPDF(in: items) else { return coordinator.showError(notBuilt) }
+        let model = RedactModel()
+        EditorWindowController.present(width: PDFRedactEditor.width, content: { close, _ in
+            PDFRedactEditor(title: "Redact", model: model, onClose: close, onApply: { redactions in
+                let request = JobRequest(items: [item], action: action, parameters: .pdfRedactions(redactions),
+                                         options: coordinator.settings.jobOptions)
+                coordinator.run(request, near: NSEvent.mouseLocation)
+                close()
+            })
+        })
+        model.load(item.url)
+    }
+
+    private static func openOrganize(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
+        guard let item = firstPDF(in: items) else { return coordinator.showError(notBuilt) }
+        let model = OrganizeModel()
+        EditorWindowController.present(width: PDFOrganizeEditor.width, content: { close, _ in
+            PDFOrganizeEditor(title: "Organize Pages", model: model, onClose: close, onApply: { operations in
+                let request = JobRequest(items: [item], action: action, parameters: .pdfPages(operations),
+                                         options: coordinator.settings.jobOptions)
+                coordinator.run(request, near: NSEvent.mouseLocation)
+                close()
+            })
+        })
+        Task { await model.load(item.url) }
+    }
+
+    private static func openSplit(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
+        guard let item = firstPDF(in: items) else { return coordinator.showError(notBuilt) }
+        let model = SplitModel()
+        EditorWindowController.present(width: PDFSplitEditor.width, content: { close, _ in
+            PDFSplitEditor(title: "Split PDF", model: model, onClose: close, onApply: { ranges in
+                let request = JobRequest(items: [item], action: action, parameters: .pdfRanges(ranges),
+                                         options: coordinator.settings.jobOptions)
+                coordinator.run(request, near: NSEvent.mouseLocation)
+                close()
+            })
+        })
+        Task { await model.load(item.url) }
+    }
+
+    /// Reads audio tags for the Metadata editor. `AudioMetadata` (Task 19) is not in this build yet; when it lands, set this to
+    /// `{ AudioMetadata.read($0) }` and audio files get their editor. Until then audio is refused with a plain message.
+    static var audioMetadataLoader: MetadataLoader?
+
+    private static func openMetadata(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
+        guard let item = items.first else { return coordinator.showError(notBuilt) }
+        let model: MetadataModel
+        switch item.category {
+        case .image:
+            model = MetadataModel(allowsArtwork: false, loader: { ImageMetadata.read($0) })
+        case .audio:
+            guard let loader = audioMetadataLoader else {
+                return coordinator.showError("Editing audio metadata isn't available yet.")
+            }
+            model = MetadataModel(allowsArtwork: true, loader: loader)
+        default:
+            return coordinator.showError(notBuilt)
+        }
+        model.load(item.url)
+        EditorWindowController.present(width: MetadataEditor.width, content: { close, _ in
+            MetadataEditor(title: "Metadata", model: model, onClose: close, onApply: { edits in
+                let request = JobRequest(items: [item], action: action, parameters: .metadata(edits),
+                                         options: coordinator.settings.jobOptions)
+                coordinator.run(request, near: NSEvent.mouseLocation)
+                close()
+            }, onRemoveLocation: {
+                let request = JobRequest(items: [item], action: .tool(.metadata, .metadataStripLocation),
+                                         options: coordinator.settings.jobOptions)
+                coordinator.run(request, near: NSEvent.mouseLocation)
+                close()
+            })
+        })
+    }
+
+    private static func openCompressCustom(_ items: [DroppedItem], action: SliceAction, coordinator: JobCoordinator) {
+        guard !items.isEmpty else { return coordinator.showError(notBuilt) }
+        let model = CompressCustomModel()
+        model.load(items.map(\.url))
+        EditorWindowController.present(width: CompressCustomPanel.width, content: { close, _ in
+            CompressCustomPanel(title: "Compress", model: model, onClose: close, onApply: { jobs in
+                for request in compressRequests(jobs, items: items, action: action, options: coordinator.settings.jobOptions) {
+                    coordinator.run(request, near: NSEvent.mouseLocation)
+                }
+                close()
+            })
+        })
+    }
+
+    /// One request per planned job: in Percent mode each file has its own target, so a batch is never fitted to
+    /// the first file's size.
+    static func compressRequests(_ jobs: [CompressPlan.Job], items: [DroppedItem], action: SliceAction,
+                                 options: JobOptions) -> [JobRequest] {
+        jobs.map { job in
+            JobRequest(items: job.indices.map { items[$0] }, action: action, parameters: .compress(job.target),
+                       options: options)
+        }
     }
 
     private final class Box<T> {
