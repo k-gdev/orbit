@@ -84,6 +84,29 @@ final class WheelController {
         model.resetPointer()
     }
 
+    /// How far from the centre the panel takes the drop: the wheel plus its hit margin,
+    /// or out to the sub-ring's margin while one is open. Nothing is selectable past it.
+    var activeRadius: Double {
+        model.openSubRing == nil ? geometry.outerRadius + geometry.hitMargin
+                                 : geometry.subRingOuter + geometry.hitMargin
+    }
+
+    /// Called with each input sample while shown for a drag (ruling R25). Past
+    /// `activeRadius` the panel lets the drag through, so a drop there reaches whatever is
+    /// beneath as if Orbit weren't there (spec §4); inside it the panel is the drop target.
+    func updateDropRegion(pointer screenPoint: CGPoint) {
+        guard panel.isVisible, !panel.isInteractive else { return }
+        let pointer = offset(of: screenPoint)
+        let outside = hypot(pointer.dx, pointer.dy) > activeRadius
+        guard outside != panel.ignoresMouseEvents else { return }
+        panel.ignoresMouseEvents = outside
+        if logsDropEvents {
+            Log.info("drop: panel \(outside ? "lets drags through" : "takes drops") at r=\(Int(hypot(pointer.dx, pointer.dy)))")
+        }
+        // The drag now goes elsewhere: clear the highlight as draggingExited would.
+        if outside { model.resetPointer() }
+    }
+
     /// Pointer offset from the wheel centre, `dy` up (screen coordinates are y-up).
     func offset(of screenPoint: CGPoint) -> CGVector {
         CGVector(dx: screenPoint.x - center.x, dy: screenPoint.y - center.y)

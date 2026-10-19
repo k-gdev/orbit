@@ -3,7 +3,8 @@ import OrbitCore
 
 /// The overlay panel's content view: hosts the wheel and is the drop target for file
 /// URLs. Dragging over it moves the highlight; dropping on a slice runs that slice.
-/// The hub and empty space refuse the drop, so dropping there does nothing.
+/// The hub and dead zone refuse the drop, so dropping there does nothing. Past the
+/// wheel the panel lets the drag through (`WheelController.updateDropRegion`).
 final class DropTargetView: NSView {
     weak var wheel: WheelController?
     private var didPerform = false
@@ -39,10 +40,13 @@ final class DropTargetView: NSView {
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         guard let wheel, let slice = wheel.model.selectedSlice else { return false }
-        let urls = sender.draggingPasteboard.droppedFileURLs
-        guard !urls.isEmpty else { return false }
-        let known = wheel.model.items
-        let items = urls == known.map(\.url) ? known : urls.map(DroppedItem.init(url:))
+        let items = wheel.model.items
+        // The slices were built for the files read when the wheel opened; refuse a drop
+        // of anything else (ruling R26).
+        guard !items.isEmpty, sender.draggingPasteboard.droppedFileURLs == items.map(\.url) else {
+            Log.error("drop: refused, the dropped files aren't the ones the wheel opened for")
+            return false
+        }
         didPerform = true
         Log.info("drop: \(slice.id) on \(items.count) item(s)")
         // Run the slice once the drag session has finished: an editor may open a modal
@@ -55,7 +59,7 @@ final class DropTargetView: NSView {
         return true
     }
 
-    /// Esc, or a refused drop on the hub or empty space.
+    /// Esc, or a refused drop (the hub, or files the wheel wasn't opened for).
     override func draggingEnded(_ sender: any NSDraggingInfo) {
         guard !didPerform else {
             didPerform = false

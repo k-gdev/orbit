@@ -47,8 +47,11 @@ final class DragWatcher {
         lastButtonDown = sample.buttonDown
         let event = stateMachine.feed(sample)
         if logsSamples { Log.info(Self.describe(sample, event)) }
-        guard let event else { return }
+        if let event { act(on: event) }
+        wheel.updateDropRegion(pointer: sample.location)
+    }
 
+    private func act(on event: TriggerEvent) {
         switch event {
         case .open(let kind, let point):
             let urls = NSPasteboard(name: .drag).droppedFileURLs
