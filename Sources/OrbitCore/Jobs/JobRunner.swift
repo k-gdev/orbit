@@ -44,15 +44,18 @@ public final class JobRunner: Sendable {
             reporter.close()
             ledger.close()
         }
-        func cancelled() -> OrbitError {
-            ledger.discardAll()
-            return .cancelled
+        func cancelled() -> any Error {
+            let stuck = ledger.discardAll()
+            // A partial file Orbit couldn't trash (no Trash on that volume) is named, never left silently.
+            guard stuck.isEmpty else { return OrbitError.unsupported("Cancelled · \(Self.stuckText(stuck))") }
+            return OrbitError.cancelled
         }
 
         var done: [ProcessorOutput] = []
         var failures: [JobFailure] = []
         var firstError: (any Error)?
         var usedFallback = false
+        var stuckPartials: [URL] = []
         func recordFailure(_ error: any Error, unit: JobRequest, title: String) {
             let first = unit.items[0]
             Log.error("\(title) failed for \(first.url.lastPathComponent): \(error.localizedDescription)")
@@ -87,20 +90,28 @@ public final class JobRunner: Sendable {
                 if folder.usedFallback { usedFallback = true }
             } catch {
                 ledger.removeTempDirectories(unit: index)
-                if Self.isCancellation(error) || Task.isCancelled { throw cancelled() }
-                ledger.discard(unit: index)
-                recordFailure(error, unit: unit, title: title)
+                let cancelling = Self.isCancellation(error) || Task.isCancelled
+                // Copy/Move To roll back themselves; a rollback that left files behind names them,
+                // so it is reported even when the job was cancelled.
+                if cancelling && !Self.isIncompleteRollback(error, action: action) { throw cancelled() }
+                let stuck = ledger.discard(unit: index)
+                stuckPartials += stuck
+                let reported = stuck.isEmpty ? error
+                    : OrbitError.unsupported("\(error.localizedDescription) · \(Self.stuckText(stuck))")
+                recordFailure(reported, unit: unit, title: title)
             }
             reporter.finish(index, title: title, fileName: fileName)
         }
-        if Task.isCancelled { throw cancelled() }
+        // Every unit has finished here, so a cancel that arrived during the last one is too late to
+        // undo anything: the finished work is reported (with its Undo) rather than dropped.
         if let firstError, failures.count == units.count { throw firstError }
 
         let outputs = done.flatMap(\.outputs)
         let texts = done.compactMap(\.clipboardText)
         return JobResult(
             outputs: outputs,
-            summary: Self.summary(unitCount: units.count, failureCount: failures.count, done: done, outputCount: outputs.count),
+            summary: Self.summary(unitCount: units.count, failureCount: failures.count, done: done,
+                                  outputCount: outputs.count, stuck: stuckPartials),
             undo: Self.undo(action: action, done: done, outputs: outputs, ledger: ledger),
             usedFallbackFolder: usedFallback,
             clipboardText: texts.isEmpty ? nil : texts.joined(separator: "\n"),
@@ -151,8 +162,27 @@ public final class JobRunner: Sendable {
         (error as? OrbitError) == .cancelled || error is CancellationError
     }
 
-    private static func summary(unitCount: Int, failureCount: Int, done: [ProcessorOutput], outputCount: Int) -> String {
-        if failureCount > 0 { return "\(unitCount - failureCount) of \(unitCount) done · \(failureCount) failed" }
+    /// Copy/Move To's own error naming files it couldn't put back (FileActions.rollbackError).
+    private static func isIncompleteRollback(_ error: any Error, action: SliceAction) -> Bool {
+        guard case .unsupported? = error as? OrbitError else { return false }
+        switch action {
+        case .action(.copyTo, _), .action(.moveTo, _): return true
+        default: return false
+        }
+    }
+
+    /// "couldn't remove partial file a.mp4" / "couldn't remove partial files a.mp4, b.mp4".
+    private static func stuckText(_ urls: [URL]) -> String {
+        let names = urls.map(\.lastPathComponent).joined(separator: ", ")
+        return "couldn't remove partial file\(urls.count == 1 ? "" : "s") \(names)"
+    }
+
+    private static func summary(unitCount: Int, failureCount: Int, done: [ProcessorOutput], outputCount: Int,
+                                stuck: [URL]) -> String {
+        if failureCount > 0 {
+            let head = "\(unitCount - failureCount) of \(unitCount) done · \(failureCount) failed"
+            return stuck.isEmpty ? head : "\(head) · \(stuckText(stuck))"
+        }
         if unitCount == 1 { return ResultSummary.text(for: done.first?.hint, outputCount: outputCount) }
         if let sizes = summedSizes(done) { return ResultSummary.text(for: sizes, outputCount: outputCount) }
         return ResultSummary.text(for: nil, outputCount: outputCount)
@@ -280,11 +310,13 @@ private final class JobLedger: @unchecked Sendable {
         }
     }
 
-    /// Trashes this unit's reserved URLs that exist now.
-    func discard(unit: Int) { trashExisting(reservedURLs(unit: unit)) }
+    /// Trashes this unit's reserved URLs that exist now; returns the ones that couldn't be trashed.
+    @discardableResult
+    func discard(unit: Int) -> [URL] { trashExisting(reservedURLs(unit: unit)) }
 
-    /// Trashes every reserved URL of the job that exists now.
-    func discardAll() { trashExisting(reservedURLs(unit: nil)) }
+    /// Trashes every reserved URL of the job that exists now; returns the ones that couldn't be trashed.
+    @discardableResult
+    func discardAll() -> [URL] { trashExisting(reservedURLs(unit: nil)) }
 
     func isSource(_ url: URL) -> Bool { sourceKeys.contains(reservationKey(url)) }
 
@@ -302,12 +334,15 @@ private final class JobLedger: @unchecked Sendable {
         return reserved.filter { unit == nil || $0.unit == unit }.map(\.url)
     }
 
-    private func trashExisting(_ urls: [URL]) {
+    private func trashExisting(_ urls: [URL]) -> [URL] {
+        var stuck: [URL] = []
         for url in urls where !isSource(url) && existsOnDisk(url) {
             do { try trash(url) } catch {
                 Log.error("could not trash \(url.path): \(error.localizedDescription)")
+                stuck.append(url)
             }
         }
+        return stuck
     }
 }
 

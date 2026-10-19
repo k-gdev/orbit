@@ -94,7 +94,7 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
     /// Every URL the runner passed to the injected `trash`.
     var trashLog: [URL] { trashed.value }
 
-    private func runner(_ processors: [any Processor], writable: Bool = true) -> JobRunner {
+    private func runner(_ processors: [any Processor], writable: Bool = true, trashWorks: Bool = true) -> JobRunner {
         let log = trashed
         let rootPath = root.path + "/"
         return JobRunner(
@@ -102,6 +102,7 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
             isWritable: { _ in writable },
             trash: { url in
                 log.mutate { $0.append(url) }
+                guard trashWorks else { throw CocoaError(.featureUnsupported) }
                 guard url.path.hasPrefix(rootPath) else { throw TrashOutsideTestRoot(url: url) }
                 try FileManager.default.removeItem(at: url)
             })
@@ -166,6 +167,57 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
         #expect(Set(trashLog.map(\.lastPathComponent)) == ["a-converted.txt", "b-converted.txt"])
         #expect(try listing(dir) == ["a.txt", "b.txt"])
         expectSourcesIntact()
+    }
+
+    // MARK: Cleanup that fails (a volume without a Trash)
+
+    @Test func untrashablePartialIsNamedInFailure() async throws {
+        let r = try await runner([failsOn("b.txt", afterWriting: true)], trashWorks: false)
+            .run(req(["a.txt", "b.txt", "c.txt"], .convert(.md)), progress: { _ in })
+        #expect(r.failures.count == 1)
+        #expect(r.failures[0].message == "b.txt is broken · couldn't remove partial file b-converted.txt")
+        #expect(r.summary == "2 of 3 done · 1 failed · couldn't remove partial file b-converted.txt")
+    }
+
+    @Test func untrashablePartialIsNamedInSingleFailure() async {
+        let request = req(["a.txt"], .convert(.md))
+        await #expect(throws: OrbitError.unsupported("a.txt is broken · couldn't remove partial file a-converted.txt")) {
+            try await self.runner([failsOn("a.txt", afterWriting: true)], trashWorks: false).run(request, progress: { _ in })
+        }
+    }
+
+    @Test func untrashablePartialIsNamedOnCancel() async {
+        let request = req(["a.txt", "b.txt"], .convert(.md))
+        await #expect(throws: OrbitError.unsupported("Cancelled · couldn't remove partial files a-converted.txt, b-converted.txt")) {
+            try await self.runner([cancelsOn("b.txt")], trashWorks: false).run(request, progress: { _ in })
+        }
+    }
+
+    /// Move To's "couldn't be put back" error survives a cancel, so the user learns where files are.
+    @Test func incompleteRollbackSurvivesCancel() async {
+        let stuck = FakeProcessor { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            throw OrbitError.unsupported("Cancelled, and these files couldn't be put back: /x/a.txt")
+        }
+        let r = runner([stuck])
+        let request = req(["a.txt"], .action(.moveTo, .folder(fallback)))
+        await #expect(throws: OrbitError.unsupported("Cancelled, and these files couldn't be put back: /x/a.txt")) {
+            try await Task { try await r.run(request, progress: { _ in }) }.value
+        }
+    }
+
+    /// A cancel that arrives after the last unit already finished reports the finished work.
+    @Test func cancelAfterLastUnitFinishedKeepsResult() async throws {
+        let cancelling = FakeProcessor { r, c in
+            let out = try writeConverted(r, c)
+            withUnsafeCurrentTask { $0?.cancel() }
+            return out
+        }
+        let r = runner([cancelling])
+        let request = req(["a.txt"], .convert(.md))
+        let result = try await Task { try await r.run(request, progress: { _ in }) }.value
+        #expect(result.outputs.map(\.lastPathComponent) == ["a-converted.txt"])
+        #expect(trashLog.isEmpty)
     }
 
     @Test func fallbackFolder() async throws {

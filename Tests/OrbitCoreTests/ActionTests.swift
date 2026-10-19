@@ -172,8 +172,9 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
     }
 
-    /// Wraps the real processor and cancels the running job while the second item is being named.
-    private struct CancelOnSecondClaim: Processor {
+    /// Wraps the real processor and cancels the running job while item number `on` is being named.
+    private struct CancelOnClaim: Processor {
+        var on = 2
         func canHandle(_ request: JobRequest) -> Bool { ActionProcessor().canHandle(request) }
         func run(_ request: JobRequest, context: JobContext) async throws -> ProcessorOutput {
             let calls = Counter()
@@ -183,7 +184,7 @@ import Testing
                 outputURL: context.outputURL, numberedOutputURLs: context.numberedOutputURLs,
                 combinedOutputURL: context.combinedOutputURL,
                 claimDestination: { folder, base, ext in
-                    if calls.next() == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+                    if calls.next() == on { withUnsafeCurrentTask { $0?.cancel() } }
                     return inner(folder, base, ext)
                 },
                 tempDirectory: context.tempDirectory)
@@ -197,9 +198,14 @@ import Testing
         func next() -> Int { lock.withLock { n += 1; return n } }
     }
 
-    private func runCancelling(_ urls: [URL], _ action: SliceAction) async throws -> JobResult {
-        let runner = JobRunner(processors: [CancelOnSecondClaim()], capabilities: Fixtures.caps,
-                               fallbackFolder: root.appending(path: "fallback", directoryHint: .isDirectory))
+    private func runCancelling(_ urls: [URL], _ action: SliceAction, onClaim: Int = 2) async throws -> JobResult {
+        let rootPath = root.path + "/"
+        let runner = JobRunner(processors: [CancelOnClaim(on: onClaim)], capabilities: Fixtures.caps,
+                               fallbackFolder: root.appending(path: "fallback", directoryHint: .isDirectory),
+                               trash: { url in
+                                   guard url.path.hasPrefix(rootPath) else { throw CocoaError(.fileWriteNoPermission) }
+                                   try FileManager.default.removeItem(at: url)
+                               })
         let request = JobRequest(items: urls.map(DroppedItem.init(url:)), action: action)
         // An unstructured task, so cancelling the job does not cancel the test itself.
         return try await Task { try await runner.run(request, progress: { _ in }) }.value
@@ -218,6 +224,34 @@ import Testing
         let files = ["a.txt", "b.txt", "c.txt"].map { Fixtures.file($0, "x", in: src) }
         await #expect(throws: OrbitError.cancelled) {
             _ = try await self.runCancelling(files, .action(.copyTo, .folder(self.dest)))
+        }
+        #expect(files.allSatisfy(exists))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    /// A cancel that lands while the last (here: only) item is moving still rolls back.
+    @Test func runnerCancelDuringLastMoveRestoresSource() async throws {
+        let files = [Fixtures.file("a.txt", "x", in: src)]
+        await #expect(throws: OrbitError.cancelled) {
+            _ = try await self.runCancelling(files, .action(.moveTo, .folder(self.dest)), onClaim: 1)
+        }
+        #expect(files.allSatisfy(exists))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    @Test func runnerCancelDuringLastCopyRemovesCopy() async throws {
+        let files = ["a.txt", "b.txt"].map { Fixtures.file($0, "x", in: src) }
+        await #expect(throws: OrbitError.cancelled) {
+            _ = try await self.runCancelling(files, .action(.copyTo, .folder(self.dest)), onClaim: 2)
+        }
+        #expect(files.allSatisfy(exists))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)
+    }
+
+    @Test func runnerCancelDuringOnlyCopyRemovesCopy() async throws {
+        let files = [Fixtures.file("a.txt", "x", in: src)]
+        await #expect(throws: OrbitError.cancelled) {
+            _ = try await self.runCancelling(files, .action(.copyTo, .folder(self.dest)), onClaim: 1)
         }
         #expect(files.allSatisfy(exists))
         #expect(try FileManager.default.contentsOfDirectory(atPath: dest.path).isEmpty)

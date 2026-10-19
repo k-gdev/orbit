@@ -31,6 +31,8 @@ public enum FileActions {
                 try fm.copyItem(at: url, to: target)
                 copies.append(target)
             }
+            // A cancel that landed during the last copy rolls back like any other.
+            try check()
             return copies
         } catch {
             var stuck: [URL] = []
@@ -62,6 +64,8 @@ public enum FileActions {
                 try fm.moveItem(at: url, to: destination)
                 moves.append(FileMove(from: url, to: destination))
             }
+            // A cancel that landed during the last move puts everything back like any other.
+            try check()
             return moves
         } catch {
             var stuck: [String] = []
