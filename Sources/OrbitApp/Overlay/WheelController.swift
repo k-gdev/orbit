@@ -3,11 +3,16 @@ import OrbitCore
 import SwiftUI
 
 /// Owns the overlay panel and the wheel model: shows the wheel for a set of
-/// dropped items, switches between wheels and hides it again.
+/// dropped items, switches between wheels and hides it again. While shown, the
+/// panel is the drop target for the drag (`DropTargetView`).
 @MainActor
 final class WheelController {
     let model: WheelModel
     var onSelect: ((Slice, [DroppedItem]) -> Void)?
+    /// The drag ended over the wheel without a drop on a slice (Esc, or the hub).
+    var onCancel: (() -> Void)?
+    /// Logs drag-destination callbacks to orbit.log (`--diagnose-trigger`).
+    var logsDropEvents = false
     /// Helper availability used to build slices. Task 10 points this at the job coordinator.
     var capabilities: () -> Capabilities
 
@@ -17,6 +22,7 @@ final class WheelController {
 
     private let settings: SettingsStore
     private let panel = OverlayPanel()
+    private let dropTarget: DropTargetView
     private var thumbnailTask: Task<Void, Never>?
     private var debugMonitors: [Any] = []
 
@@ -28,9 +34,14 @@ final class WheelController {
         self.settings = settings
         model = WheelModel(geometry: geometry)
         capabilities = { HelperLocator().locate(customFFmpegPath: settings.customFFmpegPath) }
+        let bounds = NSRect(x: 0, y: 0, width: geometry.panelSide, height: geometry.panelSide)
         let host = NSHostingView(rootView: WheelView(model: model))
-        host.frame = NSRect(x: 0, y: 0, width: geometry.panelSide, height: geometry.panelSide)
-        panel.contentView = host
+        host.frame = bounds
+        host.autoresizingMask = [.width, .height]
+        dropTarget = DropTargetView(frame: bounds)
+        dropTarget.addSubview(host)
+        panel.contentView = dropTarget
+        dropTarget.wheel = self
     }
 
     func show(kind: WheelKind, items: [DroppedItem], at screenPoint: CGPoint) {
@@ -43,6 +54,9 @@ final class WheelController {
         center = WheelPlacement.center(for: screenPoint, radius: placementRadius, in: visible)
         let side = geometry.panelSide
         panel.setFrame(NSRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side), display: false)
+        // Take drag-destination events from the moment it appears, so the drop can land
+        // on it; `hide()` restores click-through. The panel still never becomes key.
+        panel.ignoresMouseEvents = false
         panel.orderFrontRegardless()
 
         if !wasVisible {
@@ -65,7 +79,7 @@ final class WheelController {
         thumbnailTask?.cancel()
         thumbnailTask = nil
         panel.orderOut(nil)
-        panel.isInteractive = false
+        panel.isInteractive = false // also ignores mouse events again
         model.revealed = false
         model.resetPointer()
     }

@@ -9,6 +9,8 @@ MainActor.assumeIsolated {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let delegate = AppDelegate()
+// `--diagnose-trigger` runs the normal app and also logs every trigger input sample
+// (button, modifiers, pointer, drag pasteboard) and drop callback to orbit.log.
+let delegate = AppDelegate(diagnoseTrigger: CommandLine.arguments.contains("--diagnose-trigger"))
 app.delegate = delegate
 app.run()
