@@ -10,6 +10,9 @@ public enum ProcessorRegistry {
             ActionProcessor(),
             VideoProcessor(),
             DocumentProcessor(),
+            SlidesProcessor(),
+            SpreadsheetProcessor(),
+            SubtitleProcessor(),
         ]
     }
 }
