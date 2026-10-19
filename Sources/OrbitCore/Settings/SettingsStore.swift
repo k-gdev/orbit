@@ -2,6 +2,9 @@ import Combine
 import Foundation
 
 public final class SettingsStore: ObservableObject {
+    /// Orbit's default accent, as six upper-case hex digits.
+    public static let defaultAccentHex = "80649C"
+
     private let defaults: UserDefaults
 
     private enum Key {
@@ -20,6 +23,7 @@ public final class SettingsStore: ObservableObject {
         static let customFFmpegPath = "customFFmpegPath"
         static let hapticsEnabled = "hapticsEnabled"
         static let bindings = "bindings"
+        static let accentHex = "accentHex"
     }
 
     @Published public var isEnabled: Bool { didSet { defaults.set(isEnabled, forKey: Key.isEnabled) } }
@@ -41,6 +45,19 @@ public final class SettingsStore: ObservableObject {
         }
     }
     @Published public var hapticsEnabled: Bool { didSet { defaults.set(hapticsEnabled, forKey: Key.hapticsEnabled) } }
+
+    /// The accent colour as `RRGGBB`. Anything that is not six hex digits falls back to the default.
+    @Published public var accentHex: String {
+        didSet {
+            let clean = Self.normalisedAccent(accentHex)
+            if clean != accentHex { accentHex = clean }
+            defaults.set(clean, forKey: Key.accentHex)
+        }
+    }
+
+    private static func normalisedAccent(_ text: String) -> String {
+        HexColor.parse(text).map(HexColor.format) ?? defaultAccentHex
+    }
 
     @Published public var bindings: TriggerBindings {
         didSet {
@@ -75,6 +92,7 @@ public final class SettingsStore: ObservableObject {
         terminalBundleID = defaults.string(forKey: Key.terminalBundleID) ?? "com.apple.Terminal"
         customFFmpegPath = defaults.string(forKey: Key.customFFmpegPath)
         hapticsEnabled = bool(Key.hapticsEnabled, true)
+        accentHex = Self.normalisedAccent(defaults.string(forKey: Key.accentHex) ?? Self.defaultAccentHex)
         bindings = defaults.data(forKey: Key.bindings)
             .flatMap { try? JSONDecoder().decode(TriggerBindings.self, from: $0) } ?? .defaults
     }
