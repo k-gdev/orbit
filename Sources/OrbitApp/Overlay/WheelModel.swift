@@ -69,6 +69,43 @@ final class WheelModel: ObservableObject {
         }
     }
 
+    // MARK: Keyboard-driven selection (no pointer involved)
+
+    /// Highlights slice `index` (nil clears), closing any sub-ring.
+    func setHighlight(_ index: Int?) {
+        subRingTimer?.cancel()
+        subRingTimer = nil
+        let changed = index != highlighted || openSubRing != nil || subHighlighted != nil
+        highlighted = index
+        openSubRing = nil
+        subHighlighted = nil
+        if changed, index != nil { Haptics.tick() }
+    }
+
+    /// Opens the sub-ring of slice `index` and highlights its first child.
+    /// Does nothing when the slice has no children.
+    func openSubRing(at index: Int) {
+        guard content.slices.indices.contains(index), !content.slices[index].children.isEmpty else { return }
+        subRingTimer?.cancel()
+        subRingTimer = nil
+        highlighted = index
+        openSubRing = index
+        subHighlighted = 0
+        Haptics.tick()
+    }
+
+    func setSubHighlight(_ index: Int?) {
+        guard openSubRing != nil else { return }
+        if index != subHighlighted { Haptics.tick() }
+        subHighlighted = index
+    }
+
+    /// Steps back from the sub-ring to its parent slice, which stays highlighted.
+    func closeSubRing() {
+        openSubRing = nil
+        subHighlighted = nil
+    }
+
     /// The slice a drop would apply: the highlighted child, else a highlighted leaf slice.
     var selectedSlice: Slice? {
         guard let index = highlighted, content.slices.indices.contains(index) else { return nil }

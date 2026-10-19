@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dragWatcher: DragWatcher?
     private var statusItemController: StatusItemController?
     private var settingsWindow: SettingsWindowController?
+    private var windowController: WheelWindowController?
+    private var servicesProvider: ServicesProvider?
 
     /// `diagnoseTrigger` logs every trigger input sample and drop callback to orbit.log.
     init(diagnoseTrigger: Bool) {
@@ -39,7 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.dragWatcher = dragWatcher
         let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator)
         self.settingsWindow = settingsWindow
+        let windowController = WheelWindowController(wheel: wheel)
+        self.windowController = windowController
+        let provider = ServicesProvider(windowController: windowController)
+        servicesProvider = provider
+        NSApp.servicesProvider = provider
+        NSUpdateDynamicServices()
         statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
+                                                    windowController: windowController,
                                                     showSettings: { settingsWindow.show() })
     }
 }

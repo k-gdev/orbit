@@ -8,13 +8,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let settings: SettingsStore
     private let wheel: WheelController
     private let coordinator: JobCoordinator
+    private let windowController: WheelWindowController
     private let showSettings: () -> Void
     private var debugItem: NSMenuItem?
     private var enabledItem: NSMenuItem?
     private var recentItem: NSMenuItem?
     private var cancellables: Set<AnyCancellable> = []
 
-    init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController, showSettings: @escaping () -> Void) {
+    init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController,
+         windowController: WheelWindowController, showSettings: @escaping () -> Void) {
+        self.windowController = windowController
         self.showSettings = showSettings
         self.settings = settings
         self.coordinator = coordinator
@@ -43,6 +46,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let about = NSMenuItem(title: "About Orbit", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
+        let openFiles = NSMenuItem(title: "Open Files…", action: #selector(openFiles), keyEquivalent: "o")
+        openFiles.target = self
+        menu.addItem(openFiles)
         let prefs = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         prefs.target = self
         menu.addItem(prefs)
@@ -129,6 +135,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let frame = screen.visibleFrame
         wheel.showDebug(kind: .convert, items: items, at: CGPoint(x: frame.midX, y: frame.midY))
+    }
+
+    @objc private func openFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.prompt = "Open in Orbit"
+        NSApp.activate()
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let urls = panel.urls
+        // Let the open panel finish closing before the wheel takes the key window.
+        DispatchQueue.main.async { [windowController] in
+            guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+            let frame = screen.visibleFrame
+            windowController.show(items: urls.map(DroppedItem.init(url:)), at: CGPoint(x: frame.midX, y: frame.midY))
+        }
     }
 
     @objc private func showAbout() {

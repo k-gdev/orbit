@@ -25,6 +25,8 @@ final class WheelController {
     private let dropTarget: DropTargetView
     private var thumbnailTask: Task<Void, Never>?
     private var debugMonitors: [Any] = []
+    /// Consulted first for key and modifier events in interactive mode; returns true if handled.
+    var interactiveKeyHandler: ((NSEvent) -> Bool)?
 
     private var geometry: WheelGeometry { model.geometry }
     /// Keeps the petal disc, with room for the highlight's scale, fully on screen.
@@ -136,6 +138,7 @@ final class WheelController {
     func showDebug(kind: WheelKind, items: [DroppedItem], at screenPoint: CGPoint) {
         panel.isInteractive = true
         show(kind: kind, items: items, at: screenPoint)
+        NSApp.activate()
         panel.makeKey()
         startDebugInput()
         model.updatePointer(offset: offset(of: NSEvent.mouseLocation))
@@ -143,7 +146,7 @@ final class WheelController {
 
     private func startDebugInput() {
         stopDebugInput()
-        let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown, .keyDown]) { [weak self] event in
+        let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseDown, .keyDown, .flagsChanged]) { [weak self] event in
             MainActor.assumeIsolated { self?.handleDebug(event) ?? true } ? event : nil
         }
         // Clicks and moves outside Orbit's own windows (mouse events need no permission).
@@ -156,6 +159,13 @@ final class WheelController {
     private func stopDebugInput() {
         debugMonitors.forEach(NSEvent.removeMonitor)
         debugMonitors = []
+    }
+
+    /// Applies `slice` to the wheel's items and closes the wheel.
+    func apply(_ slice: Slice) {
+        let items = model.items
+        hide()
+        onSelect?(slice, items)
     }
 
     /// Returns whether the event should continue to its normal destination.
@@ -177,7 +187,11 @@ final class WheelController {
             let onWheel = event.window === panel
             hide()
             return !onWheel
+        case .flagsChanged:
+            _ = interactiveKeyHandler?(event)
+            return true
         case .keyDown:
+            if interactiveKeyHandler?(event) == true { return false }
             switch event.keyCode {
             case 48: // Tab
                 let kinds = WheelKind.allCases
