@@ -5,6 +5,19 @@ import UniformTypeIdentifiers
 
 /// Renders a video as a looping GIF with `AVAssetImageGenerator` (exact frame times, orientation applied).
 public enum GIFMaker {
+    /// `CGImageDestination` keeps every frame in memory until finalize, so total frames are capped.
+    public static let maxFrames = 600
+    /// Below this frame rate a GIF is a slideshow; longer clips are rejected instead.
+    public static let minFPS = 2.0
+    public static var maxDuration: Double { Double(maxFrames) / minFPS }
+
+    /// Frame rate and count to render: fps is lowered so `count <= maxFrames`; nil when the clip is too long.
+    static func plan(duration: Double, fps: Double) -> (fps: Double, count: Int)? {
+        let effective = min(fps, Double(maxFrames) / duration)
+        guard effective >= minFPS else { return nil }
+        return (effective, min(maxFrames, max(1, Int((duration * effective).rounded()))))
+    }
+
     public static func make(_ src: URL, to output: URL, fps: Double = 12, maxWidth: Int = 480,
                             progress: @escaping @Sendable (Double) -> Void) async throws {
         let asset = AVURLAsset(url: src)
@@ -12,7 +25,11 @@ public enum GIFMaker {
         guard duration.isFinite, duration > 0, fps > 0 else {
             throw OrbitError.unsupported("Couldn't read \(src.lastPathComponent).")
         }
-        let count = max(1, Int((duration * fps).rounded()))
+        guard let plan = plan(duration: duration, fps: fps) else {
+            throw OrbitError.unsupported("\(src.lastPathComponent) is too long for a GIF (\(Int(maxDuration / 60)) minutes at most).")
+        }
+        let fps = plan.fps
+        let count = plan.count
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.requestedTimeToleranceBefore = .zero

@@ -59,6 +59,14 @@ import Testing
         #expect(gifLoopCount(src) == 0)
     }
 
+    @Test func gifFrameCountIsCapped() {
+        #expect(GIFMaker.plan(duration: 10, fps: 12)?.count == 120)
+        let long = GIFMaker.plan(duration: 120, fps: 12)
+        #expect(long?.count == GIFMaker.maxFrames)
+        #expect((long?.fps ?? 99) < 12)
+        #expect(GIFMaker.plan(duration: GIFMaker.maxDuration + 1, fps: 12) == nil)
+    }
+
     @Test func movToM4A() async throws {
         let o = try await run(await clip(), .convert(.m4a)).outputs[0]
         #expect(try await !MediaInfo.hasVideo(o))
