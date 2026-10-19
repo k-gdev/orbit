@@ -11,14 +11,13 @@ import Foundation
     #expect(l.locate(customFFmpegPath: nil).pagesBundleID == "com.apple.iWork.Pages") }
 @Test func newIWorkIDPreferred() { let l = HelperLocator(isExecutable: { _ in false }, appInstalled: { _ in true })
     #expect(l.locate(customFFmpegPath: nil).keynoteBundleID == "com.apple.Keynote") }
-@Test func settingsDefaultsAndPersistence() { let d = UserDefaults(suiteName: "orbit-test-\(UUID())")!
+@Test func settingsDefaultsAndPersistence() { let (d, cleanup) = Fixtures.defaults(); defer { cleanup() }
     let s = SettingsStore(defaults: d); #expect(s.pdfDPI == 300); #expect(s.videoFitPresets.first == 10_000_000)
     s.terminalBundleID = "com.googlecode.iterm2"; #expect(SettingsStore(defaults: d).terminalBundleID == "com.googlecode.iterm2") }
 
 @Test func settingsRoundTripAllTypes() {
-    let name = "orbit-test-\(UUID())"
-    let d = UserDefaults(suiteName: name)!
-    defer { d.removePersistentDomain(forName: name) }
+    let (d, cleanup) = Fixtures.defaults()
+    defer { cleanup() }
     let s = SettingsStore(defaults: d)
     #expect(s.favouriteFolders.count == 3)
     s.favouriteFolders = [URL(fileURLWithPath: "/tmp/a b", isDirectory: true)]
@@ -34,6 +33,16 @@ import Foundation
     #expect(r.customFFmpegPath == "/x/ffmpeg")
     r.customFFmpegPath = nil
     #expect(SettingsStore(defaults: d).customFFmpegPath == nil)
+}
+
+/// Test suites live in a temp folder: writing settings leaves nothing in ~/Library/Preferences.
+@Test func testDefaultsLiveInTheirTempFolder() throws {
+    let (d, folder, cleanup) = Fixtures.defaultsWithFolder()
+    defer { cleanup() }
+    SettingsStore(defaults: d).terminalBundleID = "com.googlecode.iterm2"
+    #expect(d.synchronize())
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "prefs.plist").path))
+    #expect(SettingsStore(defaults: d).terminalBundleID == "com.googlecode.iterm2")
 }
 
 @Test func capabilitiesHas() {

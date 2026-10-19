@@ -15,6 +15,24 @@ enum Fixtures {
         return dir
     }
 
+    /// A UserDefaults suite stored as a plist inside its own temp folder (an absolute-path suite
+    /// name), so tests never write to ~/Library/Preferences. `cleanup` removes the folder.
+    static func defaults() -> (defaults: UserDefaults, cleanup: () -> Void) {
+        let (d, _, cleanup) = defaultsWithFolder()
+        return (d, cleanup)
+    }
+
+    /// `defaults()` plus the folder that holds the suite's plist.
+    static func defaultsWithFolder() -> (defaults: UserDefaults, folder: URL, cleanup: () -> Void) {
+        let dir = tempDir()
+        let path = dir.appending(path: "prefs", directoryHint: .notDirectory).path
+        guard let d = UserDefaults(suiteName: path) else { preconditionFailure("Fixtures.defaults: \(path)") }
+        return (d, dir, {
+            d.removePersistentDomain(forName: path)
+            try? FileManager.default.removeItem(at: dir)
+        })
+    }
+
     /// Writes `contents` to `dir/name` (intermediate folders are created). Never overwrites.
     static func file(_ name: String, _ contents: String, in dir: URL) -> URL {
         let url = dir.appending(path: name, directoryHint: .notDirectory)

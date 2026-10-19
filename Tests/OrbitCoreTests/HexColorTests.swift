@@ -41,11 +41,7 @@ import Testing
 }
 
 @Suite struct AccentSettingTests {
-    private func suite() -> (UserDefaults, () -> Void) {
-        let name = "orbit-test-\(UUID())"
-        let d = UserDefaults(suiteName: name)!
-        return (d, { d.removePersistentDomain(forName: name) })
-    }
+    private func suite() -> (UserDefaults, () -> Void) { Fixtures.defaults() }
 
     @Test func defaultIsOrbitPurple() {
         let (d, clean) = suite(); defer { clean() }

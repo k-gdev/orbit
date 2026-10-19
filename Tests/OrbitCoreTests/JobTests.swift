@@ -693,8 +693,9 @@ private func loose(_ name: String) -> DroppedItem { DroppedItem(url: URL(filePat
     // MARK: Requests and parameters
 
     @Test func jobOptionsFromSettings() {
-        // Read-only: setting a SettingsStore property would leave a plist in ~/Library/Preferences.
-        let s = SettingsStore(defaults: UserDefaults(suiteName: "orbit-test-\(UUID())")!)
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let s = SettingsStore(defaults: d)
         #expect(s.jobOptions == JobOptions())
         #expect(JobOptions() == JobOptions(jpegQuality: 0.85, heicQuality: 0.8, webpQuality: 0.8, avifQuality: 0.7, pdfDPI: 300))
         let r = JobRequest(items: [], action: .convert(.png))

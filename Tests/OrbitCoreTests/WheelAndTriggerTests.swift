@@ -78,9 +78,8 @@ private let g = WheelGeometry.standard
     #expect(m.feed(smp(t: 0.6, down: true, mods: [], cc: 2, files: true)) == nil) }
 
 @Test func bindingsPersistRoundTrip() {
-    let name = "orbit-test-\(UUID())"
-    let d = UserDefaults(suiteName: name)!
-    defer { d.removePersistentDomain(forName: name) }
+    let (d, cleanup) = Fixtures.defaults()
+    defer { cleanup() }
     let s = SettingsStore(defaults: d)
     #expect(s.bindings == .defaults)
     var b = TriggerBindings.defaults
