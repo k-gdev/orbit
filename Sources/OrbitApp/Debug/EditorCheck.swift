@@ -16,6 +16,10 @@ import SwiftUI
 ///   build the job parameters the processors expect. The PDF editors use `pdf file`, or a three-page sample written to a
 ///   fresh temporary folder (removed afterwards) when none is given.
 ///
+/// - the media editors (Trim, Split, Snapshot, Bleep, Crop; `MediaEditorCheck.swift`) open, keep one panel height from loading
+///   to loaded, release on close, and build the job parameters the processors expect. They use sample media that ffmpeg
+///   writes to a fresh temporary folder (removed afterwards); without ffmpeg those checks are skipped.
+///
 /// Prints one line per check and exits 0 when all pass, 1 otherwise. Needs a logged-in GUI session.
 enum EditorCheck {
     static let flag = "--check-editors"
@@ -40,12 +44,15 @@ enum EditorCheck {
         } else {
             checker("write the sample PDF", false)
         }
+        runMediaEditors(check: checker)
         print(checker.failures == 0 ? "all editor checks passed" : "\(checker.failures) editor check(s) failed")
         exit(checker.failures == 0 ? 0 : 1)
     }
 
     final class Checker {
         private(set) var failures = 0
+
+        func skip(_ name: String, _ reason: String) { print("SKIP  \(name)  (\(reason))") }
 
         func callAsFunction(_ name: String, _ ok: Bool, _ detail: String = "") {
             print("\(ok ? "PASS" : "FAIL")  \(name)\(detail.isEmpty ? "" : "  (\(detail))")")
@@ -54,13 +61,13 @@ enum EditorCheck {
     }
 
     @MainActor
-    private static func spin(until condition: () -> Bool, timeout: TimeInterval = 15) {
+    static func spin(until condition: () -> Bool, timeout: TimeInterval = 15) {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
     }
 
     @MainActor
-    private static func settle() { spin(until: { false }, timeout: 0.3) }
+    static func settle() { spin(until: { false }, timeout: 0.3) }
 
     @MainActor
     private static func run(_ url: URL, check: Checker) {
@@ -406,7 +413,7 @@ enum EditorCheck {
     }
 
     @MainActor
-    private static func checkPanel(_ name: String, _ controller: EditorWindowController,
+    static func checkPanel(_ name: String, _ controller: EditorWindowController,
                                    _ check: Checker) {
         let frame = controller.frame
         check("\(name): panel frame is non-empty", frame.width >= 1 && frame.height >= EditorGeometry.minimumPanelHeight, "\(frame)")
