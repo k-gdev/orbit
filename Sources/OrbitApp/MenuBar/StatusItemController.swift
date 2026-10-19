@@ -32,12 +32,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.menu = makeMenu()
     }
 
-    /// `circle.dotted` while a job runs, `circle.circle` otherwise.
+    /// The ringed-planet glyph; its ring is dashed while a job runs.
     private func setIcon(busy: Bool) {
-        guard let button = statusItem.button else { return }
-        let image = NSImage(systemSymbolName: busy ? "circle.dotted" : "circle.circle", accessibilityDescription: "Orbit")
-        image?.isTemplate = true
-        button.image = image
+        statusItem.button?.image = OrbitGlyph.image(busy: busy)
     }
 
     private func makeMenu() -> NSMenu {
