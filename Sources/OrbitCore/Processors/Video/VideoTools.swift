@@ -65,7 +65,7 @@ public enum VideoTools {
         }
         let origin = CGPoint(x: min(area.minX.rounded(), info.displaySize.width - size.width),
                              y: min(area.minY.rounded(), info.displaySize.height - size.height))
-        let transform = info.transform.concatenating(CGAffineTransform(translationX: -origin.x, y: -origin.y))
+        let transform = info.renderTransform.concatenating(CGAffineTransform(translationX: -origin.x, y: -origin.y))
         let composition = videoComposition(info, transform: transform, renderSize: size)
         try await export(asset, to: output, videoComposition: composition, passthrough: false, progress: progress)
     }
@@ -210,7 +210,7 @@ public enum VideoTools {
             let size = clip.info.displaySize
             let scale = min(renderSize.width / size.width, renderSize.height / size.height)
             let fitted = CGSize(width: size.width * scale, height: size.height * scale)
-            let transform = clip.info.transform
+            let transform = clip.info.renderTransform
                 .concatenating(CGAffineTransform(scaleX: scale, y: scale))
                 .concatenating(CGAffineTransform(translationX: (renderSize.width - fitted.width) / 2,
                                                  y: (renderSize.height - fitted.height) / 2))
@@ -327,11 +327,13 @@ public enum VideoTools {
                            end: CMTime(seconds: end, preferredTimescale: 6000))
     }
 
+    /// One instruction covering the whole asset. `transform` must be a render transform (see `VideoTrackInfo.renderTransform`).
     static func videoComposition(_ info: VideoTrackInfo, transform: CGAffineTransform, renderSize: CGSize) -> AVMutableVideoComposition {
         let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: info.track)
         layer.setTransform(transform, at: .zero)
         let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: info.duration)
+        // The whole asset, not just the video track: an export fails when the audio runs past the instructions.
+        instruction.timeRange = CMTimeRange(start: .zero, duration: info.assetDuration)
         instruction.layerInstructions = [layer]
         let composition = AVMutableVideoComposition()
         composition.instructions = [instruction]
@@ -373,11 +375,18 @@ public enum VideoTools {
 /// What the tools need to know about a video's first video track.
 struct VideoTrackInfo {
     let track: AVAssetTrack
+    /// The track's `preferredTransform` as stored. Use it for `preferredTransform` on a copied track (stream copy).
     let transform: CGAffineTransform
+    /// The transform that puts the upright picture at (0, 0): `transform` plus a translation by the origin of the
+    /// transformed bounding box. The two differ when the stored matrix has no translation (`ffmpeg -display_rotation`
+    /// writes tx = ty = 0). Use it in every layer instruction, which does not normalise the origin itself.
+    let renderTransform: CGAffineTransform
     /// The size on screen, after `preferredTransform`.
     let displaySize: CGSize
     /// The track's length.
     let duration: CMTime
+    /// The whole asset's length (the audio can run past the video).
+    let assetDuration: CMTime
     let frameDuration: CMTime
 
     static func load(_ asset: AVAsset) async throws -> VideoTrackInfo {
@@ -385,11 +394,16 @@ struct VideoTrackInfo {
             throw OrbitError.unsupported("There is no video in this file.")
         }
         let (size, transform, timeRange, rate) = try await track.load(.naturalSize, .preferredTransform, .timeRange, .nominalFrameRate)
+        let assetDuration = try await asset.load(.duration)
         let box = CGRect(origin: .zero, size: size).applying(transform)
         let display = CGSize(width: abs(box.width).rounded(), height: abs(box.height).rounded())
         let fps = rate > 1 ? Int32(rate.rounded()) : 30
-        return VideoTrackInfo(track: track, transform: transform, displaySize: display, duration: timeRange.duration,
-                              frameDuration: CMTime(value: 1, timescale: fps))
+        return VideoTrackInfo(
+            track: track, transform: transform,
+            renderTransform: transform.concatenating(CGAffineTransform(translationX: -box.minX, y: -box.minY)),
+            displaySize: display, duration: timeRange.duration,
+            assetDuration: CMTimeMaximum(assetDuration.isNumeric ? assetDuration : timeRange.duration, timeRange.duration),
+            frameDuration: CMTime(value: 1, timescale: fps))
     }
 }
 

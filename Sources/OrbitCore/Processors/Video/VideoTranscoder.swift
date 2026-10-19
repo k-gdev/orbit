@@ -56,7 +56,7 @@ final class VideoTranscoder: @unchecked Sendable {
         }
         size = CGSize(width: max(VideoTools.evenFloor(size.width), 2), height: max(VideoTools.evenFloor(size.height), 2))
         let scale = CGAffineTransform(scaleX: size.width / info.displaySize.width, y: size.height / info.displaySize.height)
-        let composition = VideoTools.videoComposition(info, transform: info.transform.concatenating(scale), renderSize: size)
+        let composition = VideoTools.videoComposition(info, transform: info.renderTransform.concatenating(scale), renderSize: size)
 
         let videoOutput = AVAssetReaderVideoCompositionOutput(videoTracks: [info.track], videoSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,

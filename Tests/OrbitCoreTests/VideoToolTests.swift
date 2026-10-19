@@ -103,6 +103,45 @@ private enum SharedClipsCleanup {
         try await toolMultiResult(srcs, id, caps: caps).outputs[0]
     }
 
+    /// Frame 0 of `out` shows the same picture as frame 0 of `src` shifted by `offset` (a crop origin). The test clips
+    /// are flat with a white bar across the frame, so a picture that is black or off by the translation fails.
+    private func expectSamePicture(src: URL, out: URL, offset: CGPoint, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        func snapshot(_ url: URL) async throws -> URL {
+            let png = root.appending(path: "frame-\(UUID().uuidString.prefix(6)).png")
+            try await VideoTools.snapshot(url, at: 0, to: png)
+            return png
+        }
+        func isWhite(_ p: RGBA) -> Bool { p.r > 0.85 && p.g > 0.85 && p.b > 0.85 }
+        func close(_ a: RGBA, _ b: RGBA) -> Bool {
+            abs(a.r - b.r) < 0.2 && abs(a.g - b.g) < 0.2 && abs(a.b - b.b) < 0.2
+        }
+        let source = try await snapshot(src), result = try await snapshot(out)
+        let sourceSize = Fixtures.size(source), resultSize = Fixtures.size(result)
+        let ox = Int(offset.x), oy = Int(offset.y)
+        // The bar, found in the visible part of the source.
+        var bar: [(x: Int, y: Int)] = []
+        for y in stride(from: oy, to: Int(sourceSize.height), by: 4) {
+            for x in stride(from: ox, to: min(ox + Int(resultSize.width), Int(sourceSize.width)), by: 4)
+            where isWhite(Fixtures.pixel(source, x: x, y: y)) { bar.append((x, y)) }
+        }
+        try #require(!bar.isEmpty, "no bar found in the source picture", sourceLocation: sourceLocation)
+        let middle = bar[bar.count / 2]
+        var points = [(x: middle.x - ox, y: middle.y - oy)]
+        for (x, y) in [(20, 100), (100, 150), (170, 60)] where x < Int(resultSize.width) && y < Int(resultSize.height)
+            && !bar.contains(where: { abs($0.x - (x + ox)) < 20 && abs($0.y - (y + oy)) < 20 }) {
+            points.append((x, y))
+        }
+        #expect(points.count >= 3, sourceLocation: sourceLocation)
+        for point in points {
+            let want = Fixtures.pixel(source, x: point.x + ox, y: point.y + oy)
+            let got = Fixtures.pixel(result, x: point.x, y: point.y)
+            #expect(want.r + want.g + want.b > 0.5, "the source is black at \(point)", sourceLocation: sourceLocation)
+            #expect(close(want, got), "at \(point) the output is \(got) but the source shows \(want)", sourceLocation: sourceLocation)
+        }
+        #expect(isWhite(Fixtures.pixel(result, x: points[0].x, y: points[0].y)), "the bar is not where it should be",
+                sourceLocation: sourceLocation)
+    }
+
     private func dur(_ url: URL) async throws -> Double { try await MediaInfo.duration(url) }
 
     private func fileSize(_ url: URL) throws -> Int {
@@ -162,12 +201,61 @@ private enum SharedClipsCleanup {
         #expect(try await MediaInfo.videoSize(o) == CGSize(width: 240, height: 320))
     }
 
+    /// A rotated clip with an Apple-normalised matrix (translation = stored height): a crop away from the
+    /// corner keeps the picture where it was.
+    @Test func cropRotatedKeepsThePictureAtANonZeroOrigin() async throws {
+        let src = await Fixtures.video("rot-n.mov", seconds: 1, w: 320, h: 240, rotated: true, in: root)
+        #expect(try await MediaInfo.videoSize(src) == CGSize(width: 320, height: 240))
+        let area = CGRect(x: 40, y: 12, width: 200, height: 228)
+        let o = try await tool(src, .crop, .cropRect(area))
+        #expect(try await MediaInfo.videoSize(o) == area.size)
+        try await expectSamePicture(src: src, out: o, offset: area.origin)
+    }
+
+    /// `ffmpeg -display_rotation` writes a rotation matrix with no translation; the crop used to render black.
+    @Test func cropRotatedWithoutTranslationKeepsThePicture() async throws {
+        let src = await Fixtures.videoRotatedWithoutTranslation("rot-0.mov", seconds: 1, w: 320, h: 240, in: root)
+        let track = try #require(try await AVURLAsset(url: src).loadTracks(withMediaType: .video).first)
+        let transform = try await track.load(.preferredTransform)
+        #expect(transform.tx == 0 && transform.ty == 0 && transform.a == 0 && transform.d == 0)
+        #expect(try await MediaInfo.videoSize(src) == CGSize(width: 320, height: 240))
+        let area = CGRect(x: 40, y: 12, width: 200, height: 228)
+        let o = try await tool(src, .crop, .cropRect(area))
+        #expect(try await MediaInfo.videoSize(o) == area.size)
+        try await expectSamePicture(src: src, out: o, offset: area.origin)
+    }
+
+    /// The audio is longer than the video, as on many phone clips: the crop used to fail with "could not be composed".
+    @Test func cropWhenTheAudioIsLongerThanTheVideo() async throws {
+        let src = await Fixtures.videoWithLongerAudio("long-audio.mov", videoSeconds: 2, audioSeconds: 2.3, w: 320, h: 240, in: root)
+        let asset = AVURLAsset(url: src)
+        let video = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        #expect(try await video.load(.timeRange).duration.seconds < 2.1)
+        #expect(try await asset.load(.duration).seconds > 2.25)
+        let area = CGRect(x: 8, y: 12, width: 200, height: 228)
+        let o = try await tool(src, .crop, .cropRect(area))
+        #expect(try await MediaInfo.videoSize(o) == area.size)
+        #expect(try await MediaInfo.hasAudio(o))
+        #expect(abs(try await dur(o) - 2.3) < 0.2)
+        try await expectSamePicture(src: src, out: o, offset: area.origin)
+    }
+
     @Test func speed2() async throws {
         let clip = await makeClip()
         let o = try await tool(clip, .speed, preset: .speed(2))
         #expect(abs(try await dur(o) - 1.5) < 0.15)
         #expect(try await MediaInfo.hasAudio(o))
         #expect(o.lastPathComponent == "clip-2x.mov")
+    }
+
+    @Test func speedAndMuteKeepARotatedClipWithoutTranslationUpright() async throws {
+        let src = await Fixtures.videoRotatedWithoutTranslation("rot-0.mov", seconds: 1, w: 320, h: 240, in: root)
+        let fast = try await tool(src, .speed, preset: .speed(2))
+        #expect(try await MediaInfo.videoSize(fast) == CGSize(width: 320, height: 240))
+        try await expectSamePicture(src: src, out: fast, offset: .zero)
+        let muted = try await tool(src, .mute)
+        #expect(try await MediaInfo.videoSize(muted) == CGSize(width: 320, height: 240))
+        try await expectSamePicture(src: src, out: muted, offset: .zero)
     }
 
     @Test func speed4DropsAudio() async throws {
@@ -261,6 +349,15 @@ private enum SharedClipsCleanup {
         #expect(try await MediaInfo.hasAudio(o))
     }
 
+    @Test func joinReencodeKeepsARotatedClipWithoutTranslationInPlace() async throws {
+        let a = await Fixtures.videoRotatedWithoutTranslation("a-rot.mov", seconds: 1, w: 320, h: 240, in: root)
+        let b = await Fixtures.video("b-small.mov", seconds: 1, w: 160, h: 120, in: root)
+        let o = try await toolMulti([a, b], .join)
+        #expect(try await MediaInfo.videoSize(o) == CGSize(width: 320, height: 240))
+        #expect(abs(try await dur(o) - 2) < 0.2)
+        try await expectSamePicture(src: a, out: o, offset: .zero)
+    }
+
     @Test func joinSameSizes() async throws {
         let a = await Fixtures.video("a.mov", seconds: 1, w: 320, h: 240, in: root)
         let b = await Fixtures.video("b.mov", seconds: 2, w: 320, h: 240, in: root)
@@ -297,6 +394,23 @@ private enum SharedClipsCleanup {
         let clip = await makeClip()
         let o = try await tool(clip, .compress, .compress(.fitUnder(600_000)))
         #expect(try fileSize(o) <= 600_000)
+    }
+
+    @Test func compressRotatedWithoutTranslationKeepsThePicture() async throws {
+        let src = await Fixtures.videoRotatedWithoutTranslation("rot-0.mov", seconds: 1, w: 320, h: 240, in: root)
+        let o = try await tool(src, .compress, preset: .compress(.fitUnder(300_000)))
+        #expect(try fileSize(o) <= 300_000)
+        #expect(try await MediaInfo.videoSize(o) == CGSize(width: 320, height: 240))
+        try await expectSamePicture(src: src, out: o, offset: .zero)
+    }
+
+    @Test func compressWhenTheAudioIsLongerThanTheVideo() async throws {
+        let src = await Fixtures.videoWithLongerAudio("long-audio.mov", videoSeconds: 2, audioSeconds: 2.3, w: 320, h: 240, in: root)
+        let o = try await tool(src, .compress, preset: .compress(.fitUnder(300_000)))
+        #expect(try fileSize(o) <= 300_000)
+        #expect(try await MediaInfo.hasAudio(o))
+        #expect(abs(try await dur(o) - 2) < 0.4)
+        try await expectSamePicture(src: src, out: o, offset: .zero)
     }
 
     @Test func compressReportsSizes() async throws {
