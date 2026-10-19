@@ -28,8 +28,8 @@ final class BackgroundModel: ObservableObject {
     @Published private(set) var previewError: String?
     @Published var mode = Mode.solid { didSet { scheduleRender() } }
     @Published var solid = Color.white { didSet { scheduleRender() } }
-    @Published var gradientTop = Color(red: 1, green: 0.78, blue: 0.35) { didSet { scheduleRender() } }
-    @Published var gradientBottom = Color(red: 1, green: 0.36, blue: 0.10) { didSet { scheduleRender() } }
+    @Published var gradientTop = Color(red: 0.78, green: 0.69, blue: 0.91) { didSet { scheduleRender() } }
+    @Published var gradientBottom = Color(red: 0.45, green: 0.34, blue: 0.62) { didSet { scheduleRender() } }
     @Published var blur = 20.0 { didSet { scheduleRender() } }
 
     private var subject: CGImage?

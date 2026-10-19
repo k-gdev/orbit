@@ -12,8 +12,6 @@ struct WaveformView: View {
     var markers: [Double] = []
     var onSeek: (Double) -> Void
 
-    private static let markerColor = Color(red: 0.80, green: 0.32, blue: 0.04)
-
     var body: some View {
         GeometryReader { proxy in
             let width = proxy.size.width, height = proxy.size.height
@@ -32,7 +30,7 @@ struct WaveformView: View {
                 }
                 bars(width: width, height: height)
                 ForEach(Array(markers.enumerated()), id: \.offset) { _, t in
-                    Rectangle().fill(Self.markerColor).frame(width: 2, height: height).offset(x: x(t) - 1)
+                    Rectangle().fill(OrbitTheme.accentMarker).frame(width: 2, height: height).offset(x: x(t) - 1)
                 }
                 Rectangle().fill(Color.primary.opacity(0.9)).frame(width: 2, height: height).offset(x: x(playhead) - 1)
             }

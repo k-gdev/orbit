@@ -6,16 +6,33 @@ import AppKit
 enum OrbitGlyph {
     static let side: CGFloat = 18
 
-    /// 18 x 18 pt template image; the system tints it for light/dark menu bars.
+    /// 18 x 18 pt template image; the system tints it for light/dark menu bars. Rendered once into 1x and
+    /// 2x bitmaps (the drawing uses a `.clear` blend for the ring gap, which belongs in our own transparent
+    /// bitmap and not in a destination the status bar owns).
     static func image(busy: Bool) -> NSImage {
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            draw(in: ctx, busy: busy)
-            return true
+        let image = NSImage(size: NSSize(width: side, height: side))
+        for scale in [1, 2] {
+            if let rep = bitmap(busy: busy, scale: scale) { image.addRepresentation(rep) }
         }
         image.isTemplate = true
         image.accessibilityDescription = "Orbit"
         return image
+    }
+
+    /// The glyph as a transparent bitmap of `side * scale` pixels whose point size is `side` x `side`.
+    static func bitmap(busy: Bool, scale: Int) -> NSBitmapImageRep? {
+        let pixels = Int(side) * scale
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let gc = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = gc
+        gc.cgContext.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
+        draw(in: gc.cgContext, busy: busy)
+        return rep
     }
 
     /// Draws into a context whose unit square is `side` x `side`, y up. Opaque pixels are black.

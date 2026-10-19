@@ -6,7 +6,7 @@ public struct HexColor {
     public static func parse(_ text: String) -> RGBA? {
         var digits = Substring(text)
         if digits.hasPrefix("#") { digits = digits.dropFirst() }
-        guard digits.count == 6, digits.allSatisfy(\.isASCII), let value = UInt32(digits, radix: 16) else { return nil }
+        guard digits.count == 6, digits.allSatisfy(\.isHexDigit), digits.allSatisfy(\.isASCII), let value = UInt32(digits, radix: 16) else { return nil }
         return RGBA(r: Double((value >> 16) & 0xFF) / 255,
                     g: Double((value >> 8) & 0xFF) / 255,
                     b: Double(value & 0xFF) / 255,

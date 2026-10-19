@@ -20,7 +20,7 @@ import Testing
         #expect(HexColor.parse("FFFFFF") == RGBA(r: 1, g: 1, b: 1, a: 1))
     }
 
-    @Test(arguments: ["", "#", "80649", "80649CC", "GGGGGG", "80 649C", "#80649", "##80649C", "+80649C", "８０６４９C", "80649C "])
+    @Test(arguments: ["", "#", "80649", "80649CC", "GGGGGG", "80 649C", "#80649", "##80649C", "+80649C", "８０６４９C", "80649C ", "+8064C", "-00000", "+80649C", "-80649C"])
     func rejectsInvalid(_ text: String) {
         #expect(HexColor.parse(text) == nil)
     }

@@ -43,4 +43,9 @@ final class OrbitTheme {
     /// Shorthands for call sites; reading them inside a view body subscribes the view to changes.
     static var accent: Color { shared.accentColor }
     static var accentRGBA: RGBA { shared.accentRGBA }
+    /// A darker shade of the accent for thin markers (playhead, waveform cut lines) over light content.
+    static var accentMarker: Color {
+        let c = shared.accentRGBA
+        return Color(.sRGB, red: c.r * 0.75, green: c.g * 0.75, blue: c.b * 0.75, opacity: 1)
+    }
 }

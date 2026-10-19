@@ -1,7 +1,7 @@
 import AppKit
 import OrbitCore
 
-/// Hidden command-line mode: renders the menu bar glyph (idle and busy), black on light and white on
+/// Hidden command-line mode: renders the menu bar glyph bitmap (idle and busy), black on light and white on
 /// dark, at 12x to a PNG.
 ///
 ///     Orbit --snapshot-glyph <out.png> [--replace]
@@ -42,15 +42,15 @@ enum GlyphSnapshot {
             ctx.fill(CGRect(x: 0, y: height - (row + 1) * (cell + pad) - pad, width: width, height: cell + pad))
             for (col, busy) in [false, true].enumerated() {
                 let origin = CGPoint(x: pad + col * (cell + pad), y: height - pad - cell - row * (cell + pad) - pad / 2)
+                // The same bitmap the status item uses (rendered at the snapshot scale), tinted like the menu bar.
+                guard let glyph = OrbitGlyph.bitmap(busy: busy, scale: scale)?.cgImage else { continue }
+                let rect = CGRect(origin: origin, size: CGSize(width: cell, height: cell))
                 ctx.saveGState()
-                ctx.translateBy(x: origin.x, y: origin.y)
-                ctx.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
-                // Draw the glyph into a transparency layer, then tint it like the menu bar does.
                 ctx.beginTransparencyLayer(auxiliaryInfo: nil)
-                OrbitGlyph.draw(in: ctx, busy: busy)
+                ctx.draw(glyph, in: rect)
                 ctx.setBlendMode(.sourceIn)
                 ctx.setFillColor(dark ? CGColor(gray: 1, alpha: 1) : CGColor(gray: 0, alpha: 1))
-                ctx.fill(CGRect(x: 0, y: 0, width: OrbitGlyph.side, height: OrbitGlyph.side))
+                ctx.fill(rect)
                 ctx.endTransparencyLayer()
                 ctx.restoreGState()
             }

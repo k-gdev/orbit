@@ -42,7 +42,6 @@ struct ScrubberView: View {
     private static let barHeight: CGFloat = 40
     private static let handleWidth: CGFloat = 12
     private static let grabRadius: CGFloat = 14
-    private static let markerColor = Color(red: 0.80, green: 0.32, blue: 0.04)
 
     var body: some View {
         GeometryReader { proxy in
@@ -116,9 +115,9 @@ struct ScrubberView: View {
                 handle(at: x(selection.upperBound), top: top)
             }
             ForEach(Array(markers.enumerated()), id: \.offset) { _, t in
-                Rectangle().fill(Self.markerColor).frame(width: 2, height: Self.barHeight + 4)
+                Rectangle().fill(OrbitTheme.accentMarker).frame(width: 2, height: Self.barHeight + 4)
                     .offset(x: x(t) - 1, y: top - 2)
-                Circle().fill(Self.markerColor).frame(width: 8, height: 8).offset(x: x(t) - 4, y: top - 5)
+                Circle().fill(OrbitTheme.accentMarker).frame(width: 8, height: 8).offset(x: x(t) - 4, y: top - 5)
             }
             Rectangle().fill(Color.primary.opacity(0.9)).frame(width: 2, height: Self.barHeight + 10)
                 .shadow(color: .white.opacity(0.6), radius: 1)
