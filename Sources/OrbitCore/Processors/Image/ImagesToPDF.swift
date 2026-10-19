@@ -5,12 +5,9 @@ import Foundation
 public enum ImagesToPDF {
     /// Each page is the image's pixel size × 72 / DPI points (DPI from its metadata, 72 if absent).
     public static func make(_ sources: [URL], output: URL) throws {
-        var pages: [(image: CGImage, dpi: Double)] = []
-        for url in sources {
-            try Task.checkCancellation()
-            let dpi = ImageFile.dpi(from: ImageFile.properties(url))
-            pages.append((try ImageFile.loadOriented(url), dpi))
+        try PDFWriter.write(count: sources.count, to: output) { index in
+            let url = sources[index]
+            return (try ImageFile.loadOriented(url), ImageFile.dpi(from: ImageFile.properties(url)))
         }
-        try PDFWriter.write(pages, to: output)
     }
 }

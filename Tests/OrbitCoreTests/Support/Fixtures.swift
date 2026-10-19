@@ -104,6 +104,7 @@ extension Fixtures {
               let data = ctx.data else { preconditionFailure("Fixtures.pixel: cannot read \(url.lastPathComponent)") }
         ctx.draw(cg, in: CGRect(x: -x, y: -(cg.height - 1 - y), width: cg.width, height: cg.height))
         let p = data.bindMemory(to: UInt8.self, capacity: 4)
+        defer { withExtendedLifetime(ctx) {} }
         let a = Double(p[3]) / 255
         func unpremultiplied(_ v: UInt8) -> Double { a == 0 ? 0 : min(1, Double(v) / 255 / a) }
         return RGBA(r: unpremultiplied(p[0]), g: unpremultiplied(p[1]), b: unpremultiplied(p[2]), a: a)

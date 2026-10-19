@@ -51,7 +51,7 @@ public enum ImageFile {
             try data.write(to: url, options: .withoutOverwriting)
         case .pdf:
             let dpi = dpi(from: properties ?? [:])
-            try PDFWriter.write([(image, dpi)], to: url)
+            try PDFWriter.write(count: 1, to: url) { _ in (image, dpi) }
         case .ico:
             try ICOWriter.write(image, to: url)
         default:
@@ -92,18 +92,23 @@ public enum ImageFile {
 
 /// Image-only PDFs: one page per image, each page as large as the image at its DPI.
 enum PDFWriter {
-    static func write(_ pages: [(image: CGImage, dpi: Double)], to url: URL) throws {
-        guard !pages.isEmpty else { throw OrbitError.unsupported("There are no images to put in a PDF.") }
+    /// Streams `count` pages: `page(i)` is called, drawn and released before the next, so memory
+    /// stays at one image regardless of the batch size.
+    static func write(count: Int, to url: URL, page: (Int) throws -> (image: CGImage, dpi: Double)) throws {
+        guard count > 0 else { throw OrbitError.unsupported("There are no images to put in a PDF.") }
         guard let context = CGContext(url as CFURL, mediaBox: nil, nil) else {
             throw OrbitError.unsupported("Orbit couldn't create this PDF.")
         }
-        for (image, dpi) in pages {
+        for index in 0..<count {
             try Task.checkCancellation()
-            var box = CGRect(x: 0, y: 0, width: Double(image.width) * 72 / dpi, height: Double(image.height) * 72 / dpi)
-            let pageInfo = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
-            context.beginPDFPage(pageInfo)
-            context.draw(image, in: box)
-            context.endPDFPage()
+            try autoreleasepool {
+                let (image, dpi) = try page(index)
+                var box = CGRect(x: 0, y: 0, width: Double(image.width) * 72 / dpi, height: Double(image.height) * 72 / dpi)
+                let pageInfo = [kCGPDFContextMediaBox as String: Data(bytes: &box, count: MemoryLayout<CGRect>.size)] as CFDictionary
+                context.beginPDFPage(pageInfo)
+                context.draw(image, in: box)
+                context.endPDFPage()
+            }
         }
         context.closePDF()
     }

@@ -116,6 +116,21 @@ import Testing
         #expect(Fixtures.pixel(out, x: 0, y: 0).a < 0.05)
     }
 
+    @Test func webpKeepsSemiTransparentColour() async throws {
+        // 50% alpha red, written as a PNG with straight (non-premultiplied) data via CoreGraphics.
+        let ctx = try #require(CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+                                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 128.0 / 255))
+        ctx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        let src = root.appending(path: "half.png")
+        try ImageFile.write(try #require(ctx.makeImage()), to: src, format: .png, quality: nil, properties: nil)
+        let out = try await convertURL(src, to: .webp, options: JobOptions(webpQuality: 1))
+        let p = Fixtures.pixel(out, x: 4, y: 4)
+        #expect(abs(p.a - 128.0 / 255) < 0.05)
+        #expect(p.r > 0.9 && p.g < 0.1 && p.b < 0.1)
+    }
+
     @Test func webpSourceReadsBack() async throws {
         let webp = try await convert("a.png", w: 64, h: 32, to: .webp)
         let back = try await convertURL(webp, to: .png)
