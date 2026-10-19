@@ -18,6 +18,11 @@ public enum Archiver {
 
     /// Packs `items` into the new file `to`. Several items are staged side by side in `temp` first
     /// (clones on APFS) so they sit at the top level of the archive; one item is packed in place.
+    ///
+    /// Symbolic links are stored as links, never followed. ditto follows a link given as its source
+    /// argument, so a lone symlink is staged for zip (copyItem copies the link itself, and ditto
+    /// stores links inside a folder as links); otherwise a hostile archive's `photos -> ~/.ssh`
+    /// entry would pack the user's keys into the repacked zip.
     public static func pack(_ items: [URL], format: OutputFormat, to output: URL, temp: URL) async throws {
         guard !items.isEmpty else { throw OrbitError.unsupported("There is nothing to archive.") }
         guard output.pathExtension == "zip" || output.lastPathComponent.hasSuffix(".tar")
@@ -26,7 +31,9 @@ public enum Archiver {
         }
         try Task.checkCancellation()
 
-        if items.count == 1 {
+        let loneZipLink = items.count == 1 && format == .zip
+            && ((try? items[0].resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false)
+        if items.count == 1 && !loneZipLink {
             let item = items[0]
             switch format {
             case .zip:
@@ -101,6 +108,11 @@ public enum Archiver {
         let single = unpacked.items.count == 1 ? unpacked.items[0] : nil
         let target = destination(single)
         try Task.checkCancellation()
+        if single == nil {
+            // Our own scratch folder: the AppleDouble leftovers never reach the user's output.
+            let junk = unpacked.folder.appending(path: "__MACOSX")
+            if FileManager.default.fileExists(atPath: junk.path) { try FileManager.default.removeItem(at: junk) }
+        }
         try FileManager.default.moveItem(at: single ?? unpacked.folder, to: target)
         return (target, unpacked.items.count)
     }

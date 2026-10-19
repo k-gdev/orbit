@@ -172,4 +172,48 @@ import Testing
         try? FileManager.default.removeItem(at: abs)
         try? FileManager.default.removeItem(at: outside)
     }
+
+    // MARK: Symlinks are stored as links, never followed
+
+    /// A folder outside the archive holding a "secret", for the link tests below.
+    private func secretFolder() throws -> URL {
+        let outside = root.appending(path: "outside-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        _ = Fixtures.file("id_rsa", "SECRET", in: outside)
+        return outside
+    }
+
+    private func verboseListing(_ archive: URL) async throws -> String {
+        try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/tar"), ["-tvf", archive.path]).stdout
+    }
+
+    @Test func repackSingleAbsoluteSymlinkKeepsTheLink() async throws {
+        let outside = try secretFolder()
+        let tarURL = root.appending(path: "photos.tar")
+        Fixtures.hostileTar([.init(name: "photos", link: outside.path, data: "")], at: tarURL)
+        let zip = try await run([tarURL], .convert(.zip)).outputs[0]
+        let entries = try await Fixtures.archiveEntries(zip)
+        #expect(entries == ["photos"], "\(entries)")
+        #expect(!entries.contains { $0.contains("id_rsa") })
+        #expect(try await verboseListing(zip).hasPrefix("l"), "photos should be stored as a link")
+    }
+
+    @Test(arguments: [OutputFormat.zip, .tar, .tgz])
+    func archivingASymlinkStoresTheLink(f: OutputFormat) async throws {
+        let outside = try secretFolder()
+        let link = root.appending(path: "photos")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let packed = try await run([link], .action(.archive, .archive(f))).outputs[0]
+        let entries = try await Fixtures.archiveEntries(packed)
+        #expect(entries == ["photos"], "\(entries)")
+        #expect(try await verboseListing(packed).hasPrefix("l"), "photos should be stored as a link")
+    }
+
+    @Test func multiItemExtractLeavesMacOSXBehind() async throws {
+        let tarURL = root.appending(path: "two.tar")
+        Fixtures.hostileTar([.init(name: "a.txt", link: nil, data: "A"), .init(name: "b.txt", link: nil, data: "B"),
+                             .init(name: "__MACOSX/notes.txt", link: nil, data: "junk")], at: tarURL)
+        let out = try await run([tarURL], .tool(.extract, nil)).outputs[0]
+        #expect(try FileManager.default.contentsOfDirectory(atPath: out.path).sorted() == ["a.txt", "b.txt"])
+    }
 }
