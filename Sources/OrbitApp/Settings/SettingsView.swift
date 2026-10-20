@@ -248,7 +248,7 @@ struct SettingsContent: View {
                 Button("Open Privacy Settings") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }
             }
             Text(fullDiskAccess ? "Orbit can read your folders without asking."
-                                : "Without it, macOS asks separately for Desktop, Documents, Downloads and other folders.")
+                                : "Without it, macOS asks separately for Desktop, Documents, Downloads and other folders. If macOS offers to Quit & Reopen Orbit after you turn it on, choose it.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Show welcome again", action: showWelcome)

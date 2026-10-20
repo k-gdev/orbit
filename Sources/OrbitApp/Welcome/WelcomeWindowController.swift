@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class WelcomeModel: ObservableObject {
     @Published var granted: Bool
+    @Published var openedSettings = false
     init(granted: Bool) { self.granted = granted }
 }
 
@@ -15,7 +16,7 @@ private struct WelcomeHost: View {
     let onNotNow: () -> Void
 
     var body: some View {
-        WelcomeView(granted: model.granted, onOpenSettings: onOpenSettings, onNotNow: onNotNow)
+        WelcomeView(granted: model.granted, openedSettings: model.openedSettings, onOpenSettings: onOpenSettings, onNotNow: onNotNow)
     }
 }
 
@@ -55,6 +56,7 @@ final class WelcomeWindowController {
             WelcomeHost(model: model,
                         onOpenSettings: { [weak self] in
                             self?.settings.hasSeenWelcome = true
+                            model.openedSettings = true
                             self?.openURL(FullDiskAccess.settingsURL)
                         },
                         onNotNow: { [weak self] in

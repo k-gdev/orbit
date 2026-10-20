@@ -51,8 +51,10 @@ An identity is a certificate name or SHA-1 hash from `security find-identity -v 
 
 ```sh
 ORBIT_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" scripts/build-app.sh
-echo 7AE2AC16D622170662EDB78454372455073E8B0E > .orbit-signing   # or keep it in a file
+echo "<SHA-1 or name from security find-identity>" > .orbit-signing   # or keep it in a file
 ```
+
+`.orbit-signing` is per checkout: copy it into any new clone or worktree. An identity that is not in your keychain stops the build before anything is replaced. Blank lines and `#` comments in the file are ignored.
 
 The script prints the identity it used and the app's designated requirement; with a real identity that names the certificate, not a cdhash. The first time `codesign` uses a keychain key, macOS may ask whether `codesign` can access it: click **Always Allow**.
 

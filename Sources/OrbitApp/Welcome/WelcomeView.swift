@@ -8,6 +8,8 @@ struct WelcomeView: View {
     static let width: CGFloat = 440
 
     let granted: Bool
+    /// True once "Open Privacy Settings" has been clicked; the secondary button then reads "Done".
+    var openedSettings = false
     let onOpenSettings: () -> Void
     let onNotNow: () -> Void
 
@@ -42,8 +44,12 @@ struct WelcomeView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.06)))
-        Text("Don't see Orbit? Click +, choose Orbit in Applications.")
-            .font(.system(size: 11)).foregroundStyle(.secondary)
+        VStack(spacing: 3) {
+            Text("If macOS offers to Quit & Reopen Orbit, choose it.")
+            Text("Don't see Orbit? Click +, choose Orbit in Applications.")
+        }
+        .font(.system(size: 11)).foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
         VStack(spacing: 8) {
             Button(action: onOpenSettings) {
                 Text("Open Privacy Settings")
@@ -57,7 +63,7 @@ struct WelcomeView: View {
             .buttonStyle(.plain)
             .keyboardShortcut(.defaultAction)
             Button(action: onNotNow) {
-                Text("Not now — ask me per folder")
+                Text(openedSettings ? "Done" : "Not now — ask me per folder")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
