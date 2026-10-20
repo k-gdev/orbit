@@ -35,5 +35,27 @@ cp "$BIN" build/Orbit.app/Contents/MacOS/Orbit
 cp Support/Info.plist build/Orbit.app/Contents/Info.plist
 mkdir -p build/Orbit.app/Contents/Resources
 cp Support/AppIcon.icns build/Orbit.app/Contents/Resources/AppIcon.icns
-codesign --force --sign - build/Orbit.app
-echo "Built build/Orbit.app"
+
+# Signing identity: $ORBIT_SIGN_IDENTITY, else the first line of the git-ignored .orbit-signing file
+# (a certificate SHA-1 hash or name from `security find-identity -v -p codesigning`), else ad-hoc.
+# A real identity gives the app a stable designated requirement, so macOS keeps its folder-access grants
+# across rebuilds; an ad-hoc signature is tied to the exact binary (its cdhash) and is forgotten every build.
+IDENTITY="${ORBIT_SIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" && -f .orbit-signing ]]; then
+    IFS= read -r IDENTITY < .orbit-signing || true
+    IDENTITY="${IDENTITY%$'\r'}"
+fi
+if [[ -z "$IDENTITY" ]]; then
+    IDENTITY="-"
+    echo "warning: no signing identity (set ORBIT_SIGN_IDENTITY or put one in .orbit-signing); signing ad-hoc." >&2
+    echo "warning: macOS will ask for Desktop/Documents/Downloads access again after every rebuild." >&2
+fi
+codesign --force --timestamp=none --sign "$IDENTITY" "$APP"
+if [[ "$IDENTITY" == "-" ]]; then
+    echo "Signed $APP ad-hoc"
+else
+    echo "Signed $APP with identity: $IDENTITY"
+fi
+echo "Designated requirement:"
+codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => /  /p'
+echo "Built $APP"
