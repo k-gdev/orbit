@@ -7,10 +7,11 @@ struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     let capabilities: Capabilities
     let rescan: () -> Capabilities
+    let showWelcome: () -> Void
 
     var body: some View {
         ScrollView {
-            SettingsContent(settings: settings, capabilities: capabilities, rescan: rescan)
+            SettingsContent(settings: settings, capabilities: capabilities, rescan: rescan, showWelcome: showWelcome)
         }
     }
 }
@@ -19,14 +20,17 @@ struct SettingsContent: View {
     @ObservedObject var settings: SettingsStore
     @State var capabilities: Capabilities
     let rescan: () -> Capabilities
+    let showWelcome: () -> Void
     @State private var loginOn = LoginItem.isEnabled
+    @State private var fullDiskAccess = FullDiskAccess.isGranted()
     @State private var loginError: String?
     @State private var triggerMessage: [WheelKind: String] = [:]
     /// True when drawn by `SettingsSnapshot`, whose `ImageRenderer` can't draw AppKit-backed controls.
     private let renderingForSnapshot: Bool
 
     init(settings: SettingsStore, capabilities: Capabilities, rescan: @escaping () -> Capabilities,
-         renderingForSnapshot: Bool = false) {
+         showWelcome: @escaping () -> Void = {}, renderingForSnapshot: Bool = false) {
+        self.showWelcome = showWelcome
         self.renderingForSnapshot = renderingForSnapshot
         self.settings = settings
         self._capabilities = State(initialValue: capabilities)
@@ -225,6 +229,34 @@ struct SettingsContent: View {
         }
         Toggle("Haptic feedback", isOn: $settings.hapticsEnabled)
         accentRow
+        Divider()
+        fullDiskAccessRow
+    }
+
+    /// Full Disk Access status, re-read when the page appears and whenever a window becomes key (so it
+    /// updates after the user comes back from System Settings).
+    private var fullDiskAccessRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Full Disk Access")
+                Spacer(minLength: 0)
+                if fullDiskAccess {
+                    Label("Granted", systemImage: "checkmark.circle.fill").foregroundStyle(Color.green)
+                } else {
+                    Label("Not granted", systemImage: "xmark.circle").foregroundStyle(.secondary)
+                }
+                Button("Open Privacy Settings") { NSWorkspace.shared.open(FullDiskAccess.settingsURL) }
+            }
+            Text(fullDiskAccess ? "Orbit can read your folders without asking."
+                                : "Without it, macOS asks separately for Desktop, Documents, Downloads and other folders.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Show welcome again", action: showWelcome)
+        }
+        .onAppear { fullDiskAccess = FullDiskAccess.isGranted() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            fullDiskAccess = FullDiskAccess.isGranted()
+        }
     }
 
     /// The accent colour: a colour well, its hex, and a reset. `ImageRenderer` can't draw `ColorPicker`

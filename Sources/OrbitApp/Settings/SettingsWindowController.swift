@@ -6,11 +6,13 @@ import SwiftUI
 final class SettingsWindowController {
     private let settings: SettingsStore
     private let coordinator: JobCoordinator
+    private let showWelcome: () -> Void
     private var window: NSWindow?
 
-    init(settings: SettingsStore, coordinator: JobCoordinator) {
+    init(settings: SettingsStore, coordinator: JobCoordinator, showWelcome: @escaping () -> Void) {
         self.settings = settings
         self.coordinator = coordinator
+        self.showWelcome = showWelcome
     }
 
     /// Shows (or re-fronts) the single settings window. Orbit is an accessory app,
@@ -22,7 +24,8 @@ final class SettingsWindowController {
                                     rescan: { [coordinator] in
                                         coordinator.rescan()
                                         return coordinator.capabilities
-                                    })
+                                    },
+                                    showWelcome: showWelcome)
             let hosting = NSHostingController(rootView: view)
             let w = NSWindow(contentViewController: hosting)
             w.title = "Orbit Settings"
