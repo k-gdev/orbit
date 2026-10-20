@@ -12,11 +12,32 @@ public enum VideoConverter {
 
     public static func convert(_ src: DroppedItem, to format: OutputFormat, output: URL, ffmpeg: FFmpeg?,
                                progress: @escaping @Sendable (Double) -> Void) async throws {
+        if audioOnlyOutputs.contains(format) {
+            try await requireSound(in: src, ffmpeg: ffmpeg)
+        }
         if usesNativePath(src, to: format) {
             try await convertNatively(src.url, to: format, output: output, progress: progress)
         } else {
             guard let ffmpeg else { throw OrbitError.helperMissing(.ffmpeg) }
             try await convertWithFFmpeg(src.url, to: format, output: output, ffmpeg: ffmpeg, progress: progress)
+        }
+    }
+
+    private static let audioOnlyOutputs: Set<OutputFormat> = [.mp3, .m4a, .aac, .wav, .aiff, .flac, .ogg, .opus, .wma]
+
+    /// Screen recordings and many exported clips have no audio track; extracting sound from them
+    /// would otherwise fail with an opaque AVFoundation or ffmpeg error.
+    private static func requireSound(in src: DroppedItem, ffmpeg: FFmpeg?) async throws {
+        let hasSound: Bool
+        if !MediaSupport.needsFFmpegToRead(src) {
+            hasSound = try await MediaInfo.hasAudio(src.url)
+        } else if let ffmpeg {
+            hasSound = try await VideoToolsFFmpeg.probe(src.url, ffmpeg: ffmpeg).hasAudio
+        } else {
+            return  // the ffmpeg path reports the missing helper itself
+        }
+        if !hasSound {
+            throw OrbitError.unsupported("\(src.url.lastPathComponent) has no sound to extract.")
         }
     }
 
