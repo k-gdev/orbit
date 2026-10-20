@@ -6,6 +6,7 @@ MainActor.assumeIsolated {
     HUDSnapshot.runIfRequested(CommandLine.arguments)
     PerformCommand.runIfRequested(CommandLine.arguments)
     SettingsSnapshot.runIfRequested(CommandLine.arguments)
+    WelcomeSnapshot.runIfRequested(CommandLine.arguments)
     GlyphSnapshot.runIfRequested(CommandLine.arguments)
     EditorSnapshot.runIfRequested(CommandLine.arguments)
     EditorCheck.runIfRequested(CommandLine.arguments)

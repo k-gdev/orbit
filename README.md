@@ -37,7 +37,26 @@ Results are saved beside the original as `name-<suffix>.<ext>` (for example `pho
 scripts/build-app.sh && scripts/install.sh
 ```
 
-`build-app.sh` produces a universal (arm64 + x86_64), ad-hoc-signed `build/Orbit.app`; `install.sh` copies it to `/Applications` (refusing to replace anything that isn't Orbit) and launches it. Use `scripts/build-app.sh --debug` for a plain debug build. Tests run with `swift test`.
+`build-app.sh` produces a universal (arm64 + x86_64) `build/Orbit.app`, signed as described below; `install.sh` copies it to `/Applications` (refusing to replace anything that isn't Orbit) and launches it. Use `scripts/build-app.sh --debug` for a plain debug build. Tests run with `swift test`.
+
+### Code signing
+
+macOS remembers which folders (Desktop, Documents, Downloads) you let Orbit read by the app's code-signing identity. An ad-hoc signature changes with every build, so macOS asks again after each rebuild. Sign with a real certificate and the grants stick. `build-app.sh` picks the identity in this order:
+
+1. the `ORBIT_SIGN_IDENTITY` environment variable;
+2. the first line of a git-ignored `.orbit-signing` file at the repo root;
+3. ad-hoc (`-`), with a warning that macOS will re-ask for folder access after every rebuild.
+
+An identity is a certificate name or SHA-1 hash from `security find-identity -v -p codesigning`:
+
+```sh
+ORBIT_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" scripts/build-app.sh
+echo "<SHA-1 or name from security find-identity>" > .orbit-signing   # or keep it in a file
+```
+
+`.orbit-signing` is per checkout: copy it into any new clone or worktree. An identity that is not in your keychain stops the build before anything is replaced. Blank lines and `#` comments in the file are ignored.
+
+The script prints the identity it used and the app's designated requirement; with a real identity that names the certificate, not a cdhash. The first time `codesign` uses a keychain key, macOS may ask whether `codesign` can access it: click **Always Allow**.
 
 ## Optional helpers
 
@@ -49,8 +68,9 @@ Orbit works without these; slices that need a missing helper are hidden and the 
 ## First run
 
 - The first time you use an iWork-backed slice, macOS asks whether Orbit may control Pages, Keynote or Numbers (an Automation prompt). Allow it; it is asked once per app.
-- Nothing else is requested. Orbit watches the drag pasteboard and the mouse, which need no permission.
-- Orbit is ad-hoc signed, not notarized. If macOS blocks the first launch, right-click the app and choose **Open**.
+- Orbit watches the drag pasteboard and the mouse, which need no permission.
+- On first launch Orbit offers to turn on **Full Disk Access** (System Settings → Privacy & Security), so macOS stops asking separately for each folder. Choosing **Not now** is fine; you will be asked per folder instead. Settings → General shows the status and can reopen the welcome.
+- Orbit is not notarized (and ad-hoc signed unless you built it with a signing identity). If macOS blocks the first launch, right-click the app and choose **Open**.
 
 ## Settings
 

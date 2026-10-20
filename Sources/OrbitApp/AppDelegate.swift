@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dragWatcher: DragWatcher?
     private var statusItemController: StatusItemController?
     private var settingsWindow: SettingsWindowController?
+    private var welcomeWindow: WelcomeWindowController?
     private var windowController: WheelWindowController?
     private var servicesProvider: ServicesProvider?
 
@@ -40,7 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.coordinator = coordinator
         self.wheel = wheel
         self.dragWatcher = dragWatcher
-        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator)
+        let welcomeWindow = WelcomeWindowController(settings: settings)
+        self.welcomeWindow = welcomeWindow
+        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator,
+                                                      showWelcome: { welcomeWindow.show() })
         self.settingsWindow = settingsWindow
         let windowController = WheelWindowController(wheel: wheel)
         self.windowController = windowController
@@ -51,5 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
                                                     windowController: windowController,
                                                     showSettings: { settingsWindow.show() })
+        // Offer Full Disk Access once, on the first launch where it isn't already granted.
+        if welcomeWindow.shouldShowOnLaunch { welcomeWindow.show() }
     }
 }

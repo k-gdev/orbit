@@ -24,6 +24,7 @@ public final class SettingsStore: ObservableObject {
         static let hapticsEnabled = "hapticsEnabled"
         static let bindings = "bindings"
         static let accentHex = "accentHex"
+        static let hasSeenWelcome = "hasSeenWelcome"
     }
 
     @Published public var isEnabled: Bool { didSet { defaults.set(isEnabled, forKey: Key.isEnabled) } }
@@ -45,6 +46,8 @@ public final class SettingsStore: ObservableObject {
         }
     }
     @Published public var hapticsEnabled: Bool { didSet { defaults.set(hapticsEnabled, forKey: Key.hapticsEnabled) } }
+    /// Whether the first-launch Full Disk Access welcome has been dealt with (either button, or access granted).
+    @Published public var hasSeenWelcome: Bool { didSet { defaults.set(hasSeenWelcome, forKey: Key.hasSeenWelcome) } }
 
     /// The accent colour as `RRGGBB`. Anything that is not six hex digits falls back to the default.
     @Published public var accentHex: String {
@@ -92,6 +95,7 @@ public final class SettingsStore: ObservableObject {
         terminalBundleID = defaults.string(forKey: Key.terminalBundleID) ?? "com.apple.Terminal"
         customFFmpegPath = defaults.string(forKey: Key.customFFmpegPath)
         hapticsEnabled = bool(Key.hapticsEnabled, true)
+        hasSeenWelcome = bool(Key.hasSeenWelcome, false)
         accentHex = Self.normalisedAccent(defaults.string(forKey: Key.accentHex) ?? Self.defaultAccentHex)
         bindings = defaults.data(forKey: Key.bindings)
             .flatMap { try? JSONDecoder().decode(TriggerBindings.self, from: $0) } ?? .defaults
