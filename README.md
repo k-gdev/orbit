@@ -6,6 +6,12 @@
 
 Orbit is a native macOS menu bar app that shows a radial wheel while you drag files, so you can convert and edit them by dropping onto a slice. It works entirely on your Mac: no network access, no telemetry, and no Accessibility or Input Monitoring permission.
 
+<p align="center">
+  <a href="docs/demo/orbit-demo.mp4"><img src="docs/demo/orbit-demo.webp" width="100%" alt="Orbit demo: a photo is dragged, Shift opens the wheel, and dropping on PNG converts it; holding Compress opens a sub-ring of presets."></a>
+  <br>
+  <sub><a href="docs/demo/orbit-demo.mp4">Watch the demo with sound (24 s)</a></sub>
+</p>
+
 Requires macOS 14 or later. On macOS 26 the wheel uses Liquid Glass; earlier systems get a frosted-material fallback.
 
 ## How it works
