@@ -83,6 +83,16 @@ import Testing
         #expect(GIFMaker.frameBudget(for: CGSize(width: 1080, height: 1920)) < GIFMaker.maxFrames)
     }
 
+    @Test(arguments: [OutputFormat.m4a, .mp3])
+    func silentVideoToAudioSaysThereIsNoSound(f: OutputFormat) async throws {
+        let silent = await Fixtures.video("silent.mov", seconds: 1, w: 320, h: 240, audio: false, in: root)
+        await #expect(throws: OrbitError.unsupported("silent.mov has no sound to extract.")) {
+            _ = try await self.run(silent, .convert(f))
+        }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix("silent-") }
+        #expect(leftovers.isEmpty)
+    }
+
     @Test func movToM4A() async throws {
         let o = try await run(await clip(), .convert(.m4a)).outputs[0]
         #expect(try await !MediaInfo.hasVideo(o))
