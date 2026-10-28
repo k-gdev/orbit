@@ -760,6 +760,7 @@ extension SoundTests {
             memory.systemOutputChanged(from: nil)                     // no previous output: nothing to drop
             #expect(memory.devices(for: "com.hnc.Discord") == ["Speakers"])
         }
+
         /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
         /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
         @Test func tapPausesAfterIdleDelay() {
@@ -796,7 +797,6 @@ extension SoundTests {
             #expect(quiet.update(isPlaying: false, now: at(70 + TapActivity.idleDelay)) == .pause)
             #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
         }
-
 
         /// N3: releasing a tap never waits for a start that may only return with the app's next sound. While the
         /// tap's queue sits in such a start, the teardown runs from outside it; when the start returns afterwards,
