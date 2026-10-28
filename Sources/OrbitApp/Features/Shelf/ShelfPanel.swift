@@ -13,7 +13,7 @@ final class ShelfPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
+        hasShadow = GlassRendering.windowHasShadow
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovableByWindowBackground = false // the content's own handle moves it (`performDrag`)

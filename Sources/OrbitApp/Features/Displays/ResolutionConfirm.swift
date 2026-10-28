@@ -125,7 +125,7 @@ final class ResolutionConfirmWindow {
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = GlassRendering.windowHasShadow
         panel.isReleasedWhenClosed = false
         return panel
     }

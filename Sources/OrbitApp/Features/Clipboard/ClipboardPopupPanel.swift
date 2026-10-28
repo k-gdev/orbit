@@ -20,7 +20,7 @@ final class ClipboardPopupPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
+        hasShadow = GlassRendering.windowHasShadow
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovable = false
