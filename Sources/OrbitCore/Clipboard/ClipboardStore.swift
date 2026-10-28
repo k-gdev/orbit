@@ -148,6 +148,10 @@ public struct ClipboardStore: Sendable {
         Self.isSafePayloadName(name) ? directory.appending(path: name, directoryHint: .notDirectory) : nil
     }
 
+    /// Where the blob called `name` lives (for example to build a thumbnail without reading it all),
+    /// or nil when `name` is not a blob name. The file may not exist.
+    public func payloadURL(named name: String) -> URL? { blobURL(name) }
+
     public func writePayload(_ data: Data, named name: String) throws {
         guard let url = blobURL(name) else { throw StoreError(description: "unsafe blob name \(name)") }
         try ensureDirectory()

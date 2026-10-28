@@ -383,7 +383,10 @@ import Testing
                 #expect(!ClipboardStore.isSafePayloadName(bad), "\(bad) must be refused")
                 #expect(throws: (any Error).self) { try store.writePayload(Data("x".utf8), named: bad) }
                 #expect(store.readPayload(named: bad) == nil)
+                #expect(store.payloadURL(named: bad) == nil)
             }
+            let good = ClipboardStore.newPayloadName(for: .image)
+            #expect(store.payloadURL(named: good)?.lastPathComponent == good)
             #expect(ClipboardStore.isSafePayloadName(ClipboardStore.newPayloadName(for: .image)))
             #expect(ClipboardStore.newPayloadName(for: .image).hasSuffix(".png"))
             #expect(ClipboardStore.newPayloadName(for: .richText).hasSuffix(".rtf"))
