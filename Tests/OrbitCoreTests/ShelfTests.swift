@@ -329,6 +329,59 @@ import Testing
         #expect(ShelfSettings(defaults: d).lastFrame(forScreen: "screen-a") == nil)
     }
 
+    // MARK: Wheel action
+
+    private static func actionTitles(_ settings: CatalogSettings, items: [String] = ["a.xyz"]) -> [String] {
+        let dropped = items.map { DroppedItem(url: URL(fileURLWithPath: "/nonexistent/\($0)")) }
+        return SliceCatalog.content(for: dropped, wheel: .actions, capabilities: .none, settings: settings).slices.map(\.title)
+    }
+
+    @Test func catalogShowsShelfOnlyWhenEnabled() {
+        let original = ["FLOAT", "AIRDROP", "COPY PATH", "TERMINAL", "COPY TO", "MOVE TO", "ARCHIVE"]
+        // Off by default: the Actions ring is exactly what it was before the Shelf existed.
+        #expect(!CatalogSettings().showShelfAction)
+        #expect(Self.actionTitles(CatalogSettings()) == original)
+        var on = CatalogSettings()
+        on.showShelfAction = true
+        // On: SHELF comes straight after FLOAT, and nothing else moves.
+        #expect(Self.actionTitles(on) == ["FLOAT", "SHELF"] + original.dropFirst())
+        on.showShelfAction = false
+        #expect(Self.actionTitles(on) == original)
+        // The setting does not change the Convert or Tools wheels.
+        var shown = CatalogSettings()
+        shown.showShelfAction = true
+        let png = [DroppedItem(url: URL(fileURLWithPath: "/nonexistent/a.png"))]
+        for wheel in [WheelKind.convert, .tools] {
+            let off = SliceCatalog.content(for: png, wheel: wheel, capabilities: .everything, settings: CatalogSettings())
+            let withShelf = SliceCatalog.content(for: png, wheel: wheel, capabilities: .everything, settings: shown)
+            #expect(off == withShelf)
+        }
+    }
+
+    @Test func shelfSliceIsASimpleAction() throws {
+        var settings = CatalogSettings(favouriteFolders: (1...12).map { URL(fileURLWithPath: "/Users/test/F\($0)", isDirectory: true) })
+        settings.showShelfAction = true
+        let content = SliceCatalog.content(for: [DroppedItem(url: URL(fileURLWithPath: "/nonexistent/a.xyz"))], wheel: .actions,
+                                           capabilities: .none, settings: settings)
+        let shelf = try #require(content.slices.first { $0.title == "SHELF" })
+        #expect(shelf.id == "actions.shelf")
+        #expect(shelf.symbol == "tray")
+        #expect(shelf.action == .action(.shelf, nil))
+        #expect(shelf.children.isEmpty && shelf.editor == nil)
+        // Eight slices: under the cap, so no MORE slice appears.
+        #expect(content.slices.count == 8)
+        #expect(ActionID.shelf.rawValue == "shelf")
+    }
+
+    @Test func shelfActionIsHandledByTheAppNotAProcessor() {
+        let item = DroppedItem(url: URL(fileURLWithPath: "/nonexistent/a.xyz"))
+        let action = SliceAction.action(.shelf, nil)
+        #expect(!ActionProcessor().canHandle(JobRequest(items: [item], action: action)))
+        #expect(action.progressTitle(for: .other) == "Adding to Shelf")
+        #expect(action.outputSuffix.isEmpty)
+        #expect(!action.isCombining(for: [item, item]))
+    }
+
     // MARK: Placement
 
     private static let screen = CGRect(x: 0, y: 25, width: 1600, height: 875)

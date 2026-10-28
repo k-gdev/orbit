@@ -11,7 +11,7 @@ public enum ToolID: String, Codable, Sendable {
 }
 
 public enum ActionID: String, Codable, Sendable {
-    case float, airDrop, copyPath, terminal, copyTo, moveTo, archive
+    case float, airDrop, copyPath, terminal, copyTo, moveTo, archive, shelf
 }
 
 public enum EditorKind: String, Sendable {
