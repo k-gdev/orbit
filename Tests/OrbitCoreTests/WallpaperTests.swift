@@ -415,6 +415,26 @@ enum WallpaperFixtures {
         #expect(PauseReason.allCases.allSatisfy { !$0.label.isEmpty })
     }
 
+    @Test func unseenWindowCountsAsCoveredAfterTheGracePeriod() {
+        let grace = WallpaperVisibility.grace
+        #expect(grace > 0 && grace <= 10)
+        // Visible now: never covered.
+        #expect(!WallpaperVisibility.isCovered(visibleNow: true, everVisible: false, secondsSinceShown: 0))
+        #expect(!WallpaperVisibility.isCovered(visibleNow: true, everVisible: true, secondsSinceShown: 999))
+        // Seen before, hidden now: covered at once.
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: true, secondsSinceShown: 0.1))
+        // Never reported visible: plays while macOS may still be catching up, then counts as covered (no decoding
+        // for a window nobody can see, e.g. one drawn under the system wallpaper).
+        #expect(!WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: grace - 0.5))
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: grace))
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: 3600))
+        // A window not shown yet is not covered.
+        #expect(!WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: nil))
+        let covered = DisplayConditions(screenCovered: WallpaperVisibility.isCovered(visibleNow: false, everVisible: false,
+                                                                                     secondsSinceShown: grace + 1))
+        #expect(WallpaperPausePolicy.state(for: covered) == .paused(.screenCovered))
+    }
+
     @Test func sharedPlayerPlaysWhileAnyDisplayPlays() {
         #expect(PlaybackState.combined([.paused(.screenCovered), .playing]) == .playing)
         #expect(PlaybackState.combined([.paused(.screenCovered), .paused(.screenLocked)]) == .paused(.screenLocked))

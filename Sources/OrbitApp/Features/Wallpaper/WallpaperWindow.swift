@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import OrbitCore
 
 /// The borderless window one display's wallpaper plays in: at the desktop window level (below the desktop icons,
 /// above the system's desktop picture), on every Space, never focused, transparent to the mouse, filling the screen.
@@ -9,9 +10,11 @@ final class WallpaperWindow: NSWindow {
     let displayKey: String
     private let playerLayer = AVPlayerLayer()
 
-    /// True once macOS has reported this window visible. Until then `isCovered` stays false, so a window whose
-    /// occlusion state is never reported (an unexpected desktop-level quirk) still plays instead of freezing.
+    /// True once macOS has reported this window visible.
     private(set) var hasBeenVisible = false
+    /// When `present()` ordered the window in.
+    private var shownAt: Date?
+    private var loggedUnseen = false
 
     init(screen: NSScreen, displayKey: String) {
         self.displayKey = displayKey
@@ -57,11 +60,26 @@ final class WallpaperWindow: NSWindow {
         setFrame(screen.frame, display: true)
     }
 
-    /// Whether the window can't be seen right now (a full-screen app or a window covers the whole display).
+    /// Orders the window in (it never becomes key) and starts the visibility grace period.
+    func present() {
+        shownAt = Date()
+        orderFrontRegardless()
+    }
+
+    /// Whether the window can't be seen right now (a full-screen app or a window covers the whole display). A window
+    /// macOS never reports visible plays for `WallpaperVisibility.grace` seconds, then counts as covered, so a window
+    /// nobody can see (drawn under the system wallpaper, say) doesn't decode 4K video forever.
     var isCovered: Bool {
         let visible = occlusionState.contains(.visible)
         if visible { hasBeenVisible = true }
-        return hasBeenVisible && !visible
+        let covered = WallpaperVisibility.isCovered(visibleNow: visible, everVisible: hasBeenVisible,
+                                                    secondsSinceShown: shownAt.map { Date().timeIntervalSince($0) })
+        if covered, !hasBeenVisible, !loggedUnseen {
+            loggedUnseen = true
+            Log.info("wallpaper: macOS never reported the window for \(displayKey) visible within \(Int(WallpaperVisibility.grace)) s; "
+                     + "pausing it as covered")
+        }
+        return covered
     }
 
     /// Detaches the player and closes. The manager drops its reference afterwards.

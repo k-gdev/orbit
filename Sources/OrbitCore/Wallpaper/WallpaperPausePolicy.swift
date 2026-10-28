@@ -79,6 +79,24 @@ public enum WallpaperPausePolicy {
     }
 }
 
+/// Whether a wallpaper window counts as covered, from what macOS reports about its occlusion.
+public enum WallpaperVisibility {
+    /// How long a new window may go without macOS ever reporting it visible before it counts as covered. Long enough
+    /// for the first occlusion update after ordering front; short enough that a window nobody can see (drawn under
+    /// the system wallpaper, say) stops decoding video within seconds.
+    public static let grace: TimeInterval = 4
+
+    /// Covered when not visible now and either seen before (it was visible, now something covers it) or never seen
+    /// within `grace` seconds of being shown. `secondsSinceShown` nil: not shown yet, so not covered.
+    public static func isCovered(visibleNow: Bool, everVisible: Bool, secondsSinceShown: TimeInterval?,
+                                 grace: TimeInterval = grace) -> Bool {
+        if visibleNow { return false }
+        if everVisible { return true }
+        guard let secondsSinceShown else { return false }
+        return secondsSinceShown >= grace
+    }
+}
+
 /// Which displays get a wallpaper window, and what to do when that changes (a display unplugged or added, a
 /// wallpaper chosen or removed).
 public enum WallpaperPlan {

@@ -194,7 +194,11 @@ final class WallpaperManager {
                                                                              object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.evaluate() }
             }
-            window.orderFrontRegardless()
+            window.present()
+            // Occlusion may never be reported: look again once the visibility grace period is over.
+            DispatchQueue.main.asyncAfter(deadline: .now() + WallpaperVisibility.grace + 0.25) { [weak self] in
+                MainActor.assumeIsolated { self?.evaluate() }
+            }
         }
         window.attach(player.player)
         shown[key] = source
