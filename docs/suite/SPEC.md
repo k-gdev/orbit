@@ -80,6 +80,8 @@ more external), SteelSeries Arctis Nova headset, MacBook Pro speakers.
 | Clipboard | none to record; Accessibility to auto-paste |
 | Shelf | none |
 | Wallpaper | none |
+| Controls: Keep Awake, Quick Toggles, Mic Mute | none (if a toggle needs Automation for System Events, it is listed on the Features page) |
+| Controls: Grab Text | Screen Recording (same permission as Dock preview) |
 
 ## 5. Sections
 
@@ -178,3 +180,63 @@ moving.
   brightness/resolution, default audio devices, mic mute, or desktop pictures, and no leaving
   desktop windows up. Read-only probes (listing displays, DDC capability/max reads, listing audio
   devices/processes, reading sensors) are fine and useful.
+
+## 8. Additions (approved 2026-10-27)
+
+Kevo approved these on the night of the build. They rank with the rest of the spec: part of "done",
+with the same per-feature review and report coverage.
+
+### 8.1 Controls tab (new tab and new Features toggle)
+A new menu bar tab, "Controls" **[builder's call on the name and icon]**. It holds Keep Awake (8.2)
+at the top and Quick Toggles (8.3) below, plus a "Grab Text" button (8.4).
+
+### 8.2 Keep Awake (replaces Amphetamine)
+- Start it as: Indefinitely; for 15 min / 1 h / 2 h / 5 h / a custom time; until a chosen time;
+  while a chosen app is running.
+- Optional: while files in ~/Downloads are still downloading **[builder's call: include if cheap]**.
+- An option to also keep the display awake, not just the system.
+- Use `IOPMAssertionCreateWithName`: `PreventUserIdleSystemSleep`, plus `PreventUserIdleDisplaySleep`
+  when that option is on. Always release the assertion on stop, on timer expiry and on quit.
+- While it's active, the Orbit menu bar icon shows a small indicator and the tile shows the time
+  remaining.
+- No permissions needed.
+
+### 8.3 Quick Toggles
+A grid of toggle buttons. Each one shows the current state, read live:
+- dark mode
+- hide desktop icons
+- show hidden files in Finder
+- Night Shift
+- Do Not Disturb / Focus
+- Eject all drives (external and removable volumes only; confirm in the panel first)
+- **Mic Mute**: the same mic mute as the Sound section (§5.1), not a second implementation. It
+  shares one state with the Sound tab's mute button, the global mute shortcut and the crossed-out
+  mic badge in the menu bar; flipping any one of them updates the rest. It works even when the
+  Sound feature is turned off (mic mute needs no System Audio Recording permission, so it stays out
+  of the per-app audio tap code; the shared mic-mute logic lives where both Sound and Controls can
+  use it). The input device's previous volume/mute state is restored on unmute and on quit, as in
+  §5.1.
+
+Do Not Disturb has no public API: ship it only if a reliable route exists (for example, running a
+user-chosen Shortcut). Otherwise leave it out and note it in the report.
+
+Each toggle sets things back exactly as they were when turned off. If one needs an Automation
+permission (System Events), list it on the Features page.
+
+**Unattended rule still applies:** do not actually flip any of these on Kevo's Mac during the build
+(including muting the mic). Test the logic, and only read the current states.
+
+### 8.4 Grab Text (replaces TextSniper)
+- Trigger: a global shortcut (default **[builder's call]**, configurable), plus the button in the
+  Controls tab.
+- A crosshair overlay on all displays; drag a rectangle; Esc cancels.
+- Capture the rectangle with ScreenCaptureKit (Screen Recording, the same permission as Dock
+  preview).
+- Run Vision text recognition (accurate, auto language) and copy the text to the clipboard.
+- Show the existing HUD: "Copied N lines".
+- Bonus if cheap: when the area contains a QR code or barcode, copy its payload instead
+  **[builder's call]**.
+- It appears on the Features page and in the permissions table (§4).
+
+### Not in scope tonight
+Window snapping and a window switcher are not part of this build; Kevo will discuss them separately.

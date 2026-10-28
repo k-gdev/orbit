@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn Orbit from a single drag-wheel utility into a suite: a tabbed menu bar panel, a side-rail Settings window with a Features page, and seven feature modules (Sound, System, Displays, Windows, Clipboard, Shelf, Wallpaper), with the wheel unchanged apart from a new Shelf action.
+**Goal:** Turn Orbit from a single drag-wheel utility into a suite: a tabbed menu bar panel, a side-rail Settings window with a Features page, and eight feature modules (Sound, System, Displays, Windows, Clipboard, Shelf, Wallpaper, and Controls from spec §8), with the wheel unchanged apart from a new Shelf action.
 
 **Architecture:** A shell (feature protocol, registry, permissions, hot keys, shared pill/tile UI, menu bar panel, settings rail, snapshot renderer) lands first. Each feature is then a self-contained module behind `SuiteFeature`: pure logic in `Sources/OrbitCore/<Feature>/` with Swift Testing tests, OS glue in `Sources/OrbitApp/Features/<Feature>/`. Features touch only their own folders (Shelf also touches the wheel's Actions ring), so they are built in parallel worktrees and merged.
 
@@ -34,6 +34,7 @@
 3. **Password-manager copies and huge copies (Clipboard).** Concealed/transient items are never stored; a 200 MB image does not land in history unbounded. Test: `PasteboardFilterTests.skipsConcealedAndTransient`, `ClipboardHistoryTests.enforcesByteLimit` (Task 11).
 4. **Turning a feature off stops all its work.** Timers, monitors, hot keys, status items, taps and windows are released; `start()`/`stop()` are idempotent. Test: `SuiteSettingsTests.enabledSetRoundTrips` (Task 1) plus each feature's start/stop review item.
 5. **Wallpaper under a full-screen app, on a locked screen, on battery, or on a removed display.** Playback pauses, the window for a removed display closes. Test: `WallpaperPausePolicyTests` (Task 13).
+6. **Keep Awake left running or a mic left muted after quit/expiry/disable (Controls, shared mic mute).** The power assertion is released on stop, expiry and quit; a mute Orbit applied is undone with the previous volume/mute restored. Test: `KeepAwakeTests.expiresAtDeadline`, `MicMuteStateTests.restoresPreviousState` (Task 14 / Task 7).
 
 ---
 
@@ -46,22 +47,23 @@
 - Test: `Tests/OrbitCoreTests/SuiteTests.swift`
 
 **Interfaces — Produces:**
-- `public enum FeatureID: String, CaseIterable, Codable, Sendable { case sound, system, displays, windows, clipboard, shelf, wallpaper }` with `title` ("Sound" … "Wallpaper"), `symbol` (SF Symbol: `speaker.wave.2`, `cpu`, `display`, `macwindow.on.rectangle`, `doc.on.clipboard`, `tray`, `photo.on.rectangle`), `summary` (one line), `permissions: [PermissionUse]`, `isOnByDefault: Bool`. Order of `allCases` is the tab order.
+- `public enum FeatureID: String, CaseIterable, Codable, Sendable { case sound, system, displays, windows, clipboard, shelf, wallpaper }` with `title` ("Sound" … "Wallpaper"), `symbol` (SF Symbol: `speaker.wave.2`, `cpu`, `display`, `macwindow.on.rectangle`, `doc.on.clipboard`, `tray`, `photo.on.rectangle`), `summary` (one line), `permissions: [PermissionUse]`, `isOnByDefault: Bool`. Order of `allCases` is the tab order. **Eighth case `controls`** (spec §8), last: title "Controls", symbol `switch.2`, on by default, permissions `[screenRecording "Grab Text captures the area you select", requestOnEnable: false]`.
 - `public enum SuitePermission: String, CaseIterable, Sendable { case systemAudioRecording, accessibility, screenRecording }` with `title` and `settingsURL: URL` (`x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture` / `Privacy_Accessibility` / `Privacy_ScreenCapture`).
 - `public struct PermissionUse: Sendable, Equatable { permission: SuitePermission; purpose: String; requestOnEnable: Bool }`. Table: sound → audio recording ("Per-app volume, boost and output", request); windows → accessibility ("Window titles, bring forward, minimise; Dock preview", request) and screenRecording ("Dock preview thumbnails", request); clipboard → accessibility ("Paste into the frontmost app; without it Orbit only copies", **not** requested on enable).
-- `public final class SuiteSettings: ObservableObject` (same idiom as `SettingsStore`, `init(defaults: UserDefaults = .standard)`): `@Published enabledFeatures: Set<FeatureID>` (key `suite.enabledFeatures`, default = features with `isOnByDefault`: system, displays, shelf, wallpaper), `@Published lastTab: FeatureID?` (key `suite.lastTab`), `func isEnabled(_:) -> Bool`, `var enabledInOrder: [FeatureID]`.
-- `public struct KeyCombo: Codable, Hashable, Sendable { keyCode: UInt16; modifiers: ModifierSet }` with `display: String` (modifiers in Apple order ⌃⌥⇧⌘, then key name), `static func keyName(for: UInt16) -> String?` (ANSI letters, digits, F1–F12, space, return, arrows), `static let micMuteDefault` (⌃⌥M, keyCode 46), `static let clipboardDefault` (⇧⌘V, keyCode 9). Reuses the existing `ModifierSet`.
+- `public final class SuiteSettings: ObservableObject` (same idiom as `SettingsStore`, `init(defaults: UserDefaults = .standard)`): `@Published enabledFeatures: Set<FeatureID>` (key `suite.enabledFeatures`, default = features with `isOnByDefault`: system, displays, shelf, wallpaper, controls), `@Published lastTab: FeatureID?` (key `suite.lastTab`), `func isEnabled(_:) -> Bool`, `var enabledInOrder: [FeatureID]`.
+- `public struct KeyCombo: Codable, Hashable, Sendable { keyCode: UInt16; modifiers: ModifierSet }` with `display: String` (modifiers in Apple order ⌃⌥⇧⌘, then key name), `static func keyName(for: UInt16) -> String?` (ANSI letters, digits, F1–F12, space, return, arrows), `static let micMuteDefault` (⌃⌥M, keyCode 46), `static let clipboardDefault` (⇧⌘V, keyCode 9), `static let grabTextDefault` (⇧⌘2, keyCode 19). Reuses the existing `ModifierSet`.
+- `public final class MicMuteSettings: ObservableObject` (`Sources/OrbitCore/Suite/MicMuteSettings.swift`): `muteShortcut: KeyCombo` (default `.micMuteDefault`, key `micMute.shortcut`). Shared by Sound and Controls.
 - `public struct PillScale: Sendable, Equatable { maximum: Double; boostStart: Double = 100 }` with `hasBoost`, `boostStartFraction`, `fraction(for:) -> Double` (clamped 0…1), `value(forFraction:step:) -> Double` (clamped to 0…maximum, rounded to step).
-- `public enum SettingsPage: Hashable, Sendable { case general, wheel, features, feature(FeatureID), about }` with `title`, `symbol`, `static var railOrder: [SettingsPage]` (general, wheel, features, the seven features, about), and `init?(argument: String)` for the snapshot CLI ("general", "wheel", "features", "about", or a feature raw value).
+- `public enum SettingsPage: Hashable, Sendable { case general, wheel, features, feature(FeatureID), about }` with `title`, `symbol`, `static var railOrder: [SettingsPage]` (general, wheel, features, the eight features, about), and `init?(argument: String)` for the snapshot CLI ("general", "wheel", "features", "about", or a feature raw value).
 
 - [ ] **Step 1: Write the failing tests** in `SuiteTests.swift`:
-  - `featureOrderMatchesTabs`: `FeatureID.allCases.map(\.title) == ["Sound","System","Displays","Windows","Clipboard","Shelf","Wallpaper"]`
+  - `featureOrderMatchesTabs`: `FeatureID.allCases.map(\.title) == ["Sound","System","Displays","Windows","Clipboard","Shelf","Wallpaper","Controls"]`
   - `permissionsTable`: `FeatureID.system.permissions.isEmpty`; `FeatureID.windows.permissions.map(\.permission) == [.accessibility, .screenRecording]`; `FeatureID.clipboard.permissions.first?.requestOnEnable == false`
-  - `enabledSetRoundTrips`: new suite defaults → `enabledFeatures == [.system, .displays, .shelf, .wallpaper]`; insert `.sound`, re-init from same defaults → contains `.sound`; `enabledInOrder.first == .sound`
+  - `enabledSetRoundTrips`: new suite defaults → `enabledFeatures == [.system, .displays, .shelf, .wallpaper, .controls]`; insert `.sound`, re-init from same defaults → contains `.sound`; `enabledInOrder.first == .sound`
   - `lastTabPersists`
-  - `keyComboDisplay`: `KeyCombo.micMuteDefault.display == "⌃⌥M"`, `KeyCombo.clipboardDefault.display == "⇧⌘V"`; KeyCombo JSON round-trip
+  - `keyComboDisplay`: `KeyCombo.micMuteDefault.display == "⌃⌥M"`, `KeyCombo.clipboardDefault.display == "⇧⌘V"`, `KeyCombo.grabTextDefault.display == "⇧⌘2"`; KeyCombo JSON round-trip; `MicMuteSettings` round-trip
   - `pillScale`: `PillScale(maximum: 150).boostStartFraction` ≈ 0.6667; `fraction(for: 75) == 0.5`; `value(forFraction: 1.2) == 150`; `value(forFraction: -0.1) == 0`; `PillScale(maximum: 100).hasBoost == false`, its `boostStartFraction == 1`
-  - `settingsPageArguments`: `SettingsPage(argument: "sound") == .feature(.sound)`, `SettingsPage(argument: "features") == .features`, `SettingsPage(argument: "nope") == nil`, `railOrder.count == 11`
+  - `settingsPageArguments`: `SettingsPage(argument: "sound") == .feature(.sound)`, `SettingsPage(argument: "features") == .features`, `SettingsPage(argument: "nope") == nil`, `railOrder.count == 12`
 - [ ] **Step 2:** `swift test --filter SuiteTests` → FAIL (types missing).
 - [ ] **Step 3:** Implement the six files.
 - [ ] **Step 4:** `swift test --filter SuiteTests` → PASS; `swift test` → all green.
@@ -71,7 +73,9 @@
 
 **Files:**
 - Create: `Sources/OrbitApp/Suite/SuiteFeature.swift`, `Sources/OrbitApp/Suite/SuiteContext.swift`, `Sources/OrbitApp/Suite/FeatureRegistry.swift`, `Sources/OrbitApp/Suite/PermissionCenter.swift`, `Sources/OrbitApp/Suite/PrivateSymbol.swift`, `Sources/OrbitApp/Suite/HotKeyCenter.swift`, `Sources/OrbitApp/Suite/UI/KeyComboRecorder.swift`
-- Create stubs: `Sources/OrbitApp/Features/<Name>/<Name>Feature.swift` for Sound, System, Displays, Windows, Clipboard, Shelf, Wallpaper (class names `SoundFeature`, `SystemFeature`, `DisplaysFeature`, `WindowsFeature`, `ClipboardFeature`, `ShelfFeature`, `WallpaperFeature`), each a working placeholder tile ("Coming in this build") so the app runs.
+- Create stubs: `Sources/OrbitApp/Features/<Name>/<Name>Feature.swift` for Sound, System, Displays, Windows, Clipboard, Shelf, Wallpaper (class names `SoundFeature`, `SystemFeature`, `DisplaysFeature`, `WindowsFeature`, `ClipboardFeature`, `ShelfFeature`, `WallpaperFeature`), each a working placeholder tile ("Coming in this build") so the app runs; plus `Sources/OrbitApp/Features/Controls/ControlsFeature.swift` (`ControlsFeature`).
+- Create: `Sources/OrbitApp/Suite/MicMuteService.swift` — the ONE shared mic mute (spec §8.3): `@MainActor final class MicMuteService: ObservableObject` with `@Published private(set) var isMuted`, `@Published private(set) var isAvailable`, `setMuted(_:)`, `toggle()`, `setActive(_:)` (active ⇒ global shortcut via `HotKeyCenter` id `micMute` + a `mic.slash.fill` NSStatusItem while muted; inactive ⇒ unregister, remove badge, undo Orbit's mute with restore), `restoreOnQuit()`. The shell ships the hardware part as a no-op stub; Task 7 fills in the Core Audio code inside this file. The registry calls `setActive(isEnabled(.sound) || isEnabled(.controls))` at launch and after every toggle; `stopAll()` calls `restoreOnQuit()`.
+- Add `SuiteContext.micMute: MicMuteService` and `SuiteContext.setStatusIndicator(_ id: String, active: Bool)` (a small accent mark on Orbit's own status icon while any indicator is active; Keep Awake uses it).
 - Modify: `Sources/OrbitApp/AppDelegate.swift` (build context + registry, `startEnabled()` at launch, `applicationWillTerminate` → `registry.stopAll()`), `Support/Info.plist` (add `NSAudioCaptureUsageDescription` "Orbit adjusts each app's volume and output when you use the Sound mixer."; Screen Recording and Accessibility have no Info.plist keys on macOS).
 
 **Interfaces — Produces:**
@@ -98,7 +102,7 @@ struct FeatureSnapshotViews { var panel: AnyView; var settings: AnyView }
 
 @MainActor final class FeatureRegistry: ObservableObject {
     init(context: SuiteContext, features: [any SuiteFeature])
-    static func standard(context: SuiteContext) -> FeatureRegistry   // the seven feature classes, each `init(context:)`
+    static func standard(context: SuiteContext) -> FeatureRegistry   // the eight feature classes, each `init(context:)`
     @Published private(set) var running: Set<FeatureID>
     func feature(_ id: FeatureID) -> any SuiteFeature
     func startEnabled()
@@ -175,7 +179,7 @@ struct KeyComboRecorder: View { init(combo: Binding<KeyCombo>, conflict: String?
 **Interfaces — Produces:**
 - `SnapshotRenderer.png(of view: some View, size: CGSize?, dark: Bool) throws -> Data` — hosts the view in an `NSHostingView` inside an offscreen, never-ordered-front window and uses `cacheDisplay(in:to:)`, so AppKit controls (toggles, pop-ups, sliders, text fields) draw for real (unlike `ImageRenderer`, which draws yellow placeholders). Glass renders `.flat` via `\.glassRendering`.
 - CLI (same conventions as the existing snapshot modes: refuse to overwrite without `--replace`, exit 64 on bad args):
-  - `Orbit --snapshot-panel <feature|empty> <out.png> [--dark] [--replace]` — full panel (all seven tabs shown, the given one selected) on a soft gradient backdrop, using `FeatureType.snapshotViews().panel`.
+  - `Orbit --snapshot-panel <feature|empty> <out.png> [--dark] [--replace]` — full panel (all eight tabs shown, the given one selected) on a soft gradient backdrop, using `FeatureType.snapshotViews().panel`.
   - `Orbit --snapshot-settings-page <page> <out.png> [--dark] [--replace]` — full Settings window (rail + page) at 760×560; feature pages use `snapshotViews().settings`.
   - `Orbit --snapshot-suite <dir> [--replace]` — writes `panel-<id>-{light,dark}.png` and `settings-<page>-{light,dark}.png` for everything.
 - [ ] **Step 1:** Implement; snapshots use throwaway defaults suites and fixture models only.
@@ -197,7 +201,8 @@ Every feature task follows the same shape:
 ### Task 7: Sound (Opus)
 
 **Core (`Sources/OrbitCore/Sound/`):**
-- `SoundSettings`: `pinnedBundleIDs: [String]`, `appStates: [String: AppAudioPreference]` (bundle ID → `volume` 0…150, `muted`, `outputUID: String?` nil = Same as Output), `rememberAppStates: Bool` (default true), `preferredMicUID: String?`, `keepPreferredMic: Bool` (default false), `muteShortcut: KeyCombo` (default `.micMuteDefault`), `showAllApps: Bool`.
+- `SoundSettings`: `pinnedBundleIDs: [String]`, `appStates: [String: AppAudioPreference]` (bundle ID → `volume` 0…150, `muted`, `outputUID: String?` nil = Same as Output), `rememberAppStates: Bool` (default true), `preferredMicUID: String?`, `keepPreferredMic: Bool` (default false), `showAllApps: Bool`. (The mute shortcut lives in the shared `MicMuteSettings`.)
+- `MicMuteState` (pure, `Sources/OrbitCore/Suite/MicMuteState.swift`): records the device's mute support, previous mute flag and previous input volume when Orbit mutes, and returns the exact restore action on unmute/quit; Orbit never "restores" a mute it did not apply. Tests in `SoundTests.swift`: `restoresPreviousState`, `volumeFallbackRestoresVolume`, `doesNotUnmuteUserMute`.
 - `VolumeCurve`: `gain(forPercent:) -> Float` (0 → 0, 100 → 1, 150 → 1.5, perceptual curve below 100 is fine but monotonic) and `SoftClip.apply(_:)` for boost (tanh-style knee above ~0.9, never exceeds 1.0).
 - `TapPlan`: given an app's preference and the current default output UID, decides `needsTap` (volume ≠ 100, or muted, or `outputUID` set and ≠ default) and the destination UID.
 - `AudioAppGrouping`: maps helper process bundle IDs to their app (`com.google.Chrome.helper.*` → `com.google.Chrome`, `com.apple.WebKit.*` → responsible app via PID when given), so one pill per app.
@@ -209,10 +214,10 @@ Every feature task follows the same shape:
 - `AudioProcessMonitor` (macOS 14.2+): `kAudioHardwarePropertyProcessObjectList`, `kAudioProcessPropertyPID` / `BundleID` / `IsRunningOutput`, grouped through `AudioAppGrouping`, resolved to `NSRunningApplication` for name and icon; listeners only while the panel is open or a tap exists.
 - `AppAudioTap` (macOS 14.2+): `CATapDescription(stereoMixdownOfProcesses:)`, `muteBehavior = .mutedWhenTapped`, `AudioHardwareCreateProcessTap`, a **private** aggregate device (tap + destination output as sub-device, `kAudioAggregateDeviceIsPrivateKey: true`, `kAudioAggregateDeviceTapAutoStartKey`), an IOProc that copies tap input to output applying `VolumeCurve` gain (+ `SoftClip` past 100) with a smoothed ramp; `invalidate()` stops the IOProc, destroys the aggregate, then the tap. Retarget when the default output changes.
 - `SoundEngine`: owns taps keyed by bundle ID, applies `TapPlan` on every preference/default change, tears everything down in `stop()`; `applicationWillTerminate` reaches it through `registry.stopAll()`.
-- `MicMuteController`: mute via the input device's mute property, falling back to input volume 0 (remember and restore the previous volume on unmute, on `stop()` and on quit); global shortcut via `HotKeyCenter` (id `sound.micMute`); while muted, an extra `NSStatusItem` shows `mic.slash.fill`.
+- **Shared mic mute:** fill in the hardware part of the shell's `Sources/OrbitApp/Suite/MicMuteService.swift` (spec §8.3; Sound and Controls share it, and it works with Sound off): mute via the default input device's mute property, falling back to input volume 0, driven by `MicMuteState` so the previous volume/mute is restored on unmute and on quit; follows default-input changes. Keep it free of any process-tap code. The Sound tab's mute button binds to `context.micMute`.
 - `PreferredMicWatcher`: when `keepPreferredMic` is on and the default input changes away from the preferred device while it is still connected, switch back (this is user-configured behaviour, off by default).
 - `SoundPanelView` per the mockup: "Output & Input" header; Output tile (device `PanelMenuButton` + master volume `PillSlider` 0–100), "Alerts & system sounds" row with its own device menu; Microphone tile (device menu, input level pill, mute `PanelRoundButton`, "Muted · ⌃⌥M to unmute" caption); "Apps" header with **Show all apps** toggle; one `PillSlider` per app (icon + name + `LevelBars` inside, 0–150 with boost stripes, tap icon = mute) and a `PanelRoundButton` that opens a menu "Play <App> on": Same as Output / each output device. Without System Audio Recording permission (or on macOS < 14.2) the Apps list shows why and a button to grant it; the device tiles still work.
-- `SoundSettingsView`: preferred microphone + keep toggle, remember per-app settings, mute shortcut (`KeyComboRecorder`), pinned apps list (add from running apps, remove).
+- `SoundSettingsView`: preferred microphone + keep toggle, remember per-app settings, mute shortcut (`KeyComboRecorder` bound to the shared `MicMuteSettings`), pinned apps list (add from running apps, remove).
 - Read-only probes allowed: list devices, list audio processes. **Do not** change default devices, volumes or mute, and do not create taps on Kevo's real apps during development; prove the tap path compiles and is gated.
 
 ### Task 8: System (Opus)
@@ -288,15 +293,28 @@ Every feature task follows the same shape:
 
 **App (`Sources/OrbitApp/Features/Wallpaper/`):** `WallpaperWindow` (borderless, `level = CGWindowLevelForKey(.desktopWindow)`, `collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]`, `ignoresMouseEvents = true`, frame = screen frame), `WallpaperPlayer` (`AVQueuePlayer` + `AVPlayerLooper`, muted, `AVPlayerLayer` `.resizeAspectFill`, `preventsDisplaySleepDuringVideoPlayback = false`), `WallpaperConditionsMonitor` (window `occlusionState` for covered, `com.apple.screenIsLocked`/`Unlocked` distributed notifications, `NSWorkspace.screensDidSleep/Wake`, IOPowerSources run-loop source, `NSProcessInfoPowerStateDidChange`), `StillFrameWriter` (`AVAssetImageGenerator` at 1 s → PNG in `<support>/Wallpaper/stills/`, then `NSWorkspace.setDesktopImageURL(_:for:options:)` after saving the previous URL), `WallpaperManager` (one window per assigned screen; rebuild on `didChangeScreenParameters`; `stop()` closes all windows and restores nothing else). `WallpaperPanelView`: one card per display (thumbnail, display name, current source, Choose… menu: Video file…, each downloaded aerial, None). `WallpaperSettingsView`: pause toggles, still frame toggle, per-display list. During development **never open a wallpaper window and never set a desktop picture**; verify via snapshots and tests only.
 
+### Task 14: Controls — Keep Awake, Quick Toggles, Grab Text (Opus; spec §8)
+
+**Core (`Sources/OrbitCore/Controls/`):**
+- `KeepAwakeMode: Codable, Equatable` — `.indefinitely`, `.duration(TimeInterval)` (presets 15 min, 1 h, 2 h, 5 h, custom), `.until(Date)`, `.whileAppRunning(bundleID: String)`, `.whileDownloading`; `KeepAwakeSession` (start date, mode, `keepDisplayAwake`) with `remaining(now:) -> TimeInterval?`, `isExpired(now:appRunning:downloadsActive:) -> Bool`, `label(now:) -> String` ("1 h 12 m left", "Until 23:30", "While Xcode runs", "Indefinitely").
+- `DownloadActivity.isActive(fileNames:)` — partial-download suffixes (`.download`, `.crdownload`, `.part`, `.partial`, `.opdownload`) **[builder's call: included, polled every 10 s only in that mode]**.
+- `QuickToggleID: String, CaseIterable` — `darkMode`, `hideDesktopIcons`, `showHiddenFiles`, `nightShift`, `doNotDisturb`, `ejectDrives`, `micMute`; `QuickToggleRestore` records the state before Orbit changed something so turning it off restores exactly that.
+- `EjectableVolumeFilter.ejectable(_ volumes: [VolumeInfo]) -> [VolumeInfo]` — external or removable volumes and mounted disk images only; never internal, boot/system or network volumes.
+- `GrabTextResult.format(lines: [String]) -> (text: String, hud: String)` ("Copied 1 line" / "Copied N lines"), and `GrabTextResult.preferBarcode(payloads:lines:)` (a QR/barcode payload wins when present) **[builder's call]**.
+- `ControlsSettings`: `keepDisplayAwake` (false), `customDuration` (45 min), `lastMode`, `grabTextShortcut: KeyCombo` (`.grabTextDefault`), `focusShortcutName: String?` (the user's Shortcut for Do Not Disturb), `visibleToggles: [QuickToggleID]`.
+- Tests `ControlsTests.swift`: `expiresAtDeadline`, `indefiniteNeverExpires`, `untilTimeLabel`, `whileAppRunningExpiresWhenAppQuits`, `downloadSuffixes`, `restoreRecordsPriorState`, `ejectableFiltersInternalAndNetwork`, `hudLineCounts`, `barcodeWins`, `settingsRoundTrip`.
+
+**App (`Sources/OrbitApp/Features/Controls/`):** `KeepAwakeController` (`IOPMAssertionCreateWithName` `PreventUserIdleSystemSleep` + `PreventUserIdleDisplaySleep` when chosen, reason "Orbit Keep Awake"; one timer for expiry/remaining, app-quit via `NSWorkspace.didTerminateApplicationNotification`; releases on stop, expiry, `stop()` and quit; `context.setStatusIndicator("keepAwake", active:)`), `QuickToggleService` (read states live: dark mode from the global `AppleInterfaceStyle`, desktop icons from `com.apple.finder CreateDesktop`, hidden files from `com.apple.finder AppleShowAllFiles`, Night Shift via CoreBrightness `CBBlueLightClient` through the Objective-C runtime / `PrivateSymbol`, Focus via the user-chosen Shortcut (`/usr/bin/shortcuts run`) only — no state read means the button says so; set them with the least invasive route (prefer no-permission routes; anything that needs Automation for System Events is listed on the Features page); Mic Mute binds to `context.micMute`; Eject lists ejectable volumes and asks for confirmation inside the panel, then `NSWorkspace.unmountAndEjectDevice`), `GrabTextOverlay` (borderless crosshair window per screen, drag a rectangle, Esc cancels), `GrabTextCapture` (`SCScreenshotManager.captureImage` of the rectangle, macOS 14+; Screen Recording requested on first use), `TextRecognizer` (Vision `VNRecognizeTextRequest` accurate + automatic language, plus `VNDetectBarcodesRequest`), result to the pasteboard and the existing HUD ("Copied N lines"); global shortcut via `HotKeyCenter` id `controls.grabText`. `ControlsPanelView`: Keep Awake tile on top (on/off, mode menu, display-awake toggle, time remaining), Quick Toggles grid below (each shows its live state), **Grab Text** button. `ControlsSettingsView`: shortcuts, custom duration, Focus Shortcut picker (lists the user's Shortcuts via `shortcuts list`), visible toggles. During development **never flip any toggle, never mute, never eject, never hold an assertion beyond a test**; read states only. Not in scope: window snapping, window switcher.
+
 ---
 
 ## Phase 3 — Integration and review (orchestrator)
 
-### Task 14: Merge and review each feature
+### Task 15: Merge and review each feature
 - [ ] Merge each feature branch into the suite branch as it finishes (`git merge --no-ff`), resolve conflicts, `swift build && swift test`.
-- [ ] Dispatch a fresh reviewer (Sonnet for UI/logic features, Opus for Sound/Displays/Windows/Wallpaper/System) on the feature's diff: spec compliance (spec section + this plan's task), Review Focus items, hardware-safety, code quality. Fix Critical/Important findings (fix agent or inline), re-run build + tests, commit, push.
+- [ ] Dispatch a fresh reviewer (Sonnet for UI/logic features, Opus for Sound/Displays/Windows/Wallpaper/System/Controls) on the feature's diff: spec compliance (spec section + this plan's task), Review Focus items, hardware-safety, code quality. Fix Critical/Important findings (fix agent or inline), re-run build + tests, commit, push.
 
-### Task 15: Finish
+### Task 16: Finish
 - [ ] `Orbit --snapshot-suite docs/suite/screenshots --replace`; inspect each PNG; fix layout problems.
 - [ ] Whole-branch review (fresh Opus reviewer) against the spec; fix what it finds.
 - [ ] `swift build`, `swift test`, `ORBIT_SIGN_IDENTITY=7AE2AC16D622170662EDB78454372455073E8B0E scripts/build-app.sh`.
