@@ -283,4 +283,94 @@ import Testing
         try Data(#"{"items": [{"nope": 1}]}"#.utf8).write(to: fixture.store.fileURL, options: .atomic)
         #expect(fixture.store.load().isEmpty)
     }
+
+    // MARK: Settings
+
+    @Test func settingsRoundTrip() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let fresh = ShelfSettings(defaults: d)
+        #expect(fresh.shakeToOpen)
+        #expect(fresh.keepOnTop)
+        #expect(fresh.lastFrame(forScreen: "screen-a") == nil)
+
+        fresh.shakeToOpen = false
+        fresh.keepOnTop = false
+        let frameA = CGRect(x: 120, y: 80, width: 520, height: 190)
+        let frameB = CGRect(x: -1500, y: 40, width: 300, height: 140)
+        fresh.setLastFrame(frameA, forScreen: "screen-a")
+        fresh.setLastFrame(frameB, forScreen: "screen-b")
+
+        let reloaded = ShelfSettings(defaults: d)
+        #expect(!reloaded.shakeToOpen)
+        #expect(!reloaded.keepOnTop)
+        #expect(reloaded.lastFrame(forScreen: "screen-a") == frameA)
+        #expect(reloaded.lastFrame(forScreen: "screen-b") == frameB)
+        #expect(reloaded.lastFrame(forScreen: "screen-c") == nil)
+        // Keys carry the feature id.
+        #expect(d.object(forKey: "shelf.shakeToOpen") as? Bool == false)
+        #expect(d.object(forKey: "shelf.keepOnTop") as? Bool == false)
+
+        // Forgetting one screen leaves the other.
+        reloaded.setLastFrame(nil, forScreen: "screen-a")
+        let again = ShelfSettings(defaults: d)
+        #expect(again.lastFrame(forScreen: "screen-a") == nil)
+        #expect(again.lastFrame(forScreen: "screen-b") == frameB)
+    }
+
+    @Test func settingsIgnoreUnusableFrames() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        d.set(Data("junk".utf8), forKey: "shelf.frames")
+        #expect(ShelfSettings(defaults: d).lastFrame(forScreen: "screen-a") == nil)
+        // A saved frame with no area is no use; it is not stored in the first place.
+        let settings = ShelfSettings(defaults: d)
+        settings.setLastFrame(CGRect(x: 10, y: 10, width: 0, height: 0), forScreen: "screen-a")
+        #expect(ShelfSettings(defaults: d).lastFrame(forScreen: "screen-a") == nil)
+    }
+
+    // MARK: Placement
+
+    private static let screen = CGRect(x: 0, y: 25, width: 1600, height: 875)
+    private static let leftScreen = CGRect(x: -1920, y: -100, width: 1920, height: 1055)
+
+    @Test func placementCentresOnThePointer() {
+        let size = CGSize(width: 440, height: 168)
+        let frame = ShelfPlacement.frame(size: size, centeredOn: CGPoint(x: 800, y: 450), in: Self.screen)
+        #expect(frame == CGRect(x: 580, y: 366, width: 440, height: 168))
+    }
+
+    @Test func placementKeepsTheShelfOnScreen() {
+        let size = CGSize(width: 440, height: 168)
+        for visible in [Self.screen, Self.leftScreen] {
+            for point in [CGPoint(x: visible.minX, y: visible.minY), CGPoint(x: visible.maxX, y: visible.maxY),
+                          CGPoint(x: visible.minX + 5, y: visible.maxY - 5), CGPoint(x: visible.maxX - 5, y: visible.minY + 5)] {
+                let frame = ShelfPlacement.frame(size: size, centeredOn: point, in: visible)
+                #expect(visible.contains(frame), "\(frame) should lie in \(visible)")
+                #expect(frame.size == size)
+            }
+        }
+        // A shelf bigger than the screen shrinks to fit rather than hang off it.
+        let huge = ShelfPlacement.frame(size: CGSize(width: 3000, height: 2000), centeredOn: CGPoint(x: 10, y: 10), in: Self.screen)
+        #expect(huge == Self.screen)
+    }
+
+    @Test func restoredFrameMovesBackOntoTheScreen() {
+        // The display it was on is gone: the frame is pulled onto the screen it opens on, size unchanged.
+        let saved = CGRect(x: 4000, y: 3000, width: 520, height: 190)
+        let frame = ShelfPlacement.restored(saved, in: Self.screen)
+        #expect(Self.screen.contains(frame))
+        #expect(frame.size == saved.size)
+        // A frame that already fits is left alone.
+        let fine = CGRect(x: 200, y: 100, width: 520, height: 190)
+        #expect(ShelfPlacement.restored(fine, in: Self.screen) == fine)
+    }
+
+    @Test func defaultFrameSitsAtTheBottomCentre() {
+        let frame = ShelfPlacement.defaultFrame(size: CGSize(width: 440, height: 168), in: Self.screen)
+        #expect(frame.midX == Self.screen.midX)
+        #expect(frame.minY > Self.screen.minY)
+        #expect(frame.minY < Self.screen.midY)
+        #expect(Self.screen.contains(frame))
+    }
 }
