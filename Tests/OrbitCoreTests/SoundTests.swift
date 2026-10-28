@@ -651,6 +651,52 @@ extension SoundTests {
             #expect(volumeState.isMuted)
         }
 
+        /// F4: every one of Orbit's writes is confirmed (a reconnected mic's pending undo, the old mic put back when the
+        /// input moves, a failed mute rolled back), and a write to one device never ends the wait for another. The input
+        /// moves from the headset to the built-in mic (headset put back, built-in muted) and straight back while the
+        /// headset still reads muted: the put-back still covers it, so muting it again records "was unmuted".
+        @Test func writesToSeveralDevicesWaitApart() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 5000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var mutedHeadset = headset
+            mutedHeadset.isMuted = true
+            let builtIn = MicDeviceReading(deviceUID: "BuiltIn", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
+            var mutedBuiltIn = builtIn
+            mutedBuiltIn.isMuted = true
+            var guardian = MicWriteConfirmation()
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: false)], at: t0)
+            guardian.wrote([.setMute(deviceUID: "BuiltIn", muted: true)], at: t0)
+            let builtInStale = guardian.review(builtIn, now: at(0.01))
+            #expect(!builtInStale.trusted && builtInStale.reading.isMuted)
+            let headsetStale = guardian.review(mutedHeadset, now: at(0.02))
+            #expect(!headsetStale.trusted && !headsetStale.reading.isMuted)
+            var state = MicMuteState()
+            let back = state.mute(mutedHeadset, confirming: &guardian, now: at(0.03))
+            #expect(back == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.applied?.method == .muteFlag(wasMuted: false))
+            // One device confirming leaves the other waiting.
+            let builtInLanded = guardian.review(mutedBuiltIn, now: at(0.04))
+            #expect(builtInLanded.trusted)
+            #expect(guardian.isWaiting)
+            let headsetLanded = guardian.review(headset, now: at(0.05))
+            #expect(headsetLanded.trusted)
+            #expect(!guardian.isWaiting)
+            // A later write to the same control replaces the earlier one: the device will show the later one.
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: true)], at: at(1))
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: false)], at: at(1.01))
+            let superseded = guardian.review(mutedHeadset, now: at(1.02))
+            #expect(!superseded.trusted && !superseded.reading.isMuted)
+            // Each write has its own timeout, and one that never shows stops waiting even if its mic isn't read again.
+            guardian.wrote([.setMute(deviceUID: "BuiltIn", muted: true)], at: at(2.5))
+            let headsetExpired = guardian.review(mutedHeadset, now: at(1.01 + MicWriteConfirmation.timeout))
+            #expect(headsetExpired.trusted && headsetExpired.reading.isMuted)
+            let builtInWaits = guardian.review(builtIn, now: at(1.01 + MicWriteConfirmation.timeout))
+            #expect(!builtInWaits.trusted)
+            let other = MicDeviceReading(deviceUID: "Other", canSetMute: true, isMuted: false, canSetVolume: false, volume: nil)
+            _ = guardian.review(other, now: at(2.5 + MicWriteConfirmation.timeout))
+            #expect(!guardian.isWaiting)
+        }
+
         /// M2: the mic's live state, whoever muted it. A mute made outside Orbit shows as such; a direct unmute
         /// clears it, and Orbit never "restores" it on its own.
         @Test func liveStateShowsOutsideMute() {

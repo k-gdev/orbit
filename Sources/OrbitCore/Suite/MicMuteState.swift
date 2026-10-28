@@ -46,40 +46,50 @@ public enum MicMutePresentation: Equatable, Sendable {
 /// "Muted outside Orbit", or make a quick second press unmute again). After `wrote(_:at:)`, a reading of that
 /// device that doesn't show the write yet is projected to what the write will leave and marked untrusted
 /// (nothing may be concluded from it), until a reading confirms the write or `timeout` passes (then the write
-/// evidently didn't take, and the device's own state shows again).
+/// evidently didn't take, and the device's own state shows again). Each write waits on its own: one to another
+/// device (the old mic put back as the input moves, a reconnected mic's pending undo) never ends the wait for the
+/// current input, and still covers its device if the input switches straight back to it.
 public struct MicWriteConfirmation: Equatable, Sendable {
     public static let timeout: TimeInterval = 2
 
-    private var written: [MicMuteAction] = []
-    private var since: Date?
+    /// One write of Orbit's that hasn't shown yet, and when it was made.
+    private struct Written: Equatable, Sendable {
+        var action: MicMuteAction
+        var at: Date
+    }
+
+    private var written: [Written] = []
 
     public init() {}
 
     /// A write of Orbit's is waiting to show up.
-    public var isWaiting: Bool { since != nil }
+    public var isWaiting: Bool { !written.isEmpty }
 
-    /// Orbit just wrote `actions`. Writing nothing changes nothing: a write still landing keeps its wait (ending it
-    /// would let that write's late arrival be taken for a change made outside Orbit).
+    /// Orbit just wrote `actions`. Each replaces an earlier write of the same control on the same device (the device
+    /// will show the later one); other writes keep waiting. Writing nothing changes nothing: a write still landing
+    /// keeps its wait (ending it would let that write's late arrival be taken for a change made outside Orbit).
     public mutating func wrote(_ actions: [MicMuteAction], at now: Date) {
-        guard !actions.isEmpty else { return }
-        written = actions
-        since = now
+        for action in actions {
+            written.removeAll { Self.sameControl($0.action, action) }
+            written.append(Written(action: action, at: now))
+        }
     }
 
     /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
     /// `MicMuteState.deviceChanged`). Readings of other devices pass through untouched.
     public mutating func review(_ reading: MicDeviceReading, now: Date) -> (reading: MicDeviceReading, trusted: Bool) {
-        guard let since else { return (reading, true) }
-        let mine = written.filter { Self.device(of: $0) == reading.deviceUID }
+        // A write that hasn't shown within the timeout evidently didn't take. Dropped on every review, so a write to a
+        // mic that isn't read again doesn't wait forever.
+        written.removeAll { now.timeIntervalSince($0.at) >= Self.timeout }
+        let mine = written.filter { Self.device(of: $0.action) == reading.deviceUID }
         guard !mine.isEmpty else { return (reading, true) }
-        if mine.allSatisfy({ Self.shows($0, in: reading) }) || now.timeIntervalSince(since) >= Self.timeout {
-            written = []
-            self.since = nil
+        if mine.allSatisfy({ Self.shows($0.action, in: reading) }) {
+            written.removeAll { Self.device(of: $0.action) == reading.deviceUID }
             return (reading, true)
         }
         var projected = reading
-        for action in mine {
-            switch action {
+        for entry in mine {
+            switch entry.action {
             case .setMute(_, let muted): projected.isMuted = muted
             case .setVolume(_, let volume): projected.volume = volume
             }
@@ -90,6 +100,13 @@ public struct MicWriteConfirmation: Equatable, Sendable {
     private static func device(of action: MicMuteAction) -> String {
         switch action {
         case .setMute(let uid, _), .setVolume(let uid, _): uid
+        }
+    }
+
+    private static func sameControl(_ a: MicMuteAction, _ b: MicMuteAction) -> Bool {
+        switch (a, b) {
+        case (.setMute(let x, _), .setMute(let y, _)), (.setVolume(let x, _), .setVolume(let y, _)): x == y
+        default: false
         }
     }
 

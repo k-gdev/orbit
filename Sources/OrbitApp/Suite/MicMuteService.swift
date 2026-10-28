@@ -249,7 +249,13 @@ final class MicMuteService: NSObject, ObservableObject {
         }
         guard perform(actions) else {
             Log.error("mic mute: muting \(reading.deviceUID) failed; putting it back")
-            if perform(state.restoreActions()) { state.commitRestore() } else { state.setAside() }
+            let undo = state.restoreActions()
+            if perform(undo) {
+                state.commitRestore()
+                noteWrite(undo)
+            } else {
+                state.setAside()
+            }
             saveRecord()
             updateSystemListening()
             return false
@@ -259,10 +265,10 @@ final class MicMuteService: NSObject, ObservableObject {
         return true
     }
 
-    /// Orbit just wrote `actions` to the input device: readings are reviewed against them until they show. One
-    /// look is scheduled for just after the confirmation window, so a write the driver silently ignored is
-    /// noticed even if no listener fires. Writing nothing changes nothing: a write still landing keeps its wait
-    /// and its scheduled look.
+    /// Orbit just wrote `actions` (every write of Orbit's goes through here, to whichever mic): readings are
+    /// reviewed against them until they show. One look is scheduled for just after the confirmation window of the
+    /// latest write (which ends after every earlier one's), so a write the driver silently ignored is noticed even
+    /// if no listener fires. Writing nothing changes nothing: a write still landing keeps its wait and its look.
     private func noteWrite(_ actions: [MicMuteAction]) {
         guard !actions.isEmpty else { return }
         confirmation.wrote(actions, at: Date())
@@ -325,7 +331,12 @@ final class MicMuteService: NSObject, ObservableObject {
         }
         let work = state.pendingWork { uid in MicHAL.device(uid: uid).flatMap { MicHAL.reading(for: $0) } }
         for item in work where item.actions.isEmpty || perform(item.actions) {
-            if !item.actions.isEmpty { Log.info("mic mute: \(item.deviceUID) is back; undid Orbit's mute") }
+            if !item.actions.isEmpty {
+                Log.info("mic mute: \(item.deviceUID) is back; undid Orbit's mute")
+                // Often the reconnected mic is the input again at once: until the undo shows, it must not read as
+                // "muted outside Orbit".
+                noteWrite(item.actions)
+            }
             state.resolvePending(deviceUID: item.deviceUID)
         }
         saveRecord()
@@ -377,8 +388,11 @@ final class MicMuteService: NSObject, ObservableObject {
     /// is gone or can't be written), and the mute moves to the new one.
     private func followInput() {
         guard let uid = state.deviceUID, uid != MicHAL.uid(of: MicHAL.defaultInputDevice()) else { return }
-        if MicHAL.device(uid: uid) != nil, perform(state.restoreActions()) {
+        let putBack = state.restoreActions()
+        if MicHAL.device(uid: uid) != nil, perform(putBack) {
             state.commitRestore()
+            // Confirmed like any write of Orbit's, in case the input switches straight back to this mic.
+            noteWrite(putBack)
         } else {
             state.setAside()
         }
