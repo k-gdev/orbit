@@ -321,3 +321,159 @@ The temporary edits were backed up and restored with `cp` from the scratchpad (f
 - **No stray preference files.** No `~/Library/Preferences/*.plist` was created by my runs (checked with `find` for
   anything newer than the worktree): tests use `Fixtures.defaults()`, snapshots use absolute-path suites in the temp
   folder.
+
+## Fix round 1
+
+Seven commits on `suite/sound` on top of fb1b09c. Not pushed. No taps were created and no device, volume or mute
+was changed (no app launched; only tests and headless snapshots ran).
+
+| Commit | Subject | Review items |
+|---|---|---|
+| 20971c0 | fix(sound): refuse tap stream layouts that can't be told apart | M5 |
+| 59673f4 | fix(sound): Same as Output remembers an idle app's device | I2 |
+| 3dc66e8 | fix(sound): pause a tap's aggregate while its app is quiet | I3 |
+| 4a46a80 | fix(suite): mic mute never loses its record; shows the live state | I1, M3, M1, M2 |
+| 8c47eae | fix(sound): show a failed tap in the app's row | M6 (+ shorter M2 caption) |
+| 5c801c4 | fix(sound): write per-app volume once a drag ends | M7 |
+| f194ceb | fix(sound): retry a throttled mic switch; re-watch re-enumerated devices | M8, M9 |
+
+I1, M3, M1 and M2 share one commit because they rewrite the same state type and the same service flow; I couldn't
+split them into commits that each build alone.
+
+### What changed
+
+**I1: a failed unmute is no longer swallowed.**
+- `MicMuteState` (Core): undoing is now two steps.
+  - `restoreActions()` is non-mutating: it returns what to write and forgets nothing.
+  - `commitRestore()` forgets the record once every write took. (`restore()` remains as a convenience that does
+    both.)
+- `MicMuteService.restoreOrbitMute()` returns success and handles three cases:
+  - **Write fails** (e.g. hog mode): the state, `isMuted`, the badge and the defaults record all stay; returns
+    false.
+  - **Device gone**: the record is set aside in `pending` (see M3); returns true.
+  - **Success**: commit, then save or clear the record.
+- `setMuted(false)` uses it.
+- `setActive(false)` undoes only Orbit's own mute. The badge stays while that mute is still in effect: the badge
+  rule is `(active && isMuted) || state.isMuted`. Clicking the badge while inactive retries. Default-input and
+  device-list events also retry while inactive.
+- `restoreOnQuit()` tries the undo and the pending records, then `saveRecord()`. Whatever couldn't be undone stays
+  in `micMute.pendingRestore` for the next launch.
+- A failed *mute* write is put back (`restoreActions`) or, if that fails too, set aside.
+
+**M3: a muted device that disappears keeps its record.**
+- `MicMuteState.pending` holds mutes on devices that went away (`setAside()`).
+- `pendingWork(reading:)`: per connected pending device, the actions that undo it. The list is empty when the user
+  changed the device meanwhile (resolve without writing). Disconnected devices are left out, so the record keeps
+  waiting.
+- `resolvePending(deviceUID:)`.
+- `mute(_:)` on a device still pending inherits its original state, so the later unmute really unmutes.
+- Following an input change (`followInput()`): the old mic is restored if it is connected and the write takes;
+  otherwise it is set aside. Then the new mic is muted.
+- Launch after a crash or failed quit: `MicMuteState.fromPreviousRun(record)` turns everything pending. Devices
+  present now are processed; the rest keep their record. System listeners (default input and device list) stay
+  installed while `state.hasRecord`, even with Sound and Controls off, so an unplugged mic is unmuted when it comes
+  back.
+- The record decodes the earlier format (no `pending` key).
+
+**M1:** `restoreOnQuit()` sets `shortcutSubscription = nil`.
+
+**M2: live state.**
+- `isMuted` is now the input device's live state: Orbit's mute, or the device's own mute control being on.
+- New published `isMutedByOrbit`.
+- `MicMuteState.presentation(for:)` returns `.unavailable`, `.unmuted`, `.mutedByOrbit` or `.mutedElsewhere`.
+- While active, the service listens to the current input device's mute and volume. Listeners attach by object ID,
+  so they are re-attached on re-enumeration.
+- Unmuting a mute made elsewhere is a direct user action (`MicMuteState.directUnmute`). Orbit never undoes it on
+  its own: going inactive and quitting only touch Orbit's mute.
+- The Sound tab's caption reads "Muted outside Orbit", and the badge tooltip differs.
+- The public API is unchanged apart from two additions: `isMutedByOrbit`, and `fixture(... mutedElsewhere:)` with a
+  default value.
+
+**I2: Same as Output survives idle.**
+- New `AppOutputMemory` (Core) keeps each app's last non-empty output devices while it has audio processes, and
+  forgets them when the processes are gone.
+- `SoundEngine` observes every app on each pass, and `followedOutput(for:)` plans with the remembered devices.
+- The old `[] → system output` assertion still holds for `followedOutput` itself, meaning "nothing ever reported";
+  its comment now says so.
+
+**I3: idle taps stop doing IO.**
+- New `TapActivity` (Core): after `idleDelay` (5 s) with `IsRunningOutput` false it returns `.pause`, once per quiet
+  spell, and `nextCheck()` gives when to look again.
+- `SoundEngine` tracks one `TapActivity` per tap, updated on every pass (IsRunningOutput changes come through the
+  monitor), with a single one-shot `DispatchWorkItem` for the next check; there is no polling timer.
+- `AppAudioTap.pauseUntilNextAudio()` runs on the tap's queue: `AudioDeviceStop`, then `AudioDeviceStart` again
+  (TapAutoStart: IO resumes with the app's next audio). Tap and aggregate stay.
+- While the queue waits in that start, `isWaitingForAudio` is true and `SoundEngine.stop()` doesn't wait on it: its
+  IO isn't running, so the app isn't muted, and the queued teardown runs right after.
+- A failed re-arm reports through the tap's `onFailure`; the engine invalidates the tap and marks the app failed
+  (see M6).
+
+**M5: refuse ambiguous layouts.** `TapStreamLayout.tapBuffers` returns nil when both "device inputs first" and "tap
+first" fit but point at different buffers (e.g. a stereo-input device next to a stereo tap). The tap then fails
+closed.
+
+**M6: failed taps show.**
+- `SoundEngine.failedBundleIDs` is exposed, and `SoundAppItem.tapFailed` carries it.
+- The row shows an orange warning triangle after the app name, and its help text explains the setting isn't
+  applied.
+- Stale failures are cleared once the app no longer needs a tap.
+
+**M7: no defaults write per drag tick.**
+- `SoundSettings.setPreference(_:for:persist:)` with `persist: false` publishes the change (the engine follows it
+  live) without writing; `persistAppStates()` writes.
+- The app row's pill calls `finishVolumeChange()` from `onEditingEnded`. Closing the panel and stopping the feature
+  also flush.
+
+**M8:** `PreferredMicPolicy.retryDelay(lastSwitch:now:)` (Core, 2 s throttle). `PreferredMicWatcher` schedules one
+retry when the window ends instead of dropping the change.
+
+**M9:** `AudioHardware` tracks `watchedOutput`/`watchedInput` object IDs and re-attaches its volume and mute
+listeners when the object changes, even with the same UID. Devices with no volume control aren't re-tried on every
+refresh.
+
+### Covering tests (TDD: RED, then GREEN)
+
+| Test | RED | GREEN |
+|---|---|---|
+| `SoundRenderTests/ambiguousTapStreamLayoutIsRefused` | 3 expectation failures, e.g. `tapBuffers(aggregateInputs: [2, 2], deviceInputs: [2], tapChannels: 2) → 1 ..< 2` | 11 tests in 1 suite |
+| `TapPlanTests/sameAsOutputSurvivesIdle` (play → idle → play, switch device, processes gone, prune) | `cannot find 'AppOutputMemory' in scope` ×2 | 25 tests in 3 suites |
+| `TapPlanTests/tapPausesAfterIdleDelay` | `cannot find 'TapActivity' in scope` ×22 | 26 tests in 3 suites |
+| `MicMuteStateTests`: `unmuteFailureKeepsRecord`, `deviceGoneKeepsRecordUntilItReturns`, `remutingAPendingDeviceKeepsItsOriginalState`, `liveStateShowsOutsideMute`, and rewritten `followsInputChange` and `crashRecoveryRestoresOnlyIfUnchanged` (includes a legacy-record decode) | `no member 'restoreActions'` ×12, `'commitRestore'` ×6, `'setAside'` ×10, `'pendingWork'` ×8, `'fromPreviousRun'` ×10, `'presentation'` ×16, `'directUnmute'` ×4, ... | `swift test --filter MicMuteStateTests` → 10 tests in 2 suites |
+| `SoundTests/settingsDeferWritesDuringDrag` | `extra argument 'persist' in call` ×4, `no member 'persistAppStates'` ×4 | 31 tests in 3 suites |
+| `SoundTests/preferredMicThrottleRetriesInsteadOfDropping` | `no member 'retryDelay'` ×16, `no member 'throttle'` ×12 | 32 tests in 3 suites |
+
+The old `MicMuteState.retarget(to:)` and the static `recoveryActions(for: MicMuteState, …)` were replaced by the
+primitives above. Their tests were rewritten, and they are no longer used anywhere.
+
+### Commands and output (final)
+- `swift test --filter Sound` → `✔ Test run with 46 tests in 6 suites passed` (TapPlanTests, MicMuteStateTests,
+  SoundRenderTests, SoundTests, plus AudioTests and VideoConversionTests, which the filter also matches).
+- `swift test --filter MicMuteStateTests` → `✔ Test run with 10 tests in 2 suites passed`.
+- Full `swift test` (once) → `✔ Test run with 604 tests in 29 suites passed after 83.707 seconds` (595 + 9 new).
+- `swift build` after every commit: no errors and no warnings.
+- Snapshots (light and dark, looked at), under
+  `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/snap/`:
+  - `fix1-panel.png`, `fix1-panel-dark.png`, `fix1-settings.png`, `fix1-settings-dark.png`: unchanged from the
+    reviewed look.
+  - `fix1-failed-elsewhere.png`: a temporary fixture with Music's tap failed and the mic muted outside Orbit. It
+    shows the orange warning in the row. The caption wrapped there, so I shortened it to "Muted outside Orbit". The
+    fixture edits were reverted from scratchpad backups.
+- `swift build -c release --arch arm64 --arch x86_64` → `Build complete!` (no Sound or mic-mute warnings).
+
+### Hardware checklist additions
+- **`pmset -g assertions`** with a tapped app playing, then about 5 s after it stops. There should be no coreaudiod
+  `PreventUserIdleSystemSleep` assertion once the tap has paused. Orbit's log shows "… is quiet; its output waits
+  for the next sound".
+- **After a pause**, the app's next sound must again play at its Orbit volume and route. This checks that the
+  re-armed TapAutoStart restarts IO. If the first few milliseconds of each sound after a quiet spell come through
+  unattenuated, note it.
+- **Turning Sound off or quitting with an idle (paused) tap** must be quick, with no 2 s stall.
+- **Discord on the headset** by its own setting, with the system output on the speakers: set Discord to 50 % and
+  let it go quiet, then ping. It should stay on the headset with no tap rebuild; the log shows no new "tapped"
+  lines.
+- **Mic mute in Sound settings**: the tab shows "Muted outside Orbit", the badge appears, and ⌃⌥M unmutes.
+  Turning Sound off must not unmute it.
+- **Mute with ⌃⌥M, then unplug the headset**: the mute moves to the MacBook mic. Plug the headset back in and it
+  comes back unmuted.
+- **Hog mode, if available** (an app taking exclusive access): unmute fails, the badge stays, and the record is
+  kept.
