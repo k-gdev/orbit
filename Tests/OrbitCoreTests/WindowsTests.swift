@@ -257,6 +257,28 @@ import Testing
         #expect(cache.count == 0)
     }
 
+    // MARK: Window listing
+
+    /// Real windows only (no palettes, no invisible helpers), front to back, minimised ones last or left out.
+    @Test func windowListFilters() {
+        let size = CGSize(width: 800, height: 600)
+        let windows = [WindowSummary(title: "Minimised", size: size, isMinimised: true, subrole: "AXStandardWindow"),
+                       WindowSummary(title: "Front", size: size, isMinimised: false, subrole: "AXStandardWindow"),
+                       WindowSummary(title: "Colors", size: CGSize(width: 220, height: 300), isMinimised: false, subrole: "AXFloatingWindow"),
+                       WindowSummary(title: "Save?", size: CGSize(width: 400, height: 200), isMinimised: false, subrole: "AXDialog"),
+                       WindowSummary(title: nil, size: CGSize(width: 1, height: 1), isMinimised: false, subrole: nil),
+                       WindowSummary(title: "Back", size: size, isMinimised: false, subrole: nil)]
+        #expect(WindowListing.visibleIndices(windows, showMinimised: true) == [1, 3, 5, 0])
+        #expect(WindowListing.visibleIndices(windows, showMinimised: false) == [1, 3, 5])
+        #expect(WindowListing.visibleIndices([], showMinimised: true).isEmpty)
+    }
+
+    @Test func untitledWindowsTakeTheAppName() {
+        #expect(WindowListing.displayTitle("Inbox – Mail", appName: "Mail") == "Inbox – Mail")
+        #expect(WindowListing.displayTitle("  ", appName: "Mail") == "Mail")
+        #expect(WindowListing.displayTitle(nil, appName: "Mail") == "Mail")
+    }
+
     // MARK: Running apps
 
     private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
