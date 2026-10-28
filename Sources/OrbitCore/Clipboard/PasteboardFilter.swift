@@ -2,8 +2,9 @@ import Foundation
 
 /// Decides whether a pasteboard change may be recorded. Password managers and other apps tag what they
 /// put on the pasteboard with marker types (the nspasteboard.org conventions); anything carrying one is
-/// never stored, however it got there. The one exception is the concealed marker, which the user may
-/// choose to keep (`ClipboardSettings.recordPasswords`): such a copy is recorded as a password, in memory only.
+/// never stored, however it got there. The exception is a password marker (the concealed one, or 1Password's),
+/// which the user may choose to keep (`ClipboardSettings.recordPasswords`): such a copy is recorded as a password,
+/// in memory only.
 public enum PasteboardFilter {
     /// What a password manager puts on the pasteboard next to a password; Orbit puts it there too when it
     /// copies a password entry back, so other clipboard tools skip that copy as well.
@@ -42,16 +43,21 @@ public enum PasteboardFilter {
         return shouldRecord(types: types)
     }
 
-    /// The full decision. Ignored apps and every marker other than the concealed one skip the copy
-    /// whatever `recordPasswords` says; the concealed marker alone skips it only when `recordPasswords` is off.
+    /// The full decision. Ignored apps and the transient / auto-generated markers skip the copy whatever
+    /// `recordPasswords` says; a password marker (the concealed one, or 1Password's own, which it may put there
+    /// instead) skips it only when `recordPasswords` is off.
     public static func verdict(types: [String], sourceBundleID: String?, ignoredBundleIDs: [String], recordPasswords: Bool) -> Verdict {
         if let sourceBundleID, ignoredBundleIDs.contains(sourceBundleID) { return .skip }
-        if types.contains(where: { $0 != concealedType && isSkipMarker($0) }) { return .skip }
-        guard types.contains(concealedType) else { return .record }
+        if types.contains(where: { !isPasswordMarker($0) && isSkipMarker($0) }) { return .skip }
+        guard types.contains(where: isPasswordMarker) else { return .record }
         return recordPasswords ? .recordConcealed : .skip
     }
 
     private static func isSkipMarker(_ type: String) -> Bool {
         skippedTypes.contains(type) || skippedPrefixes.contains { type.hasPrefix($0) }
+    }
+
+    private static func isPasswordMarker(_ type: String) -> Bool {
+        type == concealedType || skippedPrefixes.contains { type.hasPrefix($0) }
     }
 }
