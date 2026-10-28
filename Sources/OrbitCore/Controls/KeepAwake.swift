@@ -36,6 +36,14 @@ public enum KeepAwakeMode: Codable, Equatable, Hashable, Sendable {
         return last.prefix(1).uppercased() + last.dropFirst()
     }
 
+    /// The next time the clock shows `hour:minute` strictly after `now`: today if it's still ahead,
+    /// otherwise tomorrow (the "Until a time" picker only asks for a time of day).
+    public static func nextOccurrence(hour: Int, minute: Int, after now: Date, calendar: Calendar = .current) -> Date {
+        let match = DateComponents(hour: hour, minute: minute, second: 0)
+        return calendar.nextDate(after: now, matching: match, matchingPolicy: .nextTime, direction: .forward)
+            ?? now.addingTimeInterval(24 * 3600)
+    }
+
     /// What the Keep Awake switch starts with, given the last mode used: that mode when it can simply be
     /// started again (indefinitely, a duration, a time still ahead), otherwise indefinitely. App and
     /// download modes depend on what's running now, so they are only chosen from the menu.

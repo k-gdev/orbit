@@ -565,3 +565,32 @@ extension ControlsTests {
         }
     }
 }
+
+// MARK: - Until-time picker and the Focus Shortcut
+
+extension ControlsTests {
+    @Suite struct ControlsHelperTests {
+        /// "Until 07:00" picked at 22:00 means tomorrow morning; "until 23:30" picked at 22:00 means tonight.
+        @Test func untilPicksNextOccurrence() {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "UTC")!
+            let now = cal.date(from: DateComponents(year: 2026, month: 10, day: 28, hour: 22, minute: 0))!
+            let tonight = KeepAwakeMode.nextOccurrence(hour: 23, minute: 30, after: now, calendar: cal)
+            #expect(tonight == cal.date(from: DateComponents(year: 2026, month: 10, day: 28, hour: 23, minute: 30)))
+            let morning = KeepAwakeMode.nextOccurrence(hour: 7, minute: 0, after: now, calendar: cal)
+            #expect(morning == cal.date(from: DateComponents(year: 2026, month: 10, day: 29, hour: 7, minute: 0)))
+            // The current minute itself is already past: it means tomorrow.
+            let same = KeepAwakeMode.nextOccurrence(hour: 22, minute: 0, after: now, calendar: cal)
+            #expect(same == cal.date(from: DateComponents(year: 2026, month: 10, day: 29, hour: 22, minute: 0)))
+        }
+
+        @Test func shortcutListParsing() {
+            #expect(FocusShortcut.parseList("Send Message\n") == ["Send Message"])
+            #expect(FocusShortcut.parseList("Toggle Do Not Disturb\n\n  Morning Focus  \nSend Message\nToggle Do Not Disturb\n")
+                    == ["Morning Focus", "Send Message", "Toggle Do Not Disturb"])
+            #expect(FocusShortcut.parseList("").isEmpty)
+            #expect(FocusShortcut.runArguments("Toggle Do Not Disturb") == ["run", "Toggle Do Not Disturb"])
+            #expect(FocusShortcut.executable.path == "/usr/bin/shortcuts")
+        }
+    }
+}
