@@ -39,6 +39,12 @@ final class ClipboardPopupPanel: NSPanel {
     override func keyDown(with event: NSEvent) {
         if onKey?(event) != true { super.keyDown(with: event) }
     }
+
+    /// ⌘X / ⌘C / ⌘V / ⌘A / ⌘Z / ⇧⌘Z in the search field: Orbit isn't the active app while the popup is up,
+    /// so the main menu's Edit items may not see them (`EditMenu`).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        EditMenu.perform(event, in: self) || super.performKeyEquivalent(with: event)
+    }
 }
 
 /// Opens the popup at the pointer and closes it. It only shows the history; what choosing an entry

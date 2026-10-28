@@ -34,6 +34,12 @@ final class MenuBarPanel: NSPanel {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel?() } else { super.keyDown(with: event) }
     }
+
+    /// ⌘X / ⌘C / ⌘V / ⌘A / ⌘Z / ⇧⌘Z in a search field: the panel never activates Orbit, so the main menu's
+    /// Edit items may not see them (`EditMenu`). Everything else (the footer's ⌘, and ⌘Q) goes on as usual.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        EditMenu.perform(event, in: self) || super.performKeyEquivalent(with: event)
+    }
 }
 
 /// Hosts `PanelView` and reports when its SwiftUI content changes size, so the panel can follow it.

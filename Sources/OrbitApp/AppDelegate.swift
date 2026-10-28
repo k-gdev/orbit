@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.info("Orbit launched")
+        // Without a main menu, ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z do nothing in Orbit's text fields.
+        EditMenu.install()
         let settings = SettingsStore()
         Haptics.settings = settings
         OrbitTheme.shared.bind(to: settings)
