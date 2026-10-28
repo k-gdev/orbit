@@ -252,3 +252,78 @@ New: `Sources/OrbitCore/Suite/{FeatureID,SuitePermission,SuiteSettings,KeyCombo,
 Modified: `AppDelegate.swift`, `main.swift`, `MenuBar/StatusItemController.swift`, `Settings/SettingsView.swift`,
 `Settings/SettingsWindowController.swift`, `Settings/TriggerRecorder.swift` (moved `symbols`),
 `Jobs/JobCoordinator.swift` (`toasts` internal), `Support/Info.plist`.
+
+## Fix round 1 (commit edfabe8)
+
+All changes are additive: every existing signature still compiles. I didn't touch `Suite/MicMuteService.swift`
+or anything under `Features/`.
+
+1. **PillSlider scroll monitor** (`Suite/UI/PillSlider.swift`)
+   - An invisible, hit-test-transparent `PillWindowProbe` (`NSViewRepresentable`) sits behind each pill.
+   - `handleScroll` acts only when `event.window` is the pill's window, that window `isVisible`, and
+     `locationInWindow` falls inside the probe's rect (converted to window coordinates, so scroll offset
+     counts). Everything else passes through untouched.
+   - Momentum-phase events (trackpad inertia after lift-off) are ignored.
+   - A monitor whose pill view is gone removes itself.
+   - Events merely outside the pill pass through without removing the monitor. This is deliberate: after a
+     missed hover-exit, SwiftUI may never re-send hover-enter, so removing it there would leave the pill
+     without wheel input.
+2. **Late permission grants**
+   - `MenuBarPanelController.show(from:)` calls `context.permissions.refresh()` before the visible feature's
+     `panelDidAppear()`.
+   - `SuiteFeature.swift` has a new "Permissions" paragraph: `start()` may precede grants; observe
+     `context.permissions.$statuses` or re-check in `panelDidAppear()`; gate work on `.granted`; never prompt
+     directly, only through `PermissionCenter.request`.
+3. **Fixture storage** (`Suite/SnapshotFixtures.swift`, new)
+   - `defaults()` is an absolute-path suite in a temp folder; the domain and folder are removed at exit via
+     `atexit`.
+   - `scopedDefaults()` returns the defaults with a cleanup closure; `directory()` gives a temp folder removed
+     at exit.
+   - The contract comment now points at these instead of `UserDefaults(suiteName:)`, and the snapshot CLI uses
+     `scopedDefaults()`.
+4. **Screen Recording double prompt** (`Suite/PermissionCenter.swift`)
+   - `request(_:)` records `suite.permissionAsked.<permission>` in `UserDefaults` (via a new
+     `init(…, defaults: = .standard)` parameter).
+   - Screen Recording opens the pane only if it was requested before and is still not granted. A first
+     request now shows only macOS's prompt.
+   - Accessibility is unchanged: its prompt carries its own Open System Settings button, and Orbit opens no
+     pane.
+   - Audio is unchanged: it opens the pane only when TCC reports denied.
+5. **Same-state `setEnabled`** (`Suite/FeatureRegistry.swift`): when `isEnabled(id) == on` it returns early after
+   reconciling the running state (start if on, stop if off) and the mic mute activity. No requests, no panes.
+6. **Sound on macOS 14.0/14.1**
+   - New in OrbitCore: `SuitePermission.minimumSystemVersion` and `isAvailable(on:)` (System Audio Recording:
+     14.2), tested in `SuiteTests.permissionSystemRequirements`.
+   - App side: `SuitePermission.isAvailableOnThisMac` / `unavailableReason` ("Needs macOS 14.2 or later") and
+     `PermissionCenter.isAvailable(_:)`.
+   - `setEnabled` requests nothing for a feature with `unavailableReason` and skips unavailable permissions.
+     `request` and `openSettings` are no-ops for an unavailable permission (no nonexistent pane).
+   - The Features card's Sound note now reads "…need macOS 14.2 or later, so Orbit won't ask for System Audio
+     Recording here. The mic mute shortcut still works." The permission row shows the reason instead of the
+     status badge and button (`PermissionRow` gained a defaulted `unavailableReason:` parameter).
+
+### Commands and output
+- TDD for item 6:
+  - RED: `swift test --filter SuiteTests` → 12× `value of type 'SuitePermission' has no member 'isAvailable'`
+    and 4× `… no member 'minimumSystemVersion'`.
+  - GREEN: `✔ Test run with 15 tests in 2 suites passed`.
+- `swift build` → exit 0, no warnings.
+- `swift test`:
+  - First full run → exit 1, 1 issue: `VideoToolTests/compressFits()` threw `.targetTooSmall("Can't fit this
+    video under 500 KB.")`. That's an existing ffmpeg test. My diff touches only `SuitePermission.swift` and
+    `SuiteTests.swift` in OrbitCore/Tests.
+  - Run alone 3×: passed, **failed** (same error), passed. So it's nondeterministic independent of these
+    changes; left untouched (outside my scope).
+  - Second full run → exit 0, `✔ Test run with 562 tests in 25 suites passed after 87.831 seconds`. I committed
+    only after that, with the commit gated on `swift test`'s own exit code.
+- `swift build -c release --arch arm64 --arch x86_64` → exit 0, `Build complete!`, `lipo -archs` → `x86_64 arm64`,
+  0 warnings.
+- `.build/debug/Orbit --snapshot-suite <scratch>/shell-shots/suite --replace` → exit 0, 44 files.
+  `~/Library/Preferences` held 0 `orbit.snapshot|fixture` plists before and after, and no fixture temp folders
+  were left. I looked at `suite/settings-features-light.png`: unchanged on macOS 26.5. The 14.0/14.1 branch
+  can't be rendered on this Mac.
+
+### Still unverified
+Live behaviour, as before: `/Applications/Orbit.app` is still running, so I didn't launch the build. The probe
+geometry check and the momentum guard are compiled and reasoned through, not exercised with a real wheel or
+trackpad.
