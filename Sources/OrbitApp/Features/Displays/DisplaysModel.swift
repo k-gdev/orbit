@@ -76,6 +76,7 @@ final class DisplaysModel: ObservableObject {
     private var writeTimer: DispatchWorkItem?
     /// Bumped on every user change, so a DDC reading that was in flight doesn't undo it.
     private var edits: [CGDirectDisplayID: Int] = [:]
+    private var learner = BoostLearner()
     private var cancellables: Set<AnyCancellable> = []
 
     /// A model without a driver that lists the connected displays (catalog only) for Settings while the
@@ -176,7 +177,10 @@ final class DisplaysModel: ObservableObject {
 
         if let value {
             settings.rememberAnsweredDDC(key)
-            settings.learn(maximum: value.current, reported: value.maximum, for: key)
+            // Remember a boost range only after two readings in a row above the reported maximum.
+            if let learned = learner.observe(value, for: key) {
+                settings.learn(maximum: learned, reported: value.maximum, for: key)
+            }
             tiles[index].reading = value
         } else if before.hasAnswered {
             Log.info("displays: \(tiles[index].title) missed a DDC reply (\(outcome.state.misses) in a row)")
@@ -339,6 +343,13 @@ final class DisplaysModel: ObservableObject {
             }
             settings.lastSoftwareDim[tile.key] = SoftwareDim.dims(tile.brightness) ? tile.brightness : nil
         }
+    }
+
+    /// Settings → Reset learned range: forget the remembered boost range (the latest reading still counts
+    /// for this session; it's learned again only after two readings in a row above the reported maximum).
+    func resetLearnedRange(for key: String) {
+        settings.forgetLearnedMaximum(for: key)
+        learner.forget(key)
     }
 
     func setLinked(_ on: Bool) {

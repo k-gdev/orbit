@@ -23,7 +23,7 @@ struct DisplaysSettingsView: View {
             }
             SettingsSection("Maximum brightness",
                             footnote: "For monitors that report 100 but accept more from their own menu, such as ThinkVisions that go to 150. "
-                                + "Auto uses what the monitor reports, or the highest value Orbit has seen it at. Past 100 the pill is striped.") {
+                                + "Auto uses what the monitor reports, or the highest value Orbit has read from it twice in a row. Past 100 the pill is striped.") {
                 let externals = model.tiles.filter { !$0.isBuiltIn && !Self.isNative($0.control) }
                 if externals.isEmpty {
                     Text("No external displays connected.").foregroundStyle(.secondary)
@@ -73,6 +73,11 @@ private struct MaximumBrightnessRow: View {
                 Text(tile.control == .software ? "Software dimming, 0–100" : "No brightness control")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
+                if settings.learnedMaximums[tile.key] != nil {
+                    Button("Reset learned range") { model.resetLearnedRange(for: tile.key) }
+                        .buttonStyle(.link)
+                        .help("Forget the boost range Orbit remembered for this monitor; it's learned again after two readings in a row above \(tile.reading?.maximum ?? 100)")
+                }
                 if override != nil {
                     Button("Auto") { settings.setMaxOverride(nil, for: tile.key) }
                         .buttonStyle(.link)
@@ -93,12 +98,15 @@ private struct MaximumBrightnessRow: View {
     }
 
     private var detail: String {
+        let learned = settings.learnedMaximums[tile.key].map { " · learned \($0)" } ?? ""
         switch tile.control {
         case .ddc:
-            if let reading = tile.reading { "DDC reports \(reading.current) of \(reading.maximum)" } else { "DDC" }
-        case .probing: tile.reading.map { "DDC reports \($0.current) of \($0.maximum)" } ?? "Not read yet"
-        case .software, .unavailable: "Doesn't answer DDC"
-        case .native: "Built-in brightness"
+            if let reading = tile.reading { return "DDC reports \(reading.current) of \(reading.maximum)\(learned)" }
+            return "DDC\(learned)"
+        case .probing:
+            return (tile.reading.map { "DDC reports \($0.current) of \($0.maximum)" } ?? "Not read yet") + learned
+        case .software, .unavailable: return "Doesn't answer DDC"
+        case .native: return "Built-in brightness"
         }
     }
 

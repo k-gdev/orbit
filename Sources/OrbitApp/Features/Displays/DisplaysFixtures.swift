@@ -9,6 +9,7 @@ enum DisplaysFixtures {
     static func model() -> DisplaysModel {
         let settings = DisplaySettings(defaults: SnapshotFixtures.defaults())
         settings.lastSoftwareDim = ["fixture-acer": 80]
+        settings.learn(maximum: 150, reported: 100, for: "fixture-tv-left")
         return DisplaysModel(settings: settings, driver: nil, tiles: tiles)
     }
 
