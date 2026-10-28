@@ -81,6 +81,90 @@ import Testing
         #expect(ShelfAvailability.status(of: file, probe: ShelfAvailability.probe) == .missing)
     }
 
+    // MARK: Shake poller (the wheel-style polling that replaces global drag events)
+
+    /// x positions of a right-left zig-zag of `legs` legs of 100 pt, `samplesPerLeg` samples each.
+    private static func zigzagXs(legs: Int, samplesPerLeg: Int = 6) -> [Double] {
+        var xs = [600.0]
+        var sign = 1.0
+        for _ in 0..<legs {
+            for _ in 0..<samplesPerLeg { xs.append(xs[xs.count - 1] + sign * 100 / Double(samplesPerLeg)) }
+            sign = -sign
+        }
+        return xs
+    }
+
+    @Test func pollerStopsWhenTheButtonIsReleased() {
+        var poller = ShakePoller()
+        poller.buttonDown(changeCount: 4)
+        #expect(poller.tick(buttonDown: true, changeCount: 4, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 1) == .waiting)
+        #expect(poller.tick(buttonDown: false, changeCount: 4, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 1.02) == .stop)
+    }
+
+    @Test func pollerLeavesThePasteboardAloneUntilItChanges() {
+        var poller = ShakePoller()
+        poller.buttonDown(changeCount: 4)
+        var reads = 0
+        for step in 0..<10 {
+            let outcome = poller.tick(buttonDown: true, changeCount: 4, hasFiles: { reads += 1; return true },
+                                      point: CGPoint(x: 600 + Double(step), y: 400), time: 1 + Double(step) * 0.05)
+            #expect(outcome == .waiting)
+        }
+        // A file URL left from an earlier drag, with no new drag started: never looked at.
+        #expect(reads == 0)
+    }
+
+    @Test func pollerIgnoresATextDragEvenWhenShakenHard() {
+        var poller = ShakePoller()
+        poller.buttonDown(changeCount: 4)
+        var reads = 0
+        var time = 1.0
+        for x in Self.zigzagXs(legs: 12) {
+            time += 1.0 / 60
+            // The drag pasteboard changed (a text drag began) but holds no file URL.
+            let outcome = poller.tick(buttonDown: true, changeCount: 5, hasFiles: { reads += 1; return false },
+                                      point: CGPoint(x: x, y: 400), time: time)
+            #expect(outcome == .waiting)
+        }
+        // Types are read once per change, not on every tick.
+        #expect(reads == 1)
+    }
+
+    @Test func pollerReportsAShakeOnlyForAFileDrag() {
+        var poller = ShakePoller()
+        poller.buttonDown(changeCount: 4)
+        var outcomes: [ShakePoller.Outcome] = []
+        var time = 1.0
+        for x in Self.zigzagXs(legs: 6) {
+            time += 1.0 / 60
+            outcomes.append(poller.tick(buttonDown: true, changeCount: 5, hasFiles: { true }, point: CGPoint(x: x, y: 400), time: time))
+        }
+        // Tracking from the first tick of the file drag (the caller switches to the fast timer), one shake, then
+        // tracking again while the lockout swallows the rest of the same shake.
+        #expect(outcomes.first == .tracking)
+        let shakes = outcomes.filter { if case .shake = $0 { return true } else { return false } }
+        #expect(shakes.count == 1)
+        let shakeIndex = outcomes.firstIndex { if case .shake = $0 { return true } else { return false } }
+        #expect((shakeIndex ?? 0) > 3 * 6) // not before the third reversal
+        #expect(outcomes.last == .tracking)
+    }
+
+    @Test func pollerStartsFreshOnTheNextPress() {
+        var poller = ShakePoller()
+        poller.buttonDown(changeCount: 4)
+        _ = poller.tick(buttonDown: true, changeCount: 5, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 1)
+        _ = poller.tick(buttonDown: false, changeCount: 5, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 1.1)
+        // The next press: the pasteboard (5) is the new baseline, so its old file URL no longer counts.
+        poller.buttonDown(changeCount: 5)
+        #expect(poller.tick(buttonDown: true, changeCount: 5, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 2) == .waiting)
+        #expect(poller.tick(buttonDown: true, changeCount: 6, hasFiles: { true }, point: CGPoint(x: 600, y: 400), time: 2.05) == .tracking)
+    }
+
+    @Test func pollIntervalsKeepIdleCostLowAndShakingResponsive() {
+        #expect(ShakePoller.waitingInterval >= 0.04)   // at most ~25 looks at the pasteboard a second until a file drag starts
+        #expect(ShakePoller.trackingInterval <= 1.0 / 30) // fine enough to see a 40 pt leg that takes 0.1 s
+    }
+
     // MARK: Store hardening (M3)
 
     /// A throwaway folder holding a store directory and real files.
