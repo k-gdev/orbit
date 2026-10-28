@@ -216,12 +216,13 @@ final class MicMuteService: NSObject, ObservableObject {
     private func refreshLiveState() {
         guard !isFixture else { return }
         let device = MicHAL.defaultInputDevice()
-        let reading = MicHAL.reading(for: device)
-        // A write can take effect asynchronously: right after Orbit's own mute the device may still read unmuted.
-        // Only conclude "unmuted outside Orbit" once the write was confirmed (or evidently didn't take).
-        if let reading, state.isMuted, confirmation.mayConclude(from: reading, state: state, now: Date()),
-           !state.deviceChanged(reading) {
-            Log.info("mic mute: \(reading.deviceUID) was unmuted outside Orbit")
+        // A write can take effect asynchronously: right after Orbit's own mute (or unmute) the device may still read
+        // as it was. Until the write shows (or evidently didn't take), the reading is shown as the write will
+        // leave it and nothing is concluded from it.
+        let reviewed = MicHAL.reading(for: device).map { confirmation.review($0, now: Date()) }
+        let reading = reviewed?.reading
+        if let reviewed, reviewed.trusted, state.isMuted, !state.deviceChanged(reviewed.reading) {
+            Log.info("mic mute: \(reviewed.reading.deviceUID) was unmuted outside Orbit")
             saveRecord()
         }
         let presentation = state.presentation(for: reading)
@@ -247,9 +248,14 @@ final class MicMuteService: NSObject, ObservableObject {
             updateSystemListening()
             return false
         }
-        if !actions.isEmpty { confirmation.wrote(at: Date()) }
+        noteWrite(actions)
         saveRecord()
         return true
+    }
+
+    /// Orbit just wrote `actions` to the input device: readings are reviewed against them until they show.
+    private func noteWrite(_ actions: [MicMuteAction]) {
+        confirmation.wrote(actions, at: Date())
     }
 
     /// Undoes Orbit's mute, or switches off a mute made elsewhere (the user asked). True when the mic is no
@@ -261,7 +267,7 @@ final class MicMuteService: NSObject, ObservableObject {
         let actions = MicMuteState.directUnmute(reading)
         guard !actions.isEmpty else { return true }
         let ok = perform(actions)
-        if !ok { Log.error("mic mute: unmuting \(reading.deviceUID) failed") }
+        if ok { noteWrite(actions) } else { Log.error("mic mute: unmuting \(reading.deviceUID) failed") }
         return ok
     }
 
@@ -278,12 +284,14 @@ final class MicMuteService: NSObject, ObservableObject {
             updateSystemListening()
             return true
         }
-        guard perform(state.restoreActions()) else {
+        let actions = state.restoreActions()
+        guard perform(actions) else {
             Log.error("mic mute: unmuting \(uid) failed; keeping the mute and its record to retry")
             saveRecord()
             return false
         }
         state.commitRestore()
+        noteWrite(actions)
         saveRecord()
         // With Sound and Controls off, the system listeners only existed for this record: drop them now.
         updateSystemListening()

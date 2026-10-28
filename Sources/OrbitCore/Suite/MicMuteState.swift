@@ -38,35 +38,64 @@ public enum MicMutePresentation: Equatable, Sendable {
     case mutedElsewhere
 }
 
-/// Keeps Orbit's own mute write from being mistaken for the user unmuting elsewhere.
+/// Keeps Orbit's own mute and unmute writes from being misread while they land.
 ///
-/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after Orbit's write
-/// can still show the device unmuted. After `wrote(at:)`, readings that don't show Orbit's mute are ignored
-/// (not concluded from) until one confirms it, or `timeout` passes (then the write evidently didn't take,
-/// and readings count again).
+/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after one of Orbit's
+/// writes can still show the device as it was: after a mute, "unmuted" (which must not be taken for the user
+/// unmuting elsewhere, or Orbit would forget its mute); after an unmute, "muted" (which must not flash
+/// "Muted outside Orbit", or make a quick second press unmute again). After `wrote(_:at:)`, a reading of that
+/// device that doesn't show the write yet is projected to what the write will leave and marked untrusted
+/// (nothing may be concluded from it), until a reading confirms the write or `timeout` passes (then the write
+/// evidently didn't take, and the device's own state shows again).
 public struct MicWriteConfirmation: Equatable, Sendable {
     public static let timeout: TimeInterval = 2
 
+    private var written: [MicMuteAction] = []
     private var since: Date?
 
     public init() {}
 
-    /// A write of Orbit's is waiting to be confirmed.
+    /// A write of Orbit's is waiting to show up.
     public var isWaiting: Bool { since != nil }
 
-    /// Orbit just wrote its mute to the device.
-    public mutating func wrote(at now: Date) {
-        since = now
+    /// Orbit just wrote `actions` (an empty list waits for nothing).
+    public mutating func wrote(_ actions: [MicMuteAction], at now: Date) {
+        written = actions
+        since = actions.isEmpty ? nil : now
     }
 
-    /// Whether `reading` may be taken at face value (and fed to `MicMuteState.deviceChanged`). A reading that
-    /// shows Orbit's mute confirms the write and ends the wait; any other reading is ignored until `timeout`
-    /// after the write.
-    public mutating func mayConclude(from reading: MicDeviceReading, state: MicMuteState, now: Date) -> Bool {
-        guard let since else { return true }
-        guard state.reflects(reading) || now.timeIntervalSince(since) >= Self.timeout else { return false }
-        self.since = nil
-        return true
+    /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
+    /// `MicMuteState.deviceChanged`). Readings of other devices pass through untouched.
+    public mutating func review(_ reading: MicDeviceReading, now: Date) -> (reading: MicDeviceReading, trusted: Bool) {
+        guard let since else { return (reading, true) }
+        let mine = written.filter { Self.device(of: $0) == reading.deviceUID }
+        guard !mine.isEmpty else { return (reading, true) }
+        if mine.allSatisfy({ Self.shows($0, in: reading) }) || now.timeIntervalSince(since) >= Self.timeout {
+            written = []
+            self.since = nil
+            return (reading, true)
+        }
+        var projected = reading
+        for action in mine {
+            switch action {
+            case .setMute(_, let muted): projected.isMuted = muted
+            case .setVolume(_, let volume): projected.volume = volume
+            }
+        }
+        return (projected, false)
+    }
+
+    private static func device(of action: MicMuteAction) -> String {
+        switch action {
+        case .setMute(let uid, _), .setVolume(let uid, _): uid
+        }
+    }
+
+    private static func shows(_ action: MicMuteAction, in reading: MicDeviceReading) -> Bool {
+        switch action {
+        case .setMute(_, let muted): reading.isMuted == muted
+        case .setVolume(_, let volume): reading.volume.map { abs($0 - volume) < 0.01 } ?? false
+        }
     }
 }
 
