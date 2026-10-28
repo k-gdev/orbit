@@ -64,14 +64,14 @@ enum AXWindowService {
     }
 
     /// Brings the window in front of the app's others and activates the app (unhiding and restoring as
-    /// needed). The Accessibility part runs on `actionQueue`.
+    /// needed): cooperative activation first (`AppActivation`), then the window is raised on `actionQueue`,
+    /// and raised again once the activation has landed (activating can bring another of its windows forward).
     @MainActor
     static func bringForward(_ window: AXWindow) {
         guard AXIsProcessTrusted() else { return }
-        let running = NSRunningApplication(processIdentifier: window.pid)
-        if running?.isHidden == true { running?.unhide() }
+        if let running = NSRunningApplication(processIdentifier: window.pid) { AppActivation.activate(running) }
         actionQueue.async { raise(window) }
-        running?.activate(options: [])
+        actionQueue.asyncAfter(deadline: .now() + 0.25) { raise(window) }
     }
 
     /// Minimises (true) or restores (false) the window, on `actionQueue`.
