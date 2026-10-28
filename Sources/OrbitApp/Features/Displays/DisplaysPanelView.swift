@@ -11,6 +11,9 @@ struct DisplaysPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             PanelSectionHeader("Displays", trailing: AnyView(linkButton))
+            if let hint = model.conflictHint {
+                ConflictHint(text: hint)
+            }
             if model.tiles.isEmpty {
                 PanelTile {
                     Text(model.hasScanned ? "No displays found." : "Looking for displays…")
@@ -33,6 +36,23 @@ struct DisplaysPanelView: View {
     }
 }
 
+/// One quiet line under the header while another display app (BetterDisplay) also drives these monitors.
+private struct ConflictHint: View {
+    let text: String
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(PanelStyle.accent(for: colorScheme))
+            Text(text).font(.system(size: 11)).foregroundStyle(PanelStyle.colors(for: colorScheme).secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 4)
+    }
+}
+
 private struct DisplayTileView: View {
     @ObservedObject var model: DisplaysModel
     let tile: DisplaysModel.Tile
@@ -49,6 +69,9 @@ private struct DisplayTileView: View {
                 }
                 Spacer(minLength: 8)
                 DisplayModeMenu(model: model, tile: tile)
+            }
+            if model.confirmation?.displayID == tile.id {
+                ResolutionConfirmCard(model: model, compact: true)
             }
             if tile.control.hasPill {
                 let range = model.range(for: tile)
@@ -97,7 +120,7 @@ private struct DisplayModeMenu: View {
             if !hiDPI.isEmpty, !standard.isEmpty { Divider() }
             ForEach(standard) { group in item(group) }
             Divider()
-            Button("Displays Settings…") {
+            Button("Open macOS Display Settings…") {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
             }
         }

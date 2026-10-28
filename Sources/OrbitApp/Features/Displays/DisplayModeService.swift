@@ -3,7 +3,7 @@ import OrbitCore
 
 /// A display's resolutions: every mode macOS offers (including the HiDPI ones, via
 /// `kCGDisplayShowDuplicateLowResolutionModes`), turned into a menu by `DisplayModeList`, and switching
-/// to one with a permanent display configuration (it survives logout, like System Settings).
+/// to one: first for this session only, then permanently once the user keeps it (see `DisplaysModel.select`).
 ///
 /// Orbit lists only what macOS offers. HiDPI or virtual modes that other tools add through
 /// `/Library/Displays` overrides or virtual screens show up here while those exist; Orbit never writes them.
@@ -19,9 +19,10 @@ enum DisplayModeService {
         return DisplayModeList(modes: modes, current: current)
     }
 
-    /// Switches `id` to `mode`. Returns false when the mode is gone or CoreGraphics refused.
+    /// Switches `id` to `mode`, for this login session only (`permanently: false`, until the user confirms)
+    /// or for good. Returns false when the mode is gone or CoreGraphics refused.
     @discardableResult
-    static func apply(_ mode: RawDisplayMode, to id: CGDirectDisplayID) -> Bool {
+    static func apply(_ mode: RawDisplayMode, to id: CGDirectDisplayID, permanently: Bool) -> Bool {
         guard let target = allModes(id).first(where: { RawDisplayMode($0) == mode }) else {
             Log.info("displays: mode \(mode.width)x\(mode.height) is no longer offered by display \(id)")
             return false
@@ -32,7 +33,7 @@ enum DisplayModeService {
             CGCancelDisplayConfiguration(config)
             return false
         }
-        let result = CGCompleteDisplayConfiguration(config, .permanently)
+        let result = CGCompleteDisplayConfiguration(config, permanently ? .permanently : .forSession)
         if result != .success { Log.info("displays: CGCompleteDisplayConfiguration failed (\(result.rawValue))") }
         return result == .success
     }
