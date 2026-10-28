@@ -181,6 +181,58 @@ import Testing
         #expect(ScreenSpace.flip(ScreenSpace.flip(r, primaryHeight: primaryHeight), primaryHeight: primaryHeight) == r)
     }
 
+    // MARK: Dock hover policy
+
+    /// Resting on an icon opens its preview only after the delay; moving off first cancels it.
+    @Test func hoverWaitsForDelay() {
+        var policy = DockHoverPolicy()
+        #expect(policy.hoverChanged(to: 10, delay: 0.35) == .schedule(pid: 10, after: 0.35))
+        #expect(policy.shown == nil)
+        #expect(policy.delayElapsed(for: 10) == .show(pid: 10))
+        #expect(policy.shown == 10)
+        // Hovering the open app's icon again changes nothing.
+        #expect(policy.hoverChanged(to: 10, delay: 0.35) == DockHoverPolicy.Command.none)
+
+        var quick = DockHoverPolicy()
+        _ = quick.hoverChanged(to: 10, delay: 0.35)
+        #expect(quick.hoverChanged(to: nil, delay: 0.35) == .cancelSchedule)
+        #expect(quick.delayElapsed(for: 10) == DockHoverPolicy.Command.none)
+        // Sliding along the Dock restarts the wait for the new icon; the old timer firing late is ignored.
+        _ = quick.hoverChanged(to: 10, delay: 0.35)
+        #expect(quick.hoverChanged(to: 11, delay: 0.35) == .schedule(pid: 11, after: 0.35))
+        #expect(quick.delayElapsed(for: 10) == DockHoverPolicy.Command.none)
+        #expect(quick.delayElapsed(for: 11) == .show(pid: 11))
+    }
+
+    /// With a preview open, moving to another app's icon switches at once, and leaving the Dock for the strip
+    /// keeps it open.
+    @Test func switchingAppsWhileOpenIsImmediate() {
+        var policy = DockHoverPolicy()
+        _ = policy.hoverChanged(to: 10, delay: 0.35)
+        _ = policy.delayElapsed(for: 10)
+        #expect(policy.hoverChanged(to: 11, delay: 0.35) == .show(pid: 11))
+        #expect(policy.shown == 11)
+        #expect(policy.hoverChanged(to: nil, delay: 0.35) == DockHoverPolicy.Command.none)
+        #expect(policy.shown == 11)
+    }
+
+    /// The preview closes when the pointer leaves the strip, icon and gap, or when something else closes it;
+    /// either way the next hover waits for the delay again.
+    @Test func leavingClosesPreview() {
+        var policy = DockHoverPolicy()
+        #expect(policy.pointerLeft() == DockHoverPolicy.Command.none)
+        _ = policy.hoverChanged(to: 10, delay: 0.35)
+        _ = policy.delayElapsed(for: 10)
+        _ = policy.hoverChanged(to: nil, delay: 0.35)
+        #expect(policy.pointerLeft() == .hide)
+        #expect(policy.shown == nil)
+        #expect(policy.hoverChanged(to: 11, delay: 0.35) == .schedule(pid: 11, after: 0.35))
+        _ = policy.delayElapsed(for: 11)
+        policy.dismissed()
+        #expect(policy.shown == nil && policy.pending == nil)
+        #expect(policy.hoverChanged(to: 11, delay: 0) == .schedule(pid: 11, after: 0))
+    }
+
     // MARK: Running apps
 
     private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
