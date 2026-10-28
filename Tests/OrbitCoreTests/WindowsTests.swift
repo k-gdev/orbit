@@ -280,6 +280,20 @@ import Testing
         #expect(cache.count == 0)
     }
 
+    /// Expired thumbnails can be dropped without a lookup or insert (the strip does it when it hides), so a
+    /// one-off hover doesn't keep its images in memory.
+    @Test func thumbnailCachePurgesExpired() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: 3, capacity: 10)
+        cache.insert("old", for: 1, now: t0)
+        cache.insert("new", for: 2, now: t0.addingTimeInterval(2))
+        cache.removeExpired(now: t0.addingTimeInterval(4))
+        #expect(cache.count == 1)
+        #expect(cache.value(for: 2, now: t0.addingTimeInterval(4)) == "new")
+        cache.removeExpired(now: t0.addingTimeInterval(10))
+        #expect(cache.count == 0)
+    }
+
     // MARK: Window listing
 
     /// Real windows only (no palettes, no invisible helpers), front to back, minimised ones last or left out.

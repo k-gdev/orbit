@@ -30,6 +30,8 @@ final class DockPreviewController {
     /// What each thumbnail stands for, and the app they belong to, while the strip is up.
     private var shownTargets: [PreviewTarget] = []
     private var shownPID: pid_t?
+    /// One pending purge of the thumbnail cache, just after its lifetime, once the strip has hidden.
+    private var purgeWork: DispatchWorkItem?
 
     private var pointerTimer: Timer?
     private var outsideSince: Date?
@@ -58,6 +60,8 @@ final class DockPreviewController {
         cancelDelay()
         dismiss()
         thumbnailer.clear()
+        purgeWork?.cancel()
+        purgeWork = nil
         panel?.close()
         panel = nil
     }
@@ -274,6 +278,14 @@ final class DockPreviewController {
         model.clear()
         shownTargets = []
         shownPID = nil
+        // Drop what has expired now, and the rest once it expires, so a one-off hover keeps no images around.
+        thumbnailer.purgeExpired()
+        purgeWork?.cancel()
+        let purge = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.thumbnailer.purgeExpired() }
+        }
+        purgeWork = purge
+        DispatchQueue.main.asyncAfter(deadline: .now() + WindowThumbnailer.lifetime + 0.1, execute: purge)
     }
 
     // MARK: Screen and Dock
