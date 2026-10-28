@@ -72,10 +72,15 @@ final class DisplaysModel: ObservableObject {
     private var edits: [CGDirectDisplayID: Int] = [:]
     private var cancellables: Set<AnyCancellable> = []
 
-    init(settings: DisplaySettings, driver: DisplaysDriver?, tiles: [Tile] = []) {
+    /// A model without a driver that lists the connected displays (catalog only) for Settings while the
+    /// feature is off. Fixture models leave it false and never look at the hardware.
+    private let readsCatalogWhenIdle: Bool
+
+    init(settings: DisplaySettings, driver: DisplaysDriver?, tiles: [Tile] = [], readsCatalogWhenIdle: Bool = false) {
         self.settings = settings
         self.driver = driver
         self.tiles = tiles
+        self.readsCatalogWhenIdle = readsCatalogWhenIdle
         self.hasScanned = !tiles.isEmpty || driver == nil
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         settings.$useGammaFallback.dropFirst().removeDuplicates().sink { [weak self] on in
@@ -143,6 +148,21 @@ final class DisplaysModel: ObservableObject {
         rescanDDC = false
         driver.ddc.probe(targets, rescan: rescan) { [weak self] id, value in
             self?.received(value, for: id, editsAtStart: started[id] ?? 0)
+        }
+    }
+
+    /// The Settings page appeared: a full refresh when live; while the feature is off, just the display list
+    /// (no DDC, no writes); nothing for fixtures.
+    func refreshForSettings() {
+        if driver != nil {
+            refresh()
+        } else if readsCatalogWhenIdle {
+            tiles = DisplayCatalog.scan().map { info in
+                Tile(id: info.id, key: info.key, title: info.title, isBuiltIn: info.isBuiltIn,
+                     control: BuiltInBrightness.canControl(info.id) ? .native(builtIn: info.isBuiltIn) : .probing,
+                     reading: nil, brightness: 100, modes: info.modes)
+            }
+            hasScanned = true
         }
     }
 

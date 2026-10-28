@@ -27,6 +27,7 @@ final class DisplaysFeature: SuiteFeature {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        idle = nil
         let model = DisplaysModel(settings: settings, driver: DisplaysDriver())
         self.model = model
         model.applySavedSoftwareDims()
@@ -63,12 +64,9 @@ final class DisplaysFeature: SuiteFeature {
         AnyView(DisplaysPanelView(model: model ?? idleModel()))
     }
 
+    /// The view refreshes its model when it appears (`refreshForSettings`), never while it's being built.
     func makeSettingsView() -> AnyView {
-        if let model {
-            model.refresh()
-            return AnyView(DisplaysSettingsView(model: model))
-        }
-        return AnyView(DisplaysSettingsView(model: idleModel()))
+        AnyView(DisplaysSettingsView(model: model ?? idleModel()))
     }
 
     static func snapshotViews() -> FeatureSnapshotViews {
@@ -76,14 +74,15 @@ final class DisplaysFeature: SuiteFeature {
         return FeatureSnapshotViews(panel: DisplaysPanelView(model: model), settings: DisplaysSettingsView(model: model))
     }
 
-    /// While the feature is off: the connected displays for Settings (no DDC, no writes), on the real settings.
+    private var idle: DisplaysModel?
+
+    /// While the feature is off: a model with no driver that lists the connected displays for Settings when
+    /// the page appears (no DDC, no writes), on the real settings. Kept until the feature starts.
     private func idleModel() -> DisplaysModel {
-        let tiles = DisplayCatalog.scan().map { info in
-            DisplaysModel.Tile(id: info.id, key: info.key, title: info.title, isBuiltIn: info.isBuiltIn,
-                               control: BuiltInBrightness.canControl(info.id) ? .native(builtIn: info.isBuiltIn) : .probing,
-                               reading: nil, brightness: 100, modes: info.modes)
-        }
-        return DisplaysModel(settings: settings, driver: nil, tiles: tiles)
+        if let idle { return idle }
+        let model = DisplaysModel(settings: settings, driver: nil, readsCatalogWhenIdle: true)
+        idle = model
+        return model
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name, _ handler: @escaping @MainActor () -> Void) {

@@ -38,6 +38,7 @@ struct DisplaysSettingsView: View {
                         + "new HiDPI or virtual modes: those need display overrides in /Library/Displays, which Orbit never writes.")
             }
         }
+        .onAppear { model.refreshForSettings() }
     }
 
     private static func isNative(_ control: BrightnessControl) -> Bool {
