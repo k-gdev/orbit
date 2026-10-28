@@ -6,5 +6,6 @@ enum ClipboardDebug {
     @MainActor
     static func runIfRequested(_ arguments: [String]) {
         ClipboardCheck.runIfRequested(arguments)
+        ClipboardPopupSnapshot.runIfRequested(arguments)
     }
 }
