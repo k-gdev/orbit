@@ -91,7 +91,9 @@ final class MicMuteService: NSObject, ObservableObject {
     /// going inactive and on quit); unmuting undoes Orbit's mute, or switches off a mute made elsewhere.
     /// Does nothing when no device is available; a write that fails leaves the state as it was.
     func setMuted(_ muted: Bool) {
-        guard muted != isMuted else { return }
+        // An unmute always gets through while Orbit's own mute is on record, even when that mute sits on a mic that
+        // is no longer the input (and so doesn't show in `isMuted`): it must stay clearable.
+        guard muted != isMuted || (!muted && state.isMuted) else { return }
         if isFixture {
             isMuted = muted
             isMutedByOrbit = muted
@@ -112,6 +114,9 @@ final class MicMuteService: NSObject, ObservableObject {
         active = on
         if on {
             updateSystemListening()
+            // Orbit's mute still on record from a failed undo, on a mic that is no longer the input: nobody asked to
+            // mute now, so retry the undo rather than moving the mute to the current mic.
+            if let uid = state.deviceUID, uid != MicHAL.uid(of: MicHAL.defaultInputDevice()) { _ = restoreOrbitMute() }
             refreshLiveState()
             updateShortcut()
             shortcutSubscription = settings.$muteShortcut.dropFirst().sink { [weak self] _ in
@@ -186,8 +191,9 @@ final class MicMuteService: NSObject, ObservableObject {
     }
 
     @objc private func badgeClicked() {
-        if state.isMuted && !active {
-            // Inactive with an undo that failed before: try again.
+        if state.isMuted {
+            // Orbit's own mute (possibly on a mic that is no longer the input, or left by an undo that failed while
+            // inactive): undo exactly that.
             _ = restoreOrbitMute()
             refreshLiveState()
         } else {
