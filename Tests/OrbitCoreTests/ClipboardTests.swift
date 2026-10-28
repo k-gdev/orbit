@@ -432,6 +432,92 @@ import Testing
         }
     }
 
+    // MARK: Settings
+
+    @Suite struct ClipboardSettingsTests {
+        @Test func settingsRoundTrip() {
+            let (d, cleanup) = Fixtures.defaults()
+            defer { cleanup() }
+            let fresh = ClipboardSettings(defaults: d)
+            #expect(fresh.maxItems == 200)
+            #expect(fresh.maxAgeDays == 30)
+            #expect(fresh.maxMegabytes == 200)
+            #expect(fresh.maxItemMegabytes == 20)
+            #expect(fresh.popupShortcut == .clipboardDefault)
+            #expect(fresh.ignoredBundleIDs.isEmpty)
+            #expect(fresh.pasteDirectly)
+            #expect(fresh.limits == ClipboardLimits(maxItems: 200, maxAgeDays: 30, maxMegabytes: 200, maxItemMegabytes: 20))
+
+            fresh.maxItems = 500
+            fresh.maxAgeDays = 7
+            fresh.maxMegabytes = 1_000
+            fresh.maxItemMegabytes = 50
+            fresh.popupShortcut = KeyCombo(keyCode: 9, modifiers: [.control, .option])
+            fresh.ignoredBundleIDs = ["com.apple.keychainaccess", "com.example.vault"]
+            fresh.pasteDirectly = false
+
+            let back = ClipboardSettings(defaults: d)
+            #expect(back.maxItems == 500)
+            #expect(back.maxAgeDays == 7)
+            #expect(back.maxMegabytes == 1_000)
+            #expect(back.maxItemMegabytes == 50)
+            #expect(back.popupShortcut == KeyCombo(keyCode: 9, modifiers: [.control, .option]))
+            #expect(back.ignoredBundleIDs == ["com.apple.keychainaccess", "com.example.vault"])
+            #expect(!back.pasteDirectly)
+            #expect(back.limits == ClipboardLimits(maxItems: 500, maxAgeDays: 7, maxMegabytes: 1_000, maxItemMegabytes: 50))
+            // Everything is stored under the feature's own prefix.
+            let keys = d.dictionaryRepresentation().keys.filter { $0.hasPrefix("clipboard.") }
+            #expect(Set(keys) == ["clipboard.maxItems", "clipboard.maxAgeDays", "clipboard.maxMegabytes", "clipboard.maxItemMegabytes",
+                                  "clipboard.popupShortcut", "clipboard.ignoredBundleIDs", "clipboard.pasteDirectly"])
+        }
+
+        @Test func settingsClampNonsense() {
+            let (d, cleanup) = Fixtures.defaults()
+            defer { cleanup() }
+            let s = ClipboardSettings(defaults: d)
+            s.maxItems = 0
+            s.maxAgeDays = -4
+            s.maxMegabytes = 999_999
+            s.maxItemMegabytes = 0
+            #expect(s.maxItems == ClipboardSettings.maxItemsRange.lowerBound)
+            #expect(s.maxAgeDays == ClipboardSettings.maxAgeDaysRange.lowerBound)
+            #expect(s.maxMegabytes == ClipboardSettings.maxMegabytesRange.upperBound)
+            #expect(s.maxItemMegabytes == ClipboardSettings.maxItemMegabytesRange.lowerBound)
+            // What was clamped is what was stored.
+            let back = ClipboardSettings(defaults: d)
+            #expect(back.maxItems == s.maxItems && back.maxAgeDays == s.maxAgeDays)
+
+            // Garbage that is already in the defaults is clamped (or ignored) on the way in.
+            d.set(-5, forKey: "clipboard.maxItems")
+            d.set("many", forKey: "clipboard.maxAgeDays")
+            d.set(Data("nope".utf8), forKey: "clipboard.popupShortcut")
+            let odd = ClipboardSettings(defaults: d)
+            #expect(odd.maxItems == ClipboardSettings.maxItemsRange.lowerBound)
+            #expect(odd.maxAgeDays == 30)
+            #expect(odd.popupShortcut == .clipboardDefault)
+            // A shortcut that could never fire is replaced by the default too.
+            let unusable = KeyCombo(keyCode: 0, modifiers: [])
+            d.set(try? JSONEncoder().encode(unusable), forKey: "clipboard.popupShortcut")
+            #expect(ClipboardSettings(defaults: d).popupShortcut == .clipboardDefault)
+        }
+
+        @Test func ignoredAppsAreTidy() {
+            let (d, cleanup) = Fixtures.defaults()
+            defer { cleanup() }
+            let s = ClipboardSettings(defaults: d)
+            s.addIgnored("com.example.one")
+            s.addIgnored("  com.example.two ")
+            s.addIgnored("com.example.one")
+            s.addIgnored("")
+            #expect(s.ignoredBundleIDs == ["com.example.one", "com.example.two"])
+            #expect(s.isIgnored("com.example.two"))
+            #expect(!s.isIgnored("com.example.three"))
+            #expect(!s.isIgnored(nil))
+            s.removeIgnored("com.example.one")
+            #expect(ClipboardSettings(defaults: d).ignoredBundleIDs == ["com.example.two"])
+        }
+    }
+
     // MARK: Items and captures
 
     @Suite struct ClipboardItemTests {
