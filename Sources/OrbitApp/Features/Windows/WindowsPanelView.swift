@@ -24,6 +24,15 @@ struct WindowsPanelView: View {
                 ForEach(model.apps) { app in
                     WindowsAppTile(app: app, model: model)
                 }
+                if model.hasAccessibility {
+                    // Accessibility only reaches the current Space (plus minimised windows); say so.
+                    Text("Window lists show this Space and minimised windows. With Screen Recording, the Dock preview also shows other Spaces.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(style.secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 4)
+                        .padding(.top, 2)
+                }
             }
         }
     }

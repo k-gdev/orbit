@@ -83,7 +83,7 @@ enum WindowsSnapshot {
 private struct DockPreviewScene: View {
     let titlesOnly: Bool
 
-    static let size = CGSize(width: 920, height: 400)
+    static let size = CGSize(width: 1000, height: 400)
     private static let iconSize: CGFloat = 52
     private static let iconSpacing: CGFloat = 10
     private static let dockPadding: CGFloat = 9
