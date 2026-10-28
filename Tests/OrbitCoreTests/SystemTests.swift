@@ -99,4 +99,46 @@ import Testing
         tiny.append(2)
         #expect(tiny.values == [2])
     }
+
+    // MARK: Memory
+
+    @Test func memoryUsedAndPressure() {
+        let gib: UInt64 = 1 << 30
+        // 16 KB pages: 1 GiB = 65 536 pages.
+        let stats = MemoryStats(pageSize: 16_384, free: 65_536, active: 3 * 65_536, inactive: 2 * 65_536,
+                                wired: 65_536, compressed: 65_536 / 2, totalBytes: 16 * gib, pressure: MemoryPressure(kernelLevel: 1))
+        // Used = active + wired + compressed.
+        #expect(stats.usedBytes == 4 * gib + gib / 2)
+        #expect(stats.totalBytes == 16 * gib)
+        #expect(abs(stats.usedFraction - 4.5 / 16) < 1e-9)
+        #expect(stats.pressure == .normal)
+
+        #expect(MemoryPressure(kernelLevel: 1) == .normal)
+        #expect(MemoryPressure(kernelLevel: 2) == .warning)
+        #expect(MemoryPressure(kernelLevel: 4) == .critical)
+        #expect(MemoryPressure(kernelLevel: 0) == .normal)
+        #expect(MemoryPressure.allCases.map(\.title) == ["Normal", "Warning", "Critical"])
+
+        // Never more than all of it, and no division by zero.
+        let odd = MemoryStats(pageSize: 4096, free: 0, active: 10, inactive: 0, wired: 0, compressed: 0, totalBytes: 0, pressure: .normal)
+        #expect(odd.usedFraction == 0)
+        let over = MemoryStats(pageSize: 4096, free: 0, active: 1000, inactive: 0, wired: 0, compressed: 0, totalBytes: 4096, pressure: .warning)
+        #expect(over.usedFraction == 1)
+    }
+
+    @Test func systemFormatting() {
+        let gib: UInt64 = 1 << 30
+        #expect(SystemFormat.gigabytes(128 * gib) == "128 GB")
+        #expect(SystemFormat.gigabytes(62 * gib + gib / 10 * 2) == "62.2 GB")
+        #expect(SystemFormat.gigabytes(gib / 2) == "0.5 GB")
+        #expect(SystemFormat.gigabytes(0) == "0 GB")
+        #expect(SystemFormat.memory(used: 41 * gib, total: 128 * gib) == "41 of 128 GB")
+        #expect(SystemFormat.memory(used: 41 * gib + gib / 2, total: 128 * gib) == "41.5 of 128 GB")
+        #expect(SystemFormat.percent(0.234) == "23%")
+        #expect(SystemFormat.percent(0.996) == "100%")
+        #expect(SystemFormat.percent(-0.1) == "0%")
+        #expect(SystemFormat.percent(1.4) == "100%")
+        #expect(SystemFormat.celsius(53.4) == "53°")
+        #expect(SystemFormat.celsius(nil) == "—")
+    }
 }
