@@ -58,6 +58,7 @@ Each item has the question, the default the build uses now, and where to change 
 ### 12. Mic mute shortcut is live by default
 - Default now: ⌃⌥M is registered whenever Sound or Controls is on (Controls is on by default), once an input device exists. Mic mute works with Sound off. A mic with no mute control is muted by setting its input volume to 0.
 - Change it: Settings → Sound → Mute Shortcut, or Settings → Controls → Shortcuts. Turning off both Sound and Controls releases it.
+- Found on hardware (28 Oct): neither mute nor input volume 0 silences the Arctis Nova 5. See #28.
 
 ### 13. Sound mixer defaults
 - Default now: per-app volume 0–150%, square-law curve below 100, linear above with a soft clip past unity. "Remember per-app states" on. "Keep preferred microphone" off, so Orbit doesn't fight macOS input switching.
@@ -101,9 +102,9 @@ Each item has the question, the default the build uses now, and where to change 
 - Default now: software (gamma) dimming, because it answered no DDC reads.
 - Change it: turn DDC/CI on in the monitor's own menu. Orbit then switches to DDC after the next display change. Or turn off "Dim displays that don't answer DDC in software" in Settings → Displays.
 
-### 23. ThinkVision boost range
-- Default now: the range extends to 150 because the monitors report current 150 over max 100, learned after two readings. No write above 100 has ever been tested.
-- Change it: Settings → Displays → Maximum brightness (stepper, "Reset learned range"). Set 100 if the monitors clamp.
+### 23. ThinkVision boost range (answered 28 Oct)
+- Tested on hardware: the P27u-20s clamp DDC writes at 100, and any write ends a boost set from their own menu. The pill now shows a boost up to 150 but never writes above the monitor's reported maximum (100). A click in the striped zone keeps the boost. The caption says to boost from the monitor's menu.
+- Change it: Settings → Displays → Maximum brightness. An override still writes up to its value (review M9; you have none set).
 
 ## Housekeeping questions
 
@@ -122,4 +123,22 @@ Each item has the question, the default the build uses now, and where to change 
 ### 27. Two gaps left open on purpose
 - Default now: the final review triage left two known gaps. Task 8 battery de-dup can list a device twice when a user-named power source and a model-named registry entry both exist. Task 14 Dark Mode partial failure can leave Auto appearance off with no rollback.
 - Change it: tell me if either should be fixed before you merge.
+
+## New from the hardware session (28 Oct)
+
+### 28. How should Orbit handle the Arctis Nova 5 mic?
+- Default now: ⌃⌥M shows muted, but the headset keeps sending audio. The dongle accepts Core Audio mute and input-volume writes and reads them back, but its audio ignores both. Research found no published HID mute command for the Nova 5. The only candidate is the headset's mic volume (0–15); nobody has measured whether 0 is silence. Research: `docs/suite/ARCTIS-HID.md`.
+- Options: (a) with you watching, listen for the mute button over HID (nothing sent), then try mic volume 0 once and restore it; (b) a virtual microphone Orbit can silence (an audio driver, a large job); (c) a warning in the Sound tab that this mic can't be muted from the Mac, so you use the headset button.
+
+### 29. "Same on all displays" is on by default
+- Default now: on. Choosing a wallpaper on a connected display applies it to every connected display. Turning it on copies the main display's wallpaper to the others. At launch it only fills displays that have no wallpaper, so it never overwrites your per-display choices.
+- Change it: Settings → Wallpaper, or the switch in the Wallpaper tab.
+
+### 30. "Keep copied passwords" is off by default
+- Default now: off. Copies marked as passwords (the Passwords app, 1Password, and any app using the concealed pasteboard type) are not recorded. When on, they are kept in memory only, masked, at most 20, and they don't count toward the history limits. With it on, anything copied from 1Password is masked, usernames included, because Orbit treats 1Password's pasteboard marker as a password.
+- Change it: Settings → Clipboard → Keep copied passwords.
+
+### 31. Five review minors left open
+- Default now: not fixed. M4: Clipboard checks files on the main thread on right-click, drag start and Open, so an entry on a sleeping network share can beachball the panel. M5: right-click on a Clipboard tab tile works only on its text and badge. M7: Wallpaper sync can copy a main-display video that can't play (file gone, drive unplugged) and blank the other displays. M8: a shelved folder in your home folder makes the Shelf watch the whole home folder while it's open. M9: a brightness override set under the old footnote still writes above 100.
+- Change it: tell me which to fix before you merge.
 

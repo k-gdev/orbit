@@ -1,6 +1,58 @@
 
 # Orbit Suite — morning report
 
+## Hardware session, 28 October
+
+Kevo and I went through the checks on his Mac. The build installed now is 317e023 (1.1.0 is backed up at `~/Desktop/Orbit-1.1.0.app`). The rest of this report is the overnight report as it was; where they differ, this section wins.
+
+**Tests:** 966. In the last full run one failed: `compressTierTargetsAFractionOfTheSource`, a 1.1.0 video test this branch doesn't touch. Rerun on its own, its suite passed (51 of 51). An agent saw the same test flake once overnight, so it looks load-sensitive rather than broken.
+
+### Worked on hardware
+- Displays: resolution Keep/Revert (timeout, Keep, Esc).
+- Sound: per-app levels, mute and routing, and every app back at full volume after quitting Orbit.
+- Wallpaper: layering, Spaces, full screen, Mission Control, None.
+- Windows: Dock preview.
+- Clipboard: copies from the Passwords app are not recorded.
+- Shelf: dragging an item out to Finder.
+- Controls: Grab Text.
+- The 317e023 build with the fixes and additions below: "All good".
+
+### Found and fixed
+- **Orbit crashed when Sound was turned on.** The private TCC request's completion block was declared non-escaping. TCC keeps the block until the prompt is answered, so Swift trapped. Fixed in 7341d16.
+- **ThinkVision brightness past 100 did nothing, and a boost dropped to 100.** The P27u-20 reports a maximum of 100 and reads 150 after a boost from its own menu, but it clamps DDC writes at 100, and any write ends the boost. Orbit now shows the boost but never writes above the reported maximum. A click or drag in the striped zone keeps the boost (1739b6f, 864738d).
+- **Dark edge around the panel.** An A/B/C test showed it was the window server's shadow drawn under a Liquid Glass surface. On macOS 26 glass windows no longer have a window shadow (cb2eba7).
+- **A file moved to the Trash in Finder stayed on the Shelf.** The Shelf only checked its files when it opened. It now watches the items' folders while it's open, and an item's menu has Move to Trash (4b865e0).
+
+### Added on request
+- **Wallpaper: "Same on all displays"** (on by default). Choosing a wallpaper on a connected display applies it to all of them, and turning the switch on copies the main display's wallpaper to the others. At launch it only fills displays that have no wallpaper, so it never overwrites per-display choices (3a39fb0, d0b9261, 317e023).
+- **Clipboard: "Keep copied passwords"** (off by default; 1Password counts). Kept passwords stay in memory only, are masked, are capped at 20 and don't count against the history limits. Entries have Copy, Open, Show in Finder, Open in Preview, Pin and Remove, can be dragged out (always a copy, never a move of the original), and the ⇧⌘V popup has ⌘C, ⌘O and ⌘R. Image files exported for dragging or Preview are deleted with their entry (464f022, 825af94, 3fe6885, 9b8a831).
+
+A review of the first six of today's commits found 2 Important and 9 Minor issues. Both Important ones (sync overwriting per-display wallpapers at launch, exported images never deleted) and M1, M2, M3, M6 were fixed before the install, as was the Clipboard tab hover, which SwiftUI's `onHover` doesn't deliver to Orbit. M4, M5, M7, M8 and M9 are open (below).
+
+### Not fixed: mic mute on the Arctis Nova 5
+- ⌃⌥M shows muted, but Discord still hears Kevo. The headset's USB dongle accepts Core Audio's mute and input-volume writes and reads them back, but its audio ignores both: the input meter kept moving with mute on and with input volume at its minimum. No Core Audio approach can mute this headset.
+- HID research (nothing was sent to the headset) found no published mute command for the Nova 5 in any open-source project, or in the vendor spec they transcribe. The only candidate is the headset's mic volume (0–15), and nobody has measured whether 0 is silence. Details: [ARCTIS-HID.md](ARCTIS-HID.md).
+- The options are in QUESTIONS #28. Kevo's call.
+
+### Explained, no change
+- Safari came back at 72% after a relaunch because "Remember per-app states" had saved it at 72%, routed to the Arctis.
+- The coreaudiod `PreventUserIdleSystemSleep` assertions during the check were expected: Safari, Chrome and Discord were playing audio.
+
+### Not checked
+- Sound: `kill -9` of Orbit while an app is tapped (skipped).
+- Controls: Keep Awake.
+- Everything else in section 5 that isn't listed above.
+
+### Open
+- Review M4: Clipboard checks files on the main thread on right-click, drag start and Open, so an entry on a sleeping network share can beachball the panel.
+- Review M5: right-click on a Clipboard tab tile works only on its text and badge, not the whole tile.
+- Review M7: Wallpaper sync can copy a main-display video that can't play (file gone, drive unplugged) and blank the other displays.
+- Review M8: a shelved folder whose parent is the home folder makes the Shelf watch all of `~` while it's open. Correct, but wasteful.
+- Review M9: a brightness maximum set under the old Settings footnote still writes above 100. Kevo has none set.
+- With "Keep copied passwords" on, anything copied from 1Password is masked, usernames included.
+- The Sound tab lists the two ThinkVisions' audio as two devices both named "P27u-20", with nothing to tell them apart.
+- Running the tests writes lines into the real `~/Library/Logs/Orbit/orbit.log`.
+
 ## 1. Summary
 
 - Orbit 1.1.0's file wheel is unchanged. Branch `claude/suite-77e4bb` adds the Orbit Suite around it: a tabbed menu bar panel, a Settings window with a side rail and a Features page, and eight features: Sound, System, Displays, Windows, Clipboard, Shelf, Wallpaper and Controls (Keep Awake, Quick Toggles, Grab Text).
