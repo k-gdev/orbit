@@ -64,4 +64,39 @@ import Testing
         #expect(ClusterLayout([]).clusters([0.25, 0.75]) == [ClusterLoad(name: "CPU", cores: [0.25, 0.75])])
         #expect(ClusterLayout([]).clusters([]).isEmpty)
     }
+
+    // MARK: History
+
+    @Test func historyCapsAndOrders() {
+        var history = SampleHistory<Int>(capacity: 3)
+        #expect(history.isEmpty)
+        #expect(history.values == [])
+        #expect(history.latest == nil)
+        history.append(1)
+        history.append(2)
+        #expect(history.values == [1, 2])
+        history.append(3)
+        history.append(4)
+        history.append(5)
+        // Oldest first, never more than the capacity.
+        #expect(history.values == [3, 4, 5])
+        #expect(history.count == 3)
+        #expect(history.latest == 5)
+        history.removeAll()
+        #expect(history.isEmpty)
+        history.append(9)
+        #expect(history.values == [9])
+
+        #expect(SampleHistory<Double>().capacity == 60)
+        var big = SampleHistory<Double>()
+        for i in 0..<150 { big.append(Double(i)) }
+        #expect(big.values.count == 60)
+        #expect(big.values.first == 90)
+        #expect(big.values.last == 149)
+        // A capacity below one still keeps the latest sample.
+        var tiny = SampleHistory<Int>(capacity: 0)
+        tiny.append(1)
+        tiny.append(2)
+        #expect(tiny.values == [2])
+    }
 }
