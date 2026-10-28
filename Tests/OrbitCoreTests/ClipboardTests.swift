@@ -201,6 +201,23 @@ import Testing
             #expect(history.count == 3)
         }
 
+        /// Copied passwords live in memory only: they must not push saved entries out of the history on disk,
+        /// so they sit outside the count and size budgets and have a small cap of their own.
+        @Test func passwordsDontCountTowardTheSavedBudgets() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("saved1", minutesAgo: 100))
+            history.add(ClipboardTests.item("saved2", minutesAgo: 99))
+            for index in 0..<(ClipboardHistory.maxConcealedItems + 3) {
+                var secret = ClipboardTests.item("pw\(index)", minutesAgo: Double(90 - index), size: 1_000)
+                secret.concealed = true
+                history.add(secret)
+            }
+            let evicted = history.enforce(limits: Self.limits(items: 2, totalBytes: 100), now: ClipboardTests.base)
+            #expect(evicted.map(\.preview) == ["pw0", "pw1", "pw2"], "only the oldest passwords past their own cap go")
+            #expect(history.items.filter { !$0.concealed }.map(\.preview) == ["saved2", "saved1"])
+            #expect(history.items.filter(\.concealed).count == ClipboardHistory.maxConcealedItems)
+        }
+
         @Test func enforcesAgeLimit() {
             var history = ClipboardHistory()
             history.add(ClipboardTests.item("ancient", minutesAgo: 40 * 24 * 60))

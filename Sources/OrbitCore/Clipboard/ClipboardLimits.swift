@@ -45,12 +45,17 @@ public struct ClipboardLimits: Equatable, Sendable {
 }
 
 extension ClipboardHistory {
+    /// How many copied passwords are kept (newest first). They live in memory only, outside the saved budgets.
+    public static let maxConcealedItems = 20
+
     /// Applies the limits and returns the evicted entries (so their blobs can be deleted), oldest
     /// first. Pinned entries are exempt from every limit: they are never evicted and they do not count
     /// toward the count or size budgets (otherwise enough pins would leave no room, and every new copy
-    /// would be stored and evicted at once). The budgets apply to the unpinned entries. In order:
-    /// entries older than `maxAge`; then the oldest unpinned entries while there are more than
-    /// `maxItems`; then the oldest unpinned entries while their stored bytes exceed `maxTotalBytes`.
+    /// would be stored and evicted at once). Copied passwords don't count either (they would push saved
+    /// entries off the disk, and vanish themselves at quit); they have their own cap, `maxConcealedItems`.
+    /// In order: entries older than `maxAge`; then the oldest passwords past their cap; then the oldest
+    /// saved unpinned entries while there are more than `maxItems`; then while their stored bytes exceed
+    /// `maxTotalBytes`.
     @discardableResult
     public mutating func enforce(limits: ClipboardLimits, now: Date) -> [ClipboardItem] {
         var evicted: [ClipboardItem] = []
@@ -60,10 +65,16 @@ extension ClipboardHistory {
         for item in tooOld { _ = remove(id: item.id) }
         evicted.append(contentsOf: tooOld)
 
-        // Budgets are measured over the unpinned entries only.
-        var total = items.reduce(0) { $0 + ($1.pinned ? 0 : $1.byteSize) }
-        var count = items.reduce(0) { $0 + ($1.pinned ? 0 : 1) }
-        for item in items.reversed() where !item.pinned {
+        let concealed = items.filter(\.concealed)
+        let extraConcealed = Array(concealed.dropFirst(Self.maxConcealedItems).reversed())
+        for item in extraConcealed { _ = remove(id: item.id) }
+        evicted.append(contentsOf: extraConcealed)
+
+        // Budgets are measured over the saved unpinned entries only.
+        let counted: (ClipboardItem) -> Bool = { !$0.pinned && !$0.concealed }
+        var total = items.reduce(0) { $0 + (counted($1) ? $1.byteSize : 0) }
+        var count = items.reduce(0) { $0 + (counted($1) ? 1 : 0) }
+        for item in items.reversed() where counted(item) {
             guard count > limits.maxItems || total > limits.maxTotalBytes else { break }
             _ = remove(id: item.id)
             evicted.append(item)

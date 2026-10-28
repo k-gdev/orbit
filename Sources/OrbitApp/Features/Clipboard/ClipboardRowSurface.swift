@@ -11,14 +11,10 @@ enum ClipboardDragContent {
     /// An image entry as the temporary PNG written for it; `preview` is its thumbnail, if one is loaded.
     case imageFile(URL, preview: NSImage?)
 
-    /// The operations a drag of this content offers: a file may be moved, as when dragged out of the Shelf
-    /// (Finder moves on the same volume, copies across volumes and with ⌥); text and the temporary PNG can only be copied.
-    var allowedOperations: NSDragOperation {
-        switch self {
-        case .files: [.copy, .move, .generic]
-        case .text, .richText, .imageFile: [.copy, .generic]
-        }
-    }
+    /// The operations a drag of this content offers: copy only. A history entry points at files the user copied,
+    /// so dropping it on a Finder folder must copy them, never move the originals away (unlike the Shelf, which
+    /// holds files to be moved).
+    var allowedOperations: NSDragOperation { [.copy, .generic] }
 
     /// The dragging items for a drag that started at `point` in a view.
     func draggingItems(at point: NSPoint, flipped: Bool) -> [NSDraggingItem] {
@@ -249,4 +245,40 @@ private final class ActionMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError("not used") }
 
     @objc private func fire() { handler(entryAction) }
+}
+
+/// Reports the pointer entering and leaving a whole tile, for its hover buttons. SwiftUI's `onHover` doesn't fire
+/// for Orbit (an accessory app that is never active), and the row's `ClipboardRowSurface` covers only the text, so
+/// it would report leaving as the pointer moves onto the buttons. Put it behind the tile: it takes no clicks.
+struct ClipboardTileHover: NSViewRepresentable {
+    var onHover: (Bool) -> Void
+
+    func makeNSView(context: Context) -> ClipboardTileHoverView {
+        let view = ClipboardTileHoverView()
+        view.onHover = onHover
+        return view
+    }
+
+    func updateNSView(_ view: ClipboardTileHoverView, context: Context) {
+        view.onHover = onHover
+    }
+}
+
+final class ClipboardTileHoverView: NSView {
+    var onHover: (Bool) -> Void = { _ in }
+    private var trackingArea: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover(true) }
+    override func mouseExited(with event: NSEvent) { onHover(false) }
 }

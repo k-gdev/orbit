@@ -229,7 +229,7 @@ private struct ClipboardPanelRow: View {
                 }
             }
         }
-        .onHover { hovering = $0 }
+        .background(ClipboardTileHover { hovering = $0 })
         .task(id: item.id) { await model.refreshFileStatus(of: item) }
     }
 
