@@ -359,3 +359,97 @@ extension ControlsTests {
         }
     }
 }
+
+// MARK: - Eject
+
+extension ControlsTests {
+    @Suite struct EjectTests {
+        private func volume(_ path: String, _ name: String, inside: Bool?, removable: Bool = false, ejectable: Bool = false,
+                            local: Bool = true, root: Bool = false, browsable: Bool = true) -> VolumeInfo {
+            VolumeInfo(path: path, name: name, isInternal: inside, isRemovable: removable, isEjectable: ejectable,
+                       isLocal: local, isRootFileSystem: root, isBrowsable: browsable)
+        }
+
+        @Test func ejectableFiltersInternalAndNetwork() {
+            // The volumes Kevo's Mac really had mounted (read-only probe), plus typical external ones.
+            let mounted = [
+                volume("/", "Macintosh HD", inside: true, root: true),
+                volume("/System/Volumes/VM", "VM", inside: true, browsable: false),
+                volume("/System/Volumes/Preboot", "Preboot", inside: true, browsable: false),
+                volume("/System/Volumes/Data/home", "home", inside: nil, local: false, browsable: false),
+                volume("/Library/Developer/CoreSimulator/Volumes/iOS_23F77", "iOS 26.5 Simulator", inside: nil,
+                       removable: true, ejectable: true, browsable: false),
+                volume("/Volumes/Backup SSD", "Backup SSD", inside: false, ejectable: true),
+                volume("/Volumes/UNTITLED", "UNTITLED", inside: true, removable: true, ejectable: true),   // SD card slot
+                volume("/Volumes/Install Foo", "Install Foo", inside: nil, removable: true, ejectable: true),   // disk image
+                volume("/Volumes/Projects", "Projects", inside: nil, ejectable: true, local: false),            // SMB share
+                volume("/Volumes/BOOTCAMP", "BOOTCAMP", inside: true),                                         // internal partition
+            ]
+            let names = EjectableVolumeFilter.ejectable(mounted).map(\.name)
+            #expect(names == ["Backup SSD", "UNTITLED", "Install Foo"])
+            // Unknown "internal" with no removable/ejectable evidence stays put.
+            #expect(EjectableVolumeFilter.ejectable([volume("/Volumes/Mystery", "Mystery", inside: nil)]).isEmpty)
+            // External but hidden from Finder: left alone.
+            #expect(EjectableVolumeFilter.ejectable([volume("/Volumes/Hidden", "Hidden", inside: false, browsable: false)]).isEmpty)
+            // Never the boot volume, whatever it claims.
+            #expect(EjectableVolumeFilter.ejectable([volume("/Volumes/Boot", "Boot", inside: false, ejectable: true, root: true)]).isEmpty)
+        }
+
+        @Test func confirmationAndSummaryText() {
+            let a = volume("/Volumes/Backup SSD", "Backup SSD", inside: false, ejectable: true)
+            let b = volume("/Volumes/Install Foo", "Install Foo", inside: nil, ejectable: true)
+            #expect(EjectableVolumeFilter.confirmation([a]) == "Eject “Backup SSD”?")
+            #expect(EjectableVolumeFilter.confirmation([a, b]) == "Eject 2 drives?")
+            #expect(EjectableVolumeFilter.summary(ejected: ["Backup SSD"], failed: []) == "Ejected “Backup SSD”")
+            #expect(EjectableVolumeFilter.summary(ejected: ["A", "B"], failed: []) == "Ejected 2 drives")
+            #expect(EjectableVolumeFilter.summary(ejected: [], failed: ["A"]) == "Couldn’t eject “A”")
+            #expect(EjectableVolumeFilter.summary(ejected: ["A"], failed: ["B", "C"]) == "Ejected “A”; couldn’t eject 2 drives")
+            #expect(EjectableVolumeFilter.summary(ejected: [], failed: []) == "No drives to eject")
+        }
+    }
+}
+
+// MARK: - Grab Text
+
+extension ControlsTests {
+    @Suite struct GrabTextTests {
+        @Test func hudLineCounts() {
+            let one = GrabTextResult.format(lines: ["Hello"])
+            #expect(one.text == "Hello")
+            #expect(one.hud == "Copied 1 line")
+            let three = GrabTextResult.format(lines: ["  First line ", "", "Second", "Third\t"])
+            #expect(three.text == "First line\nSecond\nThird")
+            #expect(three.hud == "Copied 3 lines")
+            let none = GrabTextResult.format(lines: ["", "   "])
+            #expect(none.text.isEmpty)
+            #expect(none.hud == "No text found")
+            #expect(GrabTextResult.format(lines: []).hud == "No text found")
+        }
+
+        @Test func barcodeWins() {
+            let qr = GrabTextResult.preferBarcode(payloads: ["https://example.com"], lines: ["Scan me", "example.com"])
+            #expect(qr.text == "https://example.com")
+            #expect(qr.hud == "Copied code")
+            let two = GrabTextResult.preferBarcode(payloads: ["A", "B", "A", " "], lines: ["x"])
+            #expect(two.text == "A\nB")                      // duplicates and blanks dropped, order kept
+            #expect(two.hud == "Copied 2 codes")
+            let text = GrabTextResult.preferBarcode(payloads: [], lines: ["Just text"])
+            #expect(text.text == "Just text")
+            #expect(text.hud == "Copied 1 line")
+            #expect(GrabTextResult.preferBarcode(payloads: [""], lines: []).hud == "No text found")
+        }
+
+        /// Vision boxes are normalised with the origin at the bottom left; reading order is top to bottom,
+        /// then left to right within a row.
+        @Test func readingOrder() {
+            let lines = [
+                RecognizedLine(text: "right", box: CGRect(x: 0.6, y: 0.80, width: 0.3, height: 0.05)),
+                RecognizedLine(text: "bottom", box: CGRect(x: 0.1, y: 0.10, width: 0.5, height: 0.05)),
+                RecognizedLine(text: "left", box: CGRect(x: 0.1, y: 0.81, width: 0.3, height: 0.05)),
+                RecognizedLine(text: "middle", box: CGRect(x: 0.1, y: 0.45, width: 0.5, height: 0.05)),
+            ]
+            #expect(GrabTextResult.readingOrder(lines) == ["left right", "middle", "bottom"])
+            #expect(GrabTextResult.readingOrder([]) == [])
+        }
+    }
+}
