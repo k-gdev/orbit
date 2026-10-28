@@ -25,7 +25,11 @@ final class DockWatcher {
     private(set) var isRunning = false
     private var observer: AXObserver?
     private var list: AXUIElement?
-    private var relaunchObserver: NSObjectProtocol?
+    /// The Dock process the observer is attached to.
+    private var attachedPID: pid_t?
+    /// Watches the process list (KVO covers background processes like the Dock, which the launch
+    /// notifications may not), to re-attach when the Dock restarts.
+    private var processWatch: NSKeyValueObservation?
     private var retry: DispatchWorkItem?
     private var attempts = 0
 
@@ -34,13 +38,9 @@ final class DockWatcher {
         isRunning = true
         attempts = 0
         attach()
-        relaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            guard app?.bundleIdentifier == DockWatcher.dockBundleID else { return }
-            MainActor.assumeIsolated {
-                self?.attempts = 0
-                self?.scheduleAttach(after: 1)
+        processWatch = NSWorkspace.shared.observe(\.runningApplications, options: []) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.dockMayHaveRestarted() }
             }
         }
     }
@@ -50,9 +50,20 @@ final class DockWatcher {
         isRunning = false
         retry?.cancel()
         retry = nil
-        if let relaunchObserver { NSWorkspace.shared.notificationCenter.removeObserver(relaunchObserver) }
-        relaunchObserver = nil
+        processWatch?.invalidate()
+        processWatch = nil
         detach()
+    }
+
+    /// The process list changed: if the Dock now has another pid (or none was attached), attach to it.
+    private func dockMayHaveRestarted() {
+        guard isRunning else { return }
+        let pid = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockBundleID).first?.processIdentifier
+        guard pid != attachedPID else { return }
+        detach()
+        guard pid != nil else { return }
+        attempts = 0
+        scheduleAttach(after: 1)
     }
 
     // MARK: Attaching
@@ -79,6 +90,7 @@ final class DockWatcher {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
         observer = created
         self.list = list
+        attachedPID = dock.processIdentifier
         Log.info("windows: watching the Dock (pid \(dock.processIdentifier))")
     }
 
@@ -89,6 +101,7 @@ final class DockWatcher {
         }
         observer = nil
         list = nil
+        attachedPID = nil
     }
 
     /// Retries a few times (the Dock relaunching), then gives up until the next Dock launch or `start()`.
