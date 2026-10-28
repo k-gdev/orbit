@@ -108,8 +108,10 @@ final class DockPreviewController {
     // MARK: Showing
 
     /// Reads the app's Accessibility windows off the main thread and, with Screen Recording, its
-    /// ScreenCaptureKit windows (every Space), merges them (`PreviewWindowList`), shows the strip at once with
-    /// title cards and fills in thumbnails as they are captured.
+    /// ScreenCaptureKit windows (every Space) at the same time, merges them (`PreviewWindowList`), shows the
+    /// strip with title cards and fills in thumbnails as they are captured. ScreenCaptureKit's window list can
+    /// be slow when it isn't cached: if it isn't in within `DockPreviewFill.captureWait` of the hover firing,
+    /// the strip shows Accessibility's windows first and is filled in (thumbnails, other Spaces) when it comes.
     private func show(_ pid: pid_t) {
         guard var hover, hover.pid == pid else {
             // The pointer has moved on: reset (this also removes the click monitor the wait installed).
@@ -125,18 +127,51 @@ final class DockPreviewController {
         generation += 1
         let generation = generation
         let showMinimised = settings.showMinimised
+        let started = Date()
+        let captureFetch: Task<[SCWindow], Never>? = WindowThumbnailer.canCapture
+            ? Task { @MainActor [thumbnailer] in await thumbnailer.captureWindows(of: pid) } : nil
         Task { @MainActor [weak self] in
-            guard let self else { return }
             let accessibility = await Self.readWindows(of: pid)
-            let capture = WindowThumbnailer.canCapture ? await self.thumbnailer.captureWindows(of: pid) : []
+            guard let self, generation == self.generation else { return }
+            guard let captureFetch else {
+                self.present(Self.targets(accessibility: accessibility, capture: [], showMinimised: showMinimised),
+                             for: hover, generation: generation)
+                return
+            }
+            let wait = DockPreviewFill.remainingWait(elapsed: Date().timeIntervalSince(started))
+            if let capture = await Self.value(of: captureFetch, within: wait) {
+                guard generation == self.generation else { return }
+                self.present(Self.targets(accessibility: accessibility, capture: capture, showMinimised: showMinimised),
+                             for: hover, generation: generation)
+                return
+            }
+            // The capture list is late: title cards for what Accessibility sees now, the rest when it comes.
             guard generation == self.generation else { return }
-            let entries = PreviewWindowList.merge(accessibility: accessibility.map(\.info), capture: capture.map(\.info),
-                                                  showMinimised: showMinimised)
-            let targets = entries.map { entry in
+            let early = Self.targets(accessibility: accessibility, capture: [], showMinimised: showMinimised)
+            if DockPreviewFill.showsWithoutCapture(accessibilityEntries: early.count) {
+                self.present(early, for: hover, generation: generation)
+            }
+            let capture = await captureFetch.value
+            guard generation == self.generation else { return }
+            self.present(Self.targets(accessibility: accessibility, capture: capture, showMinimised: showMinimised),
+                         for: hover, generation: generation)
+        }
+    }
+
+    private static func targets(accessibility: [AXWindow], capture: [SCWindow], showMinimised: Bool) -> [PreviewTarget] {
+        PreviewWindowList.merge(accessibility: accessibility.map(\.info), capture: capture.map(\.info), showMinimised: showMinimised)
+            .map { entry in
                 PreviewTarget(entry: entry, window: entry.accessibilityIndex.map { accessibility[$0] },
                               capture: entry.captureIndex.map { capture[$0] })
             }
-            self.present(targets, for: hover, generation: generation)
+    }
+
+    /// `task`'s value if it arrives within `seconds`, else nil (the task keeps running either way).
+    private static func value<T>(of task: Task<T, Never>, within seconds: TimeInterval) async -> T? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            let answer = FirstAnswer(continuation)
+            Task { @MainActor in answer.give(await task.value) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { answer.give(nil) }
         }
     }
 
@@ -322,6 +357,24 @@ private struct PreviewTarget {
         self.window = window
         self.capture = capture
         id = window?.id ?? capture.map { "c\($0.windowID)" } ?? "e\(entry.captureIndex ?? -1)"
+    }
+}
+
+/// Resumes a continuation once, with whichever answer comes first.
+private final class FirstAnswer<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T?, Never>?
+
+    init(_ continuation: CheckedContinuation<T?, Never>) {
+        self.continuation = continuation
+    }
+
+    func give(_ value: T?) {
+        lock.lock()
+        let waiting = continuation
+        continuation = nil
+        lock.unlock()
+        waiting?.resume(returning: value)
     }
 }
 

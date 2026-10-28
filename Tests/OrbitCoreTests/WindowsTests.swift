@@ -261,6 +261,38 @@ import Testing
         #expect(!DockPreviewReadiness.featureOff.watchesDock)
     }
 
+    // MARK: Slow ScreenCaptureKit
+
+    /// The strip waits for ScreenCaptureKit's window list at most 0.4 s from the hover firing, then shows
+    /// what Accessibility sees and fills in thumbnails and other-Space windows when the list arrives.
+    @Test func captureListWaitIsBounded() {
+        #expect(DockPreviewFill.captureWait == 0.4)
+        #expect(DockPreviewFill.remainingWait(elapsed: 0) == 0.4)
+        #expect(abs(DockPreviewFill.remainingWait(elapsed: 0.15) - 0.25) < 1e-9)
+        #expect(DockPreviewFill.remainingWait(elapsed: 0.4) == 0)
+        #expect(DockPreviewFill.remainingWait(elapsed: 2) == 0)            // a slow Accessibility read used it all
+        #expect(DockPreviewFill.remainingWait(elapsed: -1) == 0.4)         // never more than the wait itself
+    }
+
+    /// Without the capture list, Accessibility's windows show as title cards right away; when Accessibility has
+    /// none (every window on another Space, say) the strip waits for the list, which may have some.
+    @Test func earlyStripNeedsAccessibilityWindows() {
+        #expect(DockPreviewFill.showsWithoutCapture(accessibilityEntries: 3))
+        #expect(DockPreviewFill.showsWithoutCapture(accessibilityEntries: 1))
+        #expect(!DockPreviewFill.showsWithoutCapture(accessibilityEntries: 0))
+    }
+
+    /// One capture list is reused for 2 s (a single-entry `TimedCache`), so moving along the Dock doesn't
+    /// fetch it for every icon, while a window opened since shows up soon after.
+    @Test func captureListIsReusedBriefly() {
+        #expect(DockPreviewFill.shareableContentLifetime == 2)
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: DockPreviewFill.shareableContentLifetime, capacity: 1)
+        cache.insert("windows", for: 0, now: t0)
+        #expect(cache.value(for: 0, now: t0.addingTimeInterval(1.9)) == "windows")
+        #expect(cache.value(for: 0, now: t0.addingTimeInterval(2.1)) == nil)
+    }
+
     // MARK: Thumbnail cache
 
     /// Thumbnails are reused for a few seconds, then captured again; the cache never grows without bound.

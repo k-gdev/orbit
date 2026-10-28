@@ -4,28 +4,47 @@ import OrbitCore
 import ScreenCaptureKit
 
 /// Small window thumbnails through ScreenCaptureKit (`SCShareableContent` + `SCScreenshotManager`, macOS
-/// 14+), kept for a few seconds per window so hovering the same Dock icon again doesn't capture again.
-/// Callers check Screen Recording first (`CGPreflightScreenCaptureAccess`), so this never causes a prompt.
+/// 14+), kept for a few seconds per window so hovering the same Dock icon again doesn't capture again. The
+/// window list itself is reused for `DockPreviewFill.shareableContentLifetime`, and callers asking while it
+/// is being fetched share that one fetch. Callers check Screen Recording first
+/// (`CGPreflightScreenCaptureAccess`), so this never causes a prompt.
 @MainActor
 final class WindowThumbnailer {
     /// How long a thumbnail is reused.
     static let lifetime: TimeInterval = 3
 
     private var cache = TimedCache<CGWindowID, CGImage>(lifetime: lifetime, capacity: 48)
+    /// The last window list (one entry, key 0), and the fetch in flight, if any.
+    private var shareable = TimedCache<Int, SCShareableContent>(lifetime: DockPreviewFill.shareableContentLifetime, capacity: 1)
+    private var shareableFetch: Task<SCShareableContent?, Never>?
 
     /// Whether thumbnails can be captured now (no prompt: preflight only).
     static var canCapture: Bool { CGPreflightScreenCaptureAccess() }
 
     /// The app's windows as ScreenCaptureKit sees them (on any Space), or none when capture isn't allowed.
     func captureWindows(of pid: pid_t) async -> [SCWindow] {
-        guard Self.canCapture else { return [] }
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
-            return content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer == 0 }
-        } catch {
-            Log.info("windows: shareable content unavailable: \(error.localizedDescription)")
-            return []
+        guard Self.canCapture, let content = await shareableContent() else { return [] }
+        return content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer == 0 }
+    }
+
+    /// Every window ScreenCaptureKit sees: the cached list while it is fresh, else one fetch however many ask.
+    private func shareableContent() async -> SCShareableContent? {
+        if let cached = shareable.value(for: 0, now: Date()) { return cached }
+        let fetch = shareableFetch ?? Task { @MainActor () -> SCShareableContent? in
+            do {
+                return try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+            } catch {
+                Log.info("windows: shareable content unavailable: \(error.localizedDescription)")
+                return nil
+            }
         }
+        shareableFetch = fetch
+        let content = await fetch.value
+        if shareableFetch == fetch {
+            shareableFetch = nil
+            if let content { shareable.insert(content, for: 0, now: Date()) }
+        }
+        return content
     }
 
     /// A thumbnail of `window`, at most `DockPreviewLayout.maxThumbnailHeight` points tall at `scale`.
@@ -50,13 +69,17 @@ final class WindowThumbnailer {
         }
     }
 
-    /// Forgets thumbnails past their lifetime (the strip hid: nothing else would look them up soon).
+    /// Forgets thumbnails (and the window list) past their lifetime (the strip hid: nothing else would look
+    /// them up soon).
     func purgeExpired() {
         cache.removeExpired(now: Date())
+        shareable.removeExpired(now: Date())
     }
 
-    /// Forgets every thumbnail (the preview was turned off).
+    /// Forgets every thumbnail and the window list (the preview was turned off).
     func clear() {
         cache.removeAll()
+        shareable.removeAll()
+        shareableFetch = nil
     }
 }
