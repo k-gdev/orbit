@@ -550,6 +550,35 @@ extension SoundTests {
             #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
         }
 
+        /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
+        /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
+        @Test func tapPausesAfterIdleDelay() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var activity = TapActivity(now: t0, isPlaying: true)
+            #expect(activity.update(isPlaying: true, now: at(1)) == nil)
+            #expect(activity.nextCheck() == nil)                       // playing: nothing to wait for
+            #expect(activity.update(isPlaying: false, now: at(10)) == nil)
+            #expect(activity.nextCheck() == at(10 + TapActivity.idleDelay))
+            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay - 0.1)) == nil)
+            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay)) == .pause)
+            #expect(activity.isPaused)
+            #expect(activity.nextCheck() == nil)
+            #expect(activity.update(isPlaying: false, now: at(60)) == nil)  // already paused: once per quiet spell
+            // Playing again: running, and the next quiet spell counts from when it stops.
+            #expect(activity.update(isPlaying: true, now: at(61)) == nil)
+            #expect(!activity.isPaused)
+            #expect(activity.update(isPlaying: true, now: at(90)) == nil)
+            #expect(activity.update(isPlaying: false, now: at(100)) == nil)
+            #expect(activity.nextCheck() == at(100 + TapActivity.idleDelay))
+            #expect(activity.update(isPlaying: false, now: at(100 + TapActivity.idleDelay)) == .pause)
+            // A tap built while its app is quiet starts counting at once.
+            var quiet = TapActivity(now: t0, isPlaying: false)
+            #expect(quiet.nextCheck() == at(TapActivity.idleDelay))
+            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == .pause)
+            #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
+        }
+
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {
             #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)

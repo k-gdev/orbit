@@ -28,6 +28,7 @@ final class AppAudioTap: @unchecked Sendable {
     let processes: [AudioObjectID]
     private let renderState: TapRenderState
     private let queue: DispatchQueue
+    private let onFailure: @MainActor (String) -> Void
 
     // Touched only on `queue`.
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -35,13 +36,30 @@ final class AppAudioTap: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     private var invalidated = false
 
+    /// Set while the queue sits in a re-armed `AudioDeviceStart` (paused for idleness), which with
+    /// TapAutoStart may only return with the app's next audio. Read from the main thread.
+    private let waitingLock = NSLock()
+    private var waitingForAudioFlag = false
+
+    /// The aggregate's IO is stopped and re-armed for the app's next audio; the app is not muted meanwhile
+    /// (`.mutedWhenTapped`), so `SoundEngine.stop()` need not wait for this tap's queue.
+    var isWaitingForAudio: Bool {
+        waitingLock.lock(); defer { waitingLock.unlock() }
+        return waitingForAudioFlag
+    }
+
+    private func setWaitingForAudio(_ on: Bool) {
+        waitingLock.lock(); waitingForAudioFlag = on; waitingLock.unlock()
+    }
+
     /// Builds the tap on its queue and starts it. On the main thread afterwards: `onStarted` once it runs,
-    /// or `onFailure` if creation failed (nothing is left behind then).
+    /// or `onFailure` if creation failed (nothing is left behind then) or a later restart of its IO failed.
     init(bundleID: String, processes: [AudioObjectID], destinationUID: String, gain: Float,
          onStarted: @escaping @MainActor () -> Void, onFailure: @escaping @MainActor (String) -> Void) {
         self.bundleID = bundleID
         self.processes = processes
         self.destinationUID = destinationUID
+        self.onFailure = onFailure
         renderState = TapRenderState(gain: gain)
         queue = DispatchQueue(label: "com.kevo.orbit.sound.tap.\(bundleID)", qos: .userInitiated)
         queue.async { [self] in
@@ -62,6 +80,25 @@ final class AppAudioTap: @unchecked Sendable {
     /// The gain the IOProc ramps to (0 = muted). Cheap; safe from the main thread at any time.
     func setGain(_ gain: Float) {
         renderState.setTarget(gain)
+    }
+
+    /// The app went quiet (`TapActivity`): stop the aggregate's IO, then start it again. With
+    /// `kAudioAggregateDeviceTapAutoStartKey` the restarted IO only runs once the app produces audio again, so
+    /// an idle app costs no IO, and the tap and aggregate stay as they are (nothing is rebuilt).
+    func pauseUntilNextAudio() {
+        queue.async { [self] in
+            guard !invalidated, aggregateID != kAudioObjectUnknown, let procID = ioProcID else { return }
+            AudioDeviceStop(aggregateID, procID)
+            Log.info("sound: \(bundleID) is quiet; its output waits for the next sound")
+            setWaitingForAudio(true)
+            let status = AudioDeviceStart(aggregateID, procID)
+            setWaitingForAudio(false)
+            guard status != noErr, !invalidated else { return }
+            // The IO won't come back: the app plays as usual meanwhile; let the engine drop this tap.
+            Log.error("sound: re-arming \(bundleID) failed (\(status))")
+            let report = onFailure
+            DispatchQueue.main.async { report("restarting its output failed (\(status))") }
+        }
     }
 
     /// Stops and destroys everything (asynchronously, on the tap's queue). Idempotent.
