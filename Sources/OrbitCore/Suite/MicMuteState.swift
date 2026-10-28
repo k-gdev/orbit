@@ -27,14 +27,27 @@ public enum MicMuteAction: Equatable, Sendable {
     case setVolume(deviceUID: String, volume: Float)
 }
 
+/// How the mic looks right now (the shared mute's live state, spec §8.3).
+public enum MicMutePresentation: Equatable, Sendable {
+    /// No input device, or one Orbit can neither mute nor turn down.
+    case unavailable
+    case unmuted
+    /// Orbit's mute is in effect.
+    case mutedByOrbit
+    /// The device's own mute is on, but Orbit didn't set it (System Settings, the headset's button).
+    case mutedElsewhere
+}
+
 /// The logic of the shared mic mute (Sound and Controls, spec §8.3), free of Core Audio so it can be tested.
 ///
-/// Muting uses the device's mute control when it has one, otherwise turns its input volume to 0. Either
-/// way the state records what the device was like before, and `restore()` (unmute, turning the feature
-/// off, quitting) returns exactly the actions that put that back. A mic that was already muted, or at
-/// volume 0, before Orbit's mute is left that way: Orbit never "restores" a mute it did not apply.
-/// Codable so the app can keep the record across a crash and undo it on the next launch
-/// (`recoveryActions`).
+/// Muting uses the device's mute control when it has one, otherwise turns its input volume to 0. Either way
+/// the state records what the device was like before. Undoing is two steps, because the write can fail:
+/// `restoreActions()` says what to write, and `commitRestore()` forgets the record once every write took.
+/// Until then the record (and the mute) stay. A muted device that is unplugged, or that can't be put back
+/// right now, is `setAside()` into `pending`; `pendingWork` undoes it when the device is back, provided it is
+/// still exactly as Orbit left it. A mic that was already muted, or at volume 0, before Orbit's mute is left
+/// that way: Orbit never "restores" a mute it did not apply. Codable, so the app keeps the record across a
+/// crash and finishes the job on the next launch (`fromPreviousRun`).
 public struct MicMuteState: Codable, Equatable, Sendable {
     /// How Orbit muted the device, with what it needs to undo it.
     public enum Method: Codable, Equatable, Sendable {
@@ -51,6 +64,8 @@ public struct MicMuteState: Codable, Equatable, Sendable {
 
     /// What Orbit's mute did, while it is in effect.
     public private(set) var applied: Applied?
+    /// Mutes Orbit applied to devices that went away, or couldn't be put back yet: undone when possible.
+    public private(set) var pending: [Applied] = []
 
     public init() {}
 
@@ -60,14 +75,31 @@ public struct MicMuteState: Codable, Equatable, Sendable {
     /// The device Orbit muted.
     public var deviceUID: String? { applied?.deviceUID }
 
+    /// Whether there is anything to keep across a crash: a mute in effect or one waiting to be undone.
+    public var hasRecord: Bool { applied != nil || !pending.isEmpty }
+
     /// Volumes at or below this count as silent.
     private static let silent: Float = 0.001
 
+    // MARK: Muting
+
     /// Mutes the device described by `reading` and remembers its previous state. Returns the actions to
     /// perform (empty when Orbit's mute is already in effect, or the device was already silent), or nil
-    /// when the device can't be muted at all.
+    /// when the device can't be muted at all. A device still on record in `pending` keeps that original
+    /// state, so the later unmute really puts it back.
     public mutating func mute(_ reading: MicDeviceReading) -> [MicMuteAction]? {
         guard applied == nil else { return [] }
+        if let index = pending.firstIndex(where: { $0.deviceUID == reading.deviceUID }) {
+            let earlier = pending.remove(at: index)
+            applied = earlier
+            switch earlier.method {
+            case .muteFlag:
+                return reading.canSetMute && !reading.isMuted ? [.setMute(deviceUID: reading.deviceUID, muted: true)] : []
+            case .volume:
+                let quiet = (reading.volume ?? 0) <= Self.silent
+                return reading.canSetVolume && !quiet ? [.setVolume(deviceUID: reading.deviceUID, volume: 0)] : []
+            }
+        }
         if reading.canSetMute {
             applied = Applied(deviceUID: reading.deviceUID, method: .muteFlag(wasMuted: reading.isMuted))
             return reading.isMuted ? [] : [.setMute(deviceUID: reading.deviceUID, muted: true)]
@@ -79,22 +111,32 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         return nil
     }
 
-    /// Ends Orbit's mute: the actions that put the device back as it was before (none when Orbit's mute is
-    /// not in effect, or the mic was already muted before it). Forgets the record.
-    public mutating func restore() -> [MicMuteAction] {
-        guard let applied else { return [] }
-        self.applied = nil
-        return Self.undo(applied)
+    // MARK: Unmuting
+
+    /// The actions that put the muted device back as it was before Orbit's mute (none when Orbit's mute is not
+    /// in effect, or the mic was already muted before it). Does not forget anything: write them, then call
+    /// `commitRestore()` once they all took; on failure keep the state (and the mute) as it is.
+    public func restoreActions() -> [MicMuteAction] {
+        applied.map(Self.undo) ?? []
     }
 
-    /// The default input device changed to `reading` (nil: none) while Orbit's mute is in effect: put the old
-    /// device back and mute the new one. When the new one can't be muted, the mute ends. No change of device,
-    /// or no mute in effect: nothing to do.
-    public mutating func retarget(to reading: MicDeviceReading?) -> [MicMuteAction] {
-        guard let applied, applied.deviceUID != reading?.deviceUID else { return [] }
-        var actions = restore()
-        if let reading, let muting = mute(reading) { actions += muting }
+    /// The restore was written: Orbit's mute is over.
+    public mutating func commitRestore() {
+        applied = nil
+    }
+
+    /// `restoreActions()` and `commitRestore()` in one, for callers whose writes can't fail.
+    public mutating func restore() -> [MicMuteAction] {
+        let actions = restoreActions()
+        commitRestore()
         return actions
+    }
+
+    /// The muted device is gone (or can't be put back now): keep its record in `pending` and end Orbit's mute.
+    public mutating func setAside() {
+        guard let applied else { return }
+        if !pending.contains(where: { $0.deviceUID == applied.deviceUID }) { pending.append(applied) }
+        self.applied = nil
     }
 
     /// The muted device changed outside Orbit. When the user unmuted it (mute control cleared, or volume
@@ -112,17 +154,60 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         return isMuted
     }
 
-    /// For a record left by a previous run (a crash while muted): the actions that undo it, provided the
-    /// device is connected and still exactly as Orbit left it (muted, or at volume 0). Otherwise none.
-    public static func recoveryActions(for record: MicMuteState, current: MicDeviceReading?) -> [MicMuteAction] {
-        guard let applied = record.applied, let current, current.deviceUID == applied.deviceUID else { return [] }
-        switch applied.method {
+    // MARK: Pending records
+
+    /// For each pending record whose device is connected (`reading` returns it): the actions that undo
+    /// Orbit's mute, empty when the device is no longer as Orbit left it (nothing to write; resolve it).
+    /// Devices that are not connected are left out (keep waiting).
+    public func pendingWork(reading: (String) -> MicDeviceReading?) -> [(deviceUID: String, actions: [MicMuteAction])] {
+        pending.compactMap { entry in
+            guard let current = reading(entry.deviceUID), current.deviceUID == entry.deviceUID else { return nil }
+            return (entry.deviceUID, Self.recoveryActions(for: entry, current: current))
+        }
+    }
+
+    /// The pending record for this device was dealt with (written, or found changed by the user).
+    public mutating func resolvePending(deviceUID: String) {
+        pending.removeAll { $0.deviceUID == deviceUID }
+    }
+
+    /// The state a new launch starts from, given the record the previous run left: nothing is in effect any
+    /// more, everything it had is pending.
+    public static func fromPreviousRun(_ record: MicMuteState) -> MicMuteState {
+        var state = MicMuteState()
+        state.pending = record.pending
+        if let applied = record.applied, !state.pending.contains(where: { $0.deviceUID == applied.deviceUID }) {
+            state.pending.append(applied)
+        }
+        return state
+    }
+
+    /// The actions that undo `entry` on its device as it is now: only while the device is still exactly as
+    /// Orbit left it (muted, or at volume 0), and never for a mute that was there before Orbit's.
+    public static func recoveryActions(for entry: Applied, current: MicDeviceReading) -> [MicMuteAction] {
+        switch entry.method {
         case .muteFlag:
             guard current.canSetMute, current.isMuted else { return [] }
         case .volume:
             guard current.canSetVolume, let volume = current.volume, volume <= silent else { return [] }
         }
-        return undo(applied)
+        return undo(entry)
+    }
+
+    // MARK: Live state
+
+    /// How the mic looks now, for the UI: Orbit's mute (in effect even while the device can't be read), a
+    /// mute made outside Orbit, unmuted, or nothing Orbit can mute.
+    public func presentation(for reading: MicDeviceReading?) -> MicMutePresentation {
+        if let applied, reading == nil || reading?.deviceUID == applied.deviceUID { return .mutedByOrbit }
+        guard let reading, reading.canSetMute || reading.canSetVolume else { return .unavailable }
+        return reading.canSetMute && reading.isMuted ? .mutedElsewhere : .unmuted
+    }
+
+    /// The user asked to unmute a mic that was muted outside Orbit: switch its mute control off (a direct user
+    /// action, never done on Orbit's own initiative). Empty when there's nothing to unmute.
+    public static func directUnmute(_ reading: MicDeviceReading) -> [MicMuteAction] {
+        reading.canSetMute && reading.isMuted ? [.setMute(deviceUID: reading.deviceUID, muted: false)] : []
     }
 
     private static func undo(_ applied: Applied) -> [MicMuteAction] {
@@ -132,5 +217,23 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         case .volume(let previous):
             return previous <= silent ? [] : [.setVolume(deviceUID: applied.deviceUID, volume: previous)]
         }
+    }
+
+    // MARK: Codable (records written before `pending` existed still decode)
+
+    private enum CodingKeys: String, CodingKey {
+        case applied, pending
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        applied = try c.decodeIfPresent(Applied.self, forKey: .applied)
+        pending = try c.decodeIfPresent([Applied].self, forKey: .pending) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(applied, forKey: .applied)
+        try c.encode(pending, forKey: .pending)
     }
 }

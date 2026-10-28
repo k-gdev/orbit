@@ -90,6 +90,7 @@ struct SoundPanelView: View {
 
     private var micCaption: String {
         let shortcut = micSettings.muteShortcut.display
+        if micMute.isMuted && !micMute.isMutedByOrbit { return "Muted outside Orbit · \(shortcut) to unmute" }
         if micMute.isMuted { return "Muted · \(shortcut) to unmute" }
         if !micMute.isAvailable { return model.inputs.isEmpty ? "No microphone" : "This microphone can't be muted" }
         return "On · \(shortcut) to mute"
