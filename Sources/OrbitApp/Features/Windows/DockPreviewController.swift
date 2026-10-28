@@ -104,7 +104,12 @@ final class DockPreviewController {
     /// ScreenCaptureKit windows (every Space), merges them (`PreviewWindowList`), shows the strip at once with
     /// title cards and fills in thumbnails as they are captured.
     private func show(_ pid: pid_t) {
-        guard let hover, hover.pid == pid else { return }
+        guard var hover, hover.pid == pid else { return }
+        // The frame reported at hover time can be stale by now (an auto-hiding Dock sliding in, magnification).
+        if let fresh = DockWatcher.currentIconFrame(of: hover) {
+            hover.iconFrame = fresh
+            self.hover = hover
+        }
         generation += 1
         let generation = generation
         let showMinimised = settings.showMinimised
