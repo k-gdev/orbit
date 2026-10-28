@@ -74,6 +74,7 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        settings.persistAppStates()
         subscriptions.removeAll()
         if #available(macOS 14.2, *) { engine?.stop() }
         engineBox = nil
@@ -92,6 +93,7 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
 
     func panelDidDisappear() {
         panelVisible = false
+        settings.persistAppStates()   // in case a drag didn't report its end
         if #available(macOS 14.2, *) { engine?.panelVisible = false }
     }
 
@@ -161,9 +163,11 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
         }
         let visible = AudioAppList.visible(candidates, pinned: settings.pinnedBundleIDs, customised: Set(settings.appStates.keys),
                                            showAll: settings.showAllApps, excluding: [Bundle.main.bundleIdentifier ?? "com.kevo.orbit"])
+        let failed = engine.failedBundleIDs
         model.apps = visible.compactMap { candidate in
             identities[candidate.bundleID].map {
-                SoundAppItem(identity: $0, isPlaying: candidate.isPlaying, followedOutputUID: engine.followedOutput(for: candidate.bundleID))
+                SoundAppItem(identity: $0, isPlaying: candidate.isPlaying, followedOutputUID: engine.followedOutput(for: candidate.bundleID),
+                             tapFailed: failed.contains(candidate.bundleID))
             }
         }
     }

@@ -14,6 +14,8 @@ import OrbitCore
 /// - A replacement tap (new device, new processes) is started before the old one is released, so the app
 ///   is never heard unattenuated in between.
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
+/// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
+///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
 /// - `stop()` releases everything and waits (bounded by `stopTimeout`) for the teardown; it runs when the
 ///   feature is turned off and from `applicationWillTerminate` via `FeatureRegistry.stopAll()`.
 @available(macOS 14.2, *)
@@ -35,6 +37,12 @@ final class SoundEngine {
     private var retiring: [ObjectIdentifier: AppAudioTap] = [:]
     private var failures: [String: TapKey] = [:]
     private var releases: [String: DispatchWorkItem] = [:]
+    /// The device each app last played on, kept while it is idle (`AppOutputMemory`).
+    private var outputMemory = AppOutputMemory()
+    /// Per tap: whether its app is quiet long enough to pause the aggregate (`TapActivity`).
+    private var activity: [String: TapActivity] = [:]
+    /// The one pending re-check of `activity` (a single one-shot, no polling).
+    private var activityCheck: DispatchWorkItem?
     private var subscriptions: Set<AnyCancellable> = []
     private var reconcileScheduled = false
     private(set) var isRunning = false
@@ -64,6 +72,11 @@ final class SoundEngine {
     /// The apps that currently have a tap.
     var tappedBundleIDs: Set<String> { Set(taps.keys) }
 
+    /// The apps whose tap couldn't be built (or stopped working): their setting is not applied, and their row
+    /// says so. Cleared when the device list or the permission changes, when the app's destination or
+    /// processes change (a new attempt), or when it no longer needs a tap.
+    var failedBundleIDs: Set<String> { Set(failures.keys) }
+
     func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -90,12 +103,18 @@ final class SoundEngine {
         releases.values.forEach { $0.cancel() }
         releases = [:]
         failures = [:]
+        outputMemory = AppOutputMemory()
+        activity = [:]
+        activityCheck?.cancel()
+        activityCheck = nil
         let all = Array(taps.values) + Array(retiring.values)
         taps = [:]
         retiring = [:]
         all.forEach { $0.invalidate() }
         let deadline = DispatchTime.now() + Self.stopTimeout
-        for tap in all where !tap.waitUntilIdle(deadline: deadline) {
+        // A tap paused for idleness may keep its queue in the re-armed start until the app's next sound; its IO
+        // isn't running (the app isn't muted) and its teardown runs right after, so don't wait for it.
+        for tap in all where !tap.isWaitingForAudio && !tap.waitUntilIdle(deadline: deadline) {
             Log.error("sound: teardown of \(tap.bundleID) is still pending after \(Self.stopTimeout) s")
         }
         if !all.isEmpty { Log.info("sound: released \(all.count) tap(s)") }
@@ -113,6 +132,9 @@ final class SoundEngine {
         guard isRunning else { return }
         if !monitor.isListening { monitor.refresh() }
         let available = Set(hardware.outputDevices.map(\.uid))
+        let running = monitor.apps()
+        for app in running.keys { _ = outputMemory.observe(app: app, deviceUIDs: monitor.outputDeviceUIDs(forApp: app), hasProcesses: true) }
+        outputMemory.forgetApps(notIn: Set(running.keys))
 
         var wanted: [String: (plan: TapPlan, key: TapKey)] = [:]
         if permissionGranted {
@@ -123,6 +145,12 @@ final class SoundEngine {
                 guard !processes.isEmpty else { continue }
                 wanted[bundleID] = (plan, TapKey(destination: destination, processes: processes))
             }
+        }
+
+        let staleFailures = failures.keys.filter { wanted[$0] == nil }
+        if !staleFailures.isEmpty {
+            staleFailures.forEach { failures[$0] = nil }
+            onAppsChanged?()
         }
 
         for (bundleID, tap) in taps where wanted[bundleID] == nil {
@@ -149,13 +177,41 @@ final class SoundEngine {
             build(bundleID, key: want.key, gain: want.plan.gain)
         }
         updateListening()
+        updateActivity()
+    }
+
+    /// Pauses the aggregate of every tap whose app has been quiet for `TapActivity.idleDelay`, and schedules
+    /// the next look for the earliest pending quiet spell. Playing again needs nothing from here: the re-armed
+    /// aggregate restarts with the app's audio.
+    private func updateActivity() {
+        activityCheck?.cancel()
+        activityCheck = nil
+        guard isRunning else { return }
+        let apps = monitor.apps()
+        let now = Date()
+        var next: Date?
+        for (bundleID, tap) in taps {
+            let playing = apps[bundleID]?.isPlaying ?? false
+            var state = activity[bundleID] ?? TapActivity(now: now, isPlaying: playing)
+            if state.update(isPlaying: playing, now: now) == .pause { tap.pauseUntilNextAudio() }
+            activity[bundleID] = state
+            if let check = state.nextCheck() { next = min(next ?? check, check) }
+        }
+        activity = activity.filter { taps[$0.key] != nil }
+        guard let next else { return }
+        let work = DispatchWorkItem { [weak self] in self?.updateActivity() }
+        activityCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(next.timeIntervalSince(now), 0.05), execute: work)
     }
 
     /// Where "Same as Output" keeps this app: the device it plays to on its own (an app that chose one in its
-    /// own settings), otherwise the system output (`TapPlan.followedOutput`).
+    /// own settings), otherwise the system output (`TapPlan.followedOutput`). While the app is idle Core
+    /// Audio reports no device, so the last one it played on is used until its processes go away.
     func followedOutput(for bundleID: String) -> String? {
-        TapPlan.followedOutput(appDeviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID), systemOutputUID: hardware.defaultOutputUID,
-                               availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
+        let devices = outputMemory.observe(app: bundleID, deviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID),
+                                           hasProcesses: !monitor.processObjects(forApp: bundleID).isEmpty)
+        return TapPlan.followedOutput(appDeviceUIDs: devices, systemOutputUID: hardware.defaultOutputUID,
+                                      availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
     }
 
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
@@ -172,17 +228,21 @@ final class SoundEngine {
                                   retire()
                                   guard let self, let built, self.taps[bundleID] === built else { return }
                                   self.taps[bundleID] = nil
+                                  self.activity[bundleID] = nil
+                                  built.invalidate()
                                   self.failures[bundleID] = key
                                   self.onAppsChanged?()
                               })
         built = tap
         taps[bundleID] = tap
+        activity[bundleID] = TapActivity(now: Date(), isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
         onAppsChanged?()
     }
 
     private func release(_ bundleID: String) {
         cancelRelease(bundleID)
         guard let tap = taps.removeValue(forKey: bundleID) else { return }
+        activity[bundleID] = nil
         tap.invalidate()
         onAppsChanged?()
     }
@@ -221,6 +281,7 @@ final class PreferredMicWatcher {
     private var subscriptions: Set<AnyCancellable> = []
     private var lastSwitch = Date.distantPast
     private var checkScheduled = false
+    private var retryScheduled = false
 
     init(settings: SoundSettings, hardware: AudioHardware) {
         self.settings = settings
@@ -251,8 +312,17 @@ final class PreferredMicWatcher {
         let available = Set(hardware.inputDevices.map(\.uid))
         guard PreferredMicPolicy.shouldSwitchBack(currentUID: hardware.defaultInputUID, preferredUID: preferred,
                                                   availableUIDs: available, keep: settings.keepPreferredMic) else { return }
-        // One switch per two seconds at most, so a device that refuses can't start a tug of war.
-        guard Date().timeIntervalSince(lastSwitch) > 2 else { return }
+        // One switch per throttle window at most, so a device that refuses can't start a tug of war. A change
+        // inside the window is looked at again when it ends instead of being dropped.
+        if let delay = PreferredMicPolicy.retryDelay(lastSwitch: lastSwitch, now: Date()) {
+            guard !retryScheduled else { return }
+            retryScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.05) { [weak self] in
+                self?.retryScheduled = false
+                self?.scheduleCheck()
+            }
+            return
+        }
         lastSwitch = Date()
         Log.info("sound: input moved to \(hardware.defaultInputUID ?? "none"); switching back to the preferred microphone")
         hardware.setDefaultInput(uid: preferred)

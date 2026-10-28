@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import OrbitCore
@@ -226,6 +227,19 @@ import Testing
         #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: "", availableUIDs: available, keep: true))
     }
 
+    /// At most one switch per throttle window; a change that arrives inside it is retried when the window ends
+    /// (not dropped, or a second quick switch by macOS would stick).
+    @Test func preferredMicThrottleRetriesInsteadOfDropping() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 500)
+        typealias P = PreferredMicPolicy
+        #expect(P.retryDelay(lastSwitch: .distantPast, now: t0) == nil)            // never switched: go now
+        #expect(P.retryDelay(lastSwitch: t0, now: t0.addingTimeInterval(P.throttle + 0.01)) == nil)
+        let delay = P.retryDelay(lastSwitch: t0, now: t0.addingTimeInterval(0.5))
+        #expect(delay != nil)
+        #expect(abs((delay ?? 0) - (P.throttle - 0.5)) < 0.001)                   // look again when it ends
+        #expect(P.retryDelay(lastSwitch: t0, now: t0) == P.throttle)
+    }
+
     /// Kevo's Mac has two monitors both called "P27u-20": the menus must tell them apart.
     @Test func duplicateDeviceNamesAreNumbered() {
         let devices = [
@@ -271,6 +285,32 @@ import Testing
         #expect(AudioTransport(fourCC: 0x6772_7570) == .aggregate)    // 'grup'
         #expect(AudioTransport(fourCC: 0) == .unknown)
         #expect(device("x", .usb, input: 1, output: 0).hasInput && !device("x", .usb, input: 1, output: 0).hasOutput)
+    }
+
+    /// A volume drag changes the state live (the engine follows it) but writes defaults only when it ends.
+    @Test func settingsDeferWritesDuringDrag() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let s = SoundSettings(defaults: d)
+        var published = 0
+        let watch = s.$appStates.dropFirst().sink { _ in published += 1 }
+        for volume in stride(from: 99.0, through: 80, by: -1) {
+            s.setPreference(AppAudioPreference(volume: volume), for: "com.apple.Music", persist: false)
+        }
+        #expect(published == 20)                              // every tick is live
+        #expect(s.preference(for: "com.apple.Music").volume == 80)
+        #expect(d.data(forKey: "sound.appStates") == nil)     // but nothing was written yet
+        s.persistAppStates()
+        #expect(SoundSettings(defaults: d).preference(for: "com.apple.Music").volume == 80)
+        // Ordinary changes (mute, output, reset) still write at once.
+        s.setPreference(AppAudioPreference(volume: 80, muted: true), for: "com.apple.Music")
+        #expect(SoundSettings(defaults: d).preference(for: "com.apple.Music").muted)
+        // With "remember" off, finishing a drag writes nothing.
+        s.rememberAppStates = false
+        s.setPreference(AppAudioPreference(volume: 30), for: "com.apple.Music", persist: false)
+        s.persistAppStates()
+        #expect(d.data(forKey: "sound.appStates") == nil)
+        watch.cancel()
     }
 
     @Test func settingsRejectBadData() throws {
@@ -348,28 +388,126 @@ extension SoundTests {
             let r12 = state.restore(); #expect(r12 == [])
         }
 
-        /// macOS switched the input while muted: the old mic is put back, the new one is muted.
+        /// macOS switched the input while muted: the old mic is put back (or kept on record if it's gone), the
+        /// new one is muted.
         @Test func followsInputChange() {
             var state = MicMuteState()
             _ = state.mute(headset)
             let builtIn = MicDeviceReading(deviceUID: "BuiltIn", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
-            let r13 = state.retarget(to: builtIn); #expect(r13 == [.setMute(deviceUID: "Headset", muted: false), .setMute(deviceUID: "BuiltIn", muted: true)])
+            // Old device still there: write its restore, commit, mute the new one.
+            let r13 = state.restoreActions(); #expect(r13 == [.setMute(deviceUID: "Headset", muted: false)])
+            state.commitRestore()
+            let r14 = state.mute(builtIn); #expect(r14 == [.setMute(deviceUID: "BuiltIn", muted: true)])
             #expect(state.deviceUID == "BuiltIn")
-            // To a device Orbit can't mute: the old one is restored and the mute ends.
+            // Old device unplugged: its record is set aside, the mute moves on.
+            state.setAside()
+            #expect(!state.isMuted)
+            #expect(state.pending.map(\.deviceUID) == ["BuiltIn"])
+            let r15 = state.mute(headset); #expect(r15 == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.deviceUID == "Headset")
+            #expect(state.hasRecord)
+            // To a device Orbit can't mute: the mute ends; nothing pretends otherwise.
             let fixed = MicDeviceReading(deviceUID: "Fixed", canSetMute: false, isMuted: false, canSetVolume: false, volume: nil)
-            let r14 = state.retarget(to: fixed); #expect(r14 == [.setMute(deviceUID: "BuiltIn", muted: false)])
+            state.commitRestore()
+            let r16 = state.mute(fixed); #expect(r16 == nil)
             #expect(!state.isMuted)
-            // Not muted: following the input does nothing.
-            let r15 = state.retarget(to: headset); #expect(r15 == [])
-            #expect(!state.isMuted)
-            // To no device at all.
+        }
+
+        /// I1: an unmute whose write fails keeps everything: the record (to retry, and to survive a quit), the
+        /// mute itself. Only a successful write forgets it.
+        @Test func unmuteFailureKeepsRecord() throws {
+            var state = MicMuteState()
             _ = state.mute(headset)
-            let r16 = state.retarget(to: nil); #expect(r16 == [.setMute(deviceUID: "Headset", muted: false)])
-            #expect(!state.isMuted)
-            // Same device again (a spurious notification): nothing to do.
-            _ = state.mute(headset)
-            let r17 = state.retarget(to: headset); #expect(r17 == [])
+            let first = state.restoreActions()
+            let again = state.restoreActions()
+            #expect(first == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(again == first)                                  // asking doesn't forget
             #expect(state.isMuted)
+            #expect(state.hasRecord)
+            let kept = try JSONDecoder().decode(MicMuteState.self, from: JSONEncoder().encode(state))
+            #expect(kept == state)                                   // what a failed quit leaves for next launch
+            let fromLaunch = MicMuteState.fromPreviousRun(kept)
+            var stillMuted = headset
+            stillMuted.isMuted = true
+            let work = fromLaunch.pendingWork { $0 == "Headset" ? stillMuted : nil }
+            #expect(work.map(\.deviceUID) == ["Headset"])
+            #expect(work.first?.actions == [.setMute(deviceUID: "Headset", muted: false)])
+            state.commitRestore()
+            #expect(!state.isMuted)
+            #expect(!state.hasRecord)
+            #expect(state.restoreActions() == [])
+        }
+
+        /// M3: the muted mic is unplugged. Its record is kept until it comes back, then it is unmuted, as long as
+        /// it is still as Orbit left it.
+        @Test func deviceGoneKeepsRecordUntilItReturns() {
+            var state = MicMuteState()
+            _ = state.mute(headset)
+            state.setAside()
+            #expect(!state.isMuted)
+            #expect(state.hasRecord)
+            #expect(state.pendingWork { _ in nil }.isEmpty)          // still gone: nothing to do, keep waiting
+            var backMuted = headset
+            backMuted.isMuted = true
+            let work = state.pendingWork { $0 == "Headset" ? backMuted : nil }
+            #expect(work.count == 1)
+            #expect(work.first?.actions == [.setMute(deviceUID: "Headset", muted: false)])
+            state.resolvePending(deviceUID: "Headset")
+            #expect(!state.hasRecord)
+            // Back already unmuted (by the user, or by the device itself): resolved with nothing to write.
+            _ = state.mute(headset)
+            state.setAside()
+            let unmuted = state.pendingWork { $0 == "Headset" ? headset : nil }
+            #expect(unmuted.first?.actions == [])
+            // A volume-muted device back at 0 gets its volume back.
+            var volumeState = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            _ = volumeState.mute(noMute)
+            volumeState.setAside()
+            var atZero = noMute
+            atZero.volume = 0
+            #expect(volumeState.pendingWork { _ in atZero }.first?.actions == [.setVolume(deviceUID: "USB", volume: 0.62)])
+        }
+
+        /// The default input comes back to a mic that is still on record while Orbit's mute is on: muting it again
+        /// keeps its original state, so the later unmute really unmutes it.
+        @Test func remutingAPendingDeviceKeepsItsOriginalState() {
+            var state = MicMuteState()
+            _ = state.mute(headset)                                  // headset was unmuted before Orbit
+            state.setAside()
+            var backMuted = headset
+            backMuted.isMuted = true
+            let r = state.mute(backMuted)
+            #expect(r == [])                                         // already muted
+            #expect(state.pending.isEmpty)
+            #expect(state.restoreActions() == [.setMute(deviceUID: "Headset", muted: false)])
+        }
+
+        /// M2: the mic's live state, whoever muted it. A mute made outside Orbit shows as such; a direct unmute
+        /// clears it, and Orbit never "restores" it on its own.
+        @Test func liveStateShowsOutsideMute() {
+            var state = MicMuteState()
+            var mutedElsewhere = headset
+            mutedElsewhere.isMuted = true
+            let fixed = MicDeviceReading(deviceUID: "Fixed", canSetMute: false, isMuted: false, canSetVolume: false, volume: nil)
+            #expect(state.presentation(for: headset) == .unmuted)
+            #expect(state.presentation(for: mutedElsewhere) == .mutedElsewhere)
+            #expect(state.presentation(for: fixed) == .unavailable)
+            #expect(state.presentation(for: nil) == .unavailable)
+            #expect(MicMuteState.directUnmute(mutedElsewhere) == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(MicMuteState.directUnmute(headset) == [])
+            #expect(state.restoreActions() == [])                    // nothing of Orbit's to restore
+            _ = state.mute(headset)
+            #expect(state.presentation(for: mutedElsewhere) == .mutedByOrbit)
+            #expect(state.presentation(for: nil) == .mutedByOrbit)   // still in effect while unreadable
+            // Volume-muted by Orbit: muted, although the device has no mute control.
+            var volumeState = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            _ = volumeState.mute(noMute)
+            var atZero = noMute
+            atZero.volume = 0
+            #expect(volumeState.presentation(for: atZero) == .mutedByOrbit)
+            #expect(MicMuteState().presentation(for: atZero) == .unmuted)
         }
 
         /// The user unmuted the mic outside Orbit: Orbit stops holding the mute and has nothing to restore.
@@ -404,27 +542,33 @@ extension SoundTests {
             _ = state.mute(headset)
             let record = try JSONDecoder().decode(MicMuteState.self, from: JSONEncoder().encode(state))
             #expect(record == state)
+            let launch = MicMuteState.fromPreviousRun(record)
+            #expect(!launch.isMuted)                                 // nothing is "in effect" for the new run
+            #expect(launch.pending.map(\.deviceUID) == ["Headset"])
             var mutedNow = headset
             mutedNow.isMuted = true
-            #expect(MicMuteState.recoveryActions(for: record, current: mutedNow) == [.setMute(deviceUID: "Headset", muted: false)])
-            #expect(MicMuteState.recoveryActions(for: record, current: headset) == [])
-            #expect(MicMuteState.recoveryActions(for: record, current: nil) == [])
-            var other = mutedNow
-            other.deviceUID = "Other"
-            #expect(MicMuteState.recoveryActions(for: record, current: other) == [])
-            #expect(MicMuteState.recoveryActions(for: MicMuteState(), current: mutedNow) == [])
+            #expect(launch.pendingWork { _ in mutedNow }.first?.actions == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(launch.pendingWork { _ in headset }.first?.actions == [])     // the user unmuted it: resolve
+            #expect(launch.pendingWork { _ in nil }.isEmpty)                      // not connected: keep the record
+            #expect(MicMuteState.fromPreviousRun(MicMuteState()).pendingWork { _ in mutedNow }.isEmpty)
 
             var volumeState = MicMuteState()
             let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
             _ = volumeState.mute(noMute)
             var atZero = noMute
             atZero.volume = 0
-            #expect(MicMuteState.recoveryActions(for: volumeState, current: atZero) == [.setVolume(deviceUID: "USB", volume: 0.62)])
-            #expect(MicMuteState.recoveryActions(for: volumeState, current: noMute) == [])
+            let volumeLaunch = MicMuteState.fromPreviousRun(volumeState)
+            #expect(volumeLaunch.pendingWork { _ in atZero }.first?.actions == [.setVolume(deviceUID: "USB", volume: 0.62)])
+            #expect(volumeLaunch.pendingWork { _ in noMute }.first?.actions == [])
             // A user mute that was already there before Orbit is never undone.
             var userMuted = MicMuteState()
             _ = userMuted.mute(mutedNow)
-            #expect(MicMuteState.recoveryActions(for: userMuted, current: mutedNow) == [])
+            #expect(MicMuteState.fromPreviousRun(userMuted).pendingWork { _ in mutedNow }.first?.actions == [])
+            // Records written before `pending` existed still decode.
+            let legacy = #"{"applied":{"deviceUID":"Headset","method":{"muteFlag":{"wasMuted":false}}}}"#
+            let decoded = try JSONDecoder().decode(MicMuteState.self, from: Data(legacy.utf8))
+            #expect(decoded.deviceUID == "Headset")
+            #expect(decoded.pending.isEmpty)
         }
     }
 }
@@ -505,7 +649,8 @@ extension SoundTests {
             let available: Set<String> = ["Headset", "Speakers", "Display"]
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
-            // Not playing (no device yet), playing on several, or on something not in the list: the system output.
+            // Nothing reported yet (the app never played this run), playing on several, or on something not in the
+            // list: the system output. (While an app is merely idle, `AppOutputMemory` keeps its last device.)
             #expect(TapPlan.followedOutput(appDeviceUIDs: [], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Display"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["com.kevo.orbit.tap.1"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
@@ -516,6 +661,66 @@ extension SoundTests {
             let quieter = TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: own, availableOutputUIDs: available)
             #expect(quieter.destinationUID == "Headset")
             #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: own, availableOutputUIDs: available).needsTap)
+        }
+
+        /// Core Audio reports no devices for an idle process. Discord on the headset going quiet between pings
+        /// must stay planned on the headset, not flip to the speakers and back on every ping.
+        @Test func sameAsOutputSurvivesIdle() {
+            let available: Set<String> = ["Headset", "Speakers"]
+            var memory = AppOutputMemory()
+            func plan(_ devices: [String], running: Bool = true) -> TapPlan {
+                let seen = memory.observe(app: "com.hnc.Discord", deviceUIDs: devices, hasProcesses: running)
+                let own = TapPlan.followedOutput(appDeviceUIDs: seen, systemOutputUID: "Speakers", availableOutputUIDs: available)
+                return TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: own, availableOutputUIDs: available)
+            }
+            #expect(plan(["Headset"]).destinationUID == "Headset")     // playing
+            #expect(plan([]).destinationUID == "Headset")              // idle: still the headset
+            #expect(plan(["Headset"]).destinationUID == "Headset")     // playing again: no change
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Headset"])
+            // Routed to its own device while idle: still no tap.
+            let seen = memory.observe(app: "com.hnc.Discord", deviceUIDs: [], hasProcesses: true)
+            let own = TapPlan.followedOutput(appDeviceUIDs: seen, systemOutputUID: "Speakers", availableOutputUIDs: available)
+            #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: own, availableOutputUIDs: available).needsTap)
+            // The app switches device in its own settings: follow it.
+            #expect(plan(["Speakers"]).destinationUID == "Speakers")
+            #expect(plan([]).destinationUID == "Speakers")
+            // Its processes are gone: forgotten, back to the system output next time.
+            #expect(plan([], running: false).destinationUID == "Speakers")
+            #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
+            _ = memory.observe(app: "com.hnc.Discord", deviceUIDs: ["Headset"], hasProcesses: true)
+            _ = memory.observe(app: "com.google.Chrome", deviceUIDs: ["Speakers"], hasProcesses: true)
+            memory.forgetApps(notIn: ["com.google.Chrome"])
+            #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
+            #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
+        }
+
+        /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
+        /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
+        @Test func tapPausesAfterIdleDelay() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var activity = TapActivity(now: t0, isPlaying: true)
+            #expect(activity.update(isPlaying: true, now: at(1)) == nil)
+            #expect(activity.nextCheck() == nil)                       // playing: nothing to wait for
+            #expect(activity.update(isPlaying: false, now: at(10)) == nil)
+            #expect(activity.nextCheck() == at(10 + TapActivity.idleDelay))
+            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay - 0.1)) == nil)
+            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay)) == .pause)
+            #expect(activity.isPaused)
+            #expect(activity.nextCheck() == nil)
+            #expect(activity.update(isPlaying: false, now: at(60)) == nil)  // already paused: once per quiet spell
+            // Playing again: running, and the next quiet spell counts from when it stops.
+            #expect(activity.update(isPlaying: true, now: at(61)) == nil)
+            #expect(!activity.isPaused)
+            #expect(activity.update(isPlaying: true, now: at(90)) == nil)
+            #expect(activity.update(isPlaying: false, now: at(100)) == nil)
+            #expect(activity.nextCheck() == at(100 + TapActivity.idleDelay))
+            #expect(activity.update(isPlaying: false, now: at(100 + TapActivity.idleDelay)) == .pause)
+            // A tap built while its app is quiet starts counting at once.
+            var quiet = TapActivity(now: t0, isPlaying: false)
+            #expect(quiet.nextCheck() == at(TapActivity.idleDelay))
+            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == .pause)
+            #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
         }
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).

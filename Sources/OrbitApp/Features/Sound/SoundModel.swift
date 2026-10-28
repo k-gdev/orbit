@@ -24,6 +24,8 @@ struct SoundAppItem: Identifiable {
     /// Where the app plays when set to Same as Output (its own device choice, else the system output);
     /// nil = the system output.
     var followedOutputUID: String?
+    /// Orbit couldn't take over this app's audio, so its volume and output are not applied.
+    var tapFailed = false
     var id: String { identity.bundleID }
     var bundleID: String { identity.bundleID }
     var name: String { identity.name }
@@ -109,10 +111,16 @@ final class SoundPanelModel: ObservableObject {
 
     func preference(for bundleID: String) -> AppAudioPreference { settings.preference(for: bundleID) }
 
+    /// Each tick of a drag: live (the engine follows it), written to defaults by `finishVolumeChange()`.
     func setVolume(_ percent: Double, for bundleID: String) {
         var preference = settings.preference(for: bundleID)
         preference.volume = percent.rounded()
-        settings.setPreference(preference, for: bundleID)
+        settings.setPreference(preference, for: bundleID, persist: false)
+    }
+
+    /// The drag (or scroll) ended: write the per-app states once.
+    func finishVolumeChange() {
+        settings.persistAppStates()
     }
 
     func toggleMute(_ bundleID: String) {

@@ -162,6 +162,21 @@ import Testing
         #expect(L.tapBuffers(aggregateInputs: [1], deviceInputs: [1, 1], tapChannels: 2) == nil)
     }
 
+    /// A device whose own input looks like the tap (a stereo mic or line input next to a stereo tap) makes
+    /// "device first" and "tap first" indistinguishable: refuse rather than guess, so its input can never be
+    /// played out as if it were the app.
+    @Test func ambiguousTapStreamLayoutIsRefused() {
+        typealias L = TapStreamLayout
+        #expect(L.tapBuffers(aggregateInputs: [2, 2], deviceInputs: [2], tapChannels: 2) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [1, 1], deviceInputs: [1], tapChannels: 1) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [2, 2, 2], deviceInputs: [2, 2], tapChannels: 2) == nil)
+        // Same shapes in both orders but the same answer either way is still fine: no device inputs at all.
+        #expect(L.tapBuffers(aggregateInputs: [2], deviceInputs: [], tapChannels: 2) == 0..<1)
+        // Distinguishable shapes keep working.
+        #expect(L.tapBuffers(aggregateInputs: [2, 1], deviceInputs: [2], tapChannels: 1) == 1..<2)
+        #expect(L.tapBuffers(aggregateInputs: [1, 2], deviceInputs: [2], tapChannels: 1) == 0..<1)
+    }
+
     /// When the output wants more frames than the tap delivered, the rest is silence.
     @Test func shortInputLeavesSilentTail() {
         let input = Buffers(channels: [2], frames: 16) { _, _, _ in 0.5 }
