@@ -44,7 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.dragWatcher = dragWatcher
         let welcomeWindow = WelcomeWindowController(settings: settings)
         self.welcomeWindow = welcomeWindow
-        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator,
+        let registry = makeSuite(settings: settings, coordinator: coordinator)
+        self.registry = registry
+        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator, registry: registry,
                                                       showWelcome: { welcomeWindow.show() })
         self.settingsWindow = settingsWindow
         let windowController = WheelWindowController(wheel: wheel)
@@ -53,15 +55,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         servicesProvider = provider
         NSApp.servicesProvider = provider
         NSUpdateDynamicServices()
-        let registry = makeSuite(settings: settings, coordinator: coordinator)
-        self.registry = registry
         let statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
                                                         windowController: windowController, registry: registry,
-                                                        showSettings: { _ in settingsWindow.show() })
+                                                        showSettings: { page in settingsWindow.show(page: page) })
         self.statusItemController = statusItemController
-        registry.context.openSettings = { [weak statusItemController] _ in
+        registry.context.openSettings = { [weak statusItemController] page in
             statusItemController?.closePanel()
-            settingsWindow.show()
+            settingsWindow.show(page: page)
         }
         registry.context.closePanel = { [weak statusItemController] in statusItemController?.closePanel() }
         registry.startEnabled()
