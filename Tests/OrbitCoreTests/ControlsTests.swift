@@ -500,3 +500,68 @@ extension ControlsTests {
         }
     }
 }
+
+// MARK: - Settings
+
+extension ControlsTests {
+    @Suite struct ControlsSettingsTests {
+        @Test func settingsRoundTrip() {
+            let (d, cleanup) = Fixtures.defaults()
+            defer { cleanup() }
+            let s = ControlsSettings(defaults: d)
+            #expect(s.keepDisplayAwake == false)
+            #expect(s.customDuration == 45 * 60)
+            #expect(s.lastMode == nil)
+            #expect(s.grabTextShortcut == .grabTextDefault)
+            #expect(s.focusShortcutName == nil)
+            #expect(s.visibleToggles == QuickToggleID.allCases)
+            #expect(s.restoreBook == QuickToggleRestoreBook())
+
+            let until = Date(timeIntervalSince1970: 1_800_000_000)
+            var book = QuickToggleRestoreBook()
+            _ = book.turnOn(.hideDesktopIcons, current: .absent)
+            s.keepDisplayAwake = true
+            s.customDuration = 90 * 60
+            s.lastMode = .until(until)
+            s.grabTextShortcut = KeyCombo(keyCode: 17, modifiers: [.control, .option])
+            s.focusShortcutName = "Toggle Do Not Disturb"
+            s.visibleToggles = [.micMute, .darkMode]
+            s.restoreBook = book
+
+            let r = ControlsSettings(defaults: d)
+            #expect(r.keepDisplayAwake)
+            #expect(r.customDuration == 90 * 60)
+            #expect(r.lastMode == .until(until))
+            #expect(r.grabTextShortcut == KeyCombo(keyCode: 17, modifiers: [.control, .option]))
+            #expect(r.focusShortcutName == "Toggle Do Not Disturb")
+            #expect(r.visibleToggles == [.darkMode, .micMute])   // always in grid order
+            #expect(r.restoreBook == book)
+            // Keys carry the feature prefix.
+            #expect(d.object(forKey: "controls.keepDisplayAwake") as? Bool == true)
+            #expect(d.data(forKey: "controls.grabTextShortcut") != nil)
+
+            r.focusShortcutName = nil
+            r.lastMode = nil
+            #expect(ControlsSettings(defaults: d).focusShortcutName == nil)
+            #expect(ControlsSettings(defaults: d).lastMode == nil)
+        }
+
+        @Test func badStoredValuesFallBack() {
+            let (d, cleanup) = Fixtures.defaults()
+            defer { cleanup() }
+            d.set(Data("junk".utf8), forKey: "controls.grabTextShortcut")
+            d.set(Data("junk".utf8), forKey: "controls.lastMode")
+            d.set(["micMute", "teleporter"], forKey: "controls.visibleToggles")
+            d.set(5.0, forKey: "controls.customDuration")
+            d.set("   ", forKey: "controls.focusShortcutName")
+            let s = ControlsSettings(defaults: d)
+            #expect(s.grabTextShortcut == .grabTextDefault)
+            #expect(s.lastMode == nil)
+            #expect(s.visibleToggles == [.micMute])
+            #expect(s.customDuration == 60)            // clamped to 1 min … 24 h
+            #expect(s.focusShortcutName == nil)        // a blank name is no Shortcut
+            s.customDuration = 100 * 3600
+            #expect(ControlsSettings(defaults: d).customDuration == 24 * 3600)
+        }
+    }
+}
