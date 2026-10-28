@@ -302,6 +302,65 @@ import Testing
         #expect(WindowListing.displayTitle(nil, appName: "Mail") == "Mail")
     }
 
+    // MARK: Dock preview window list (Accessibility + ScreenCaptureKit)
+
+    private let big = CGSize(width: 900, height: 600)
+
+    private func axInfo(_ number: Int?, _ title: String, minimised: Bool = false, subrole: String? = "AXStandardWindow",
+                        x: CGFloat = 0) -> AccessibilityWindowInfo {
+        AccessibilityWindowInfo(number: number, title: title, frame: CGRect(origin: CGPoint(x: x, y: 0), size: big),
+                                isMinimised: minimised, subrole: subrole)
+    }
+
+    private func capture(_ number: Int, _ title: String?, onScreen: Bool, size: CGSize? = nil, layer: Int = 0,
+                         x: CGFloat = 0) -> CaptureWindowInfo {
+        CaptureWindowInfo(number: number, title: title, frame: CGRect(origin: CGPoint(x: x, y: 0), size: size ?? big),
+                          isOnScreen: onScreen, layer: layer)
+    }
+
+    private func shape(_ entries: [PreviewWindowEntry]) -> [String] {
+        entries.map { "\($0.accessibilityIndex.map(String.init) ?? "-")/\($0.captureIndex.map(String.init) ?? "-")" }
+    }
+
+    /// Accessibility only sees the current Space (and minimised windows): windows ScreenCaptureKit finds
+    /// elsewhere (another Space, full screen) are added after them. Helpers, tiny windows, other layers and
+    /// windows already matched to Accessibility are not.
+    @Test func previewListAddsWindowsOnOtherSpaces() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Parked", minimised: true), axInfo(8, "Colors", subrole: "AXFloatingWindow")]
+        let sck = [capture(1, "Front", onScreen: true),
+                   capture(2, "Parked", onScreen: false),
+                   capture(3, "Spec — Full Screen", onScreen: false),
+                   capture(4, nil, onScreen: false),                                        // untitled helper
+                   capture(5, "Tooltip", onScreen: false, size: CGSize(width: 20, height: 20)), // too small
+                   capture(6, "Panel", onScreen: true),                                     // on screen, not a listed window
+                   capture(7, "Overlay", onScreen: false, layer: 3),                        // not a normal window
+                   capture(8, "Colors", onScreen: false)]                                   // the palette Accessibility skipped
+        let entries = PreviewWindowList.merge(accessibility: ax, capture: sck, showMinimised: true)
+        #expect(shape(entries) == ["0/0", "1/1", "-/2"])
+        #expect(entries.map(\.isElsewhere) == [false, false, true])
+        #expect(entries[2].title == "Spec — Full Screen")
+        #expect(entries.map(\.isMinimised) == [false, true, false])
+    }
+
+    /// With minimised windows hidden, a minimised window doesn't sneak back in as an "elsewhere" window.
+    @Test func previewListHidesMinimisedEverywhere() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Parked", minimised: true)]
+        let sck = [capture(1, "Front", onScreen: true), capture(2, "Parked", onScreen: false),
+                   capture(3, "Elsewhere", onScreen: false)]
+        #expect(shape(PreviewWindowList.merge(accessibility: ax, capture: sck, showMinimised: false)) == ["0/0", "-/2"])
+        // Without window numbers from Accessibility, title and frame still pair them up.
+        let unnumbered = [axInfo(nil, "Front"), axInfo(nil, "Parked", minimised: true, x: 300)]
+        let framed = [capture(1, "Front", onScreen: true), capture(2, "Parked", onScreen: false, x: 301)]
+        #expect(shape(PreviewWindowList.merge(accessibility: unnumbered, capture: framed, showMinimised: false)) == ["0/0"])
+    }
+
+    /// Without Screen Recording there is no capture list: Accessibility's windows only, no thumbnails.
+    @Test func previewListWithoutScreenRecording() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Back")]
+        #expect(shape(PreviewWindowList.merge(accessibility: ax, capture: [], showMinimised: true)) == ["0/-", "1/-"])
+        #expect(PreviewWindowList.merge(accessibility: [], capture: [], showMinimised: true).isEmpty)
+    }
+
     // MARK: Running apps
 
     private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
