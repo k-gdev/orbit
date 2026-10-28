@@ -36,7 +36,7 @@ public enum PauseReason: String, CaseIterable, Sendable {
         switch self {
         case .displayAsleep: "Display asleep"
         case .screenLocked: "Screen locked"
-        case .screenCovered: "Covered by a full-screen window"
+        case .screenCovered: "Hidden behind a window"
         case .lowPowerMode: "Low Power Mode"
         case .onBattery: "On battery"
         }
