@@ -44,6 +44,22 @@ public struct ShelfItems: Equatable, Sendable {
         urls.removeAll()
     }
 
+    /// Puts `new` where `old` is (a file that was found again at another path), keeping its place in the
+    /// order. If `new` is already on the shelf, `old` just goes. Returns false (and changes nothing) when `old`
+    /// is not on the shelf or `new` is not a file URL.
+    @discardableResult
+    public mutating func replace(_ old: URL, with new: URL) -> Bool {
+        guard new.isFileURL, let oldKey = Self.key(old),
+              let index = urls.firstIndex(where: { Self.key($0) == oldKey }) else { return false }
+        if Self.key(new) == oldKey { return true } // the same file: nothing to do
+        if contains(new) {
+            urls.remove(at: index)
+        } else {
+            urls[index] = new.standardizedFileURL
+        }
+        return true
+    }
+
     /// Drops the items `fileExists` says are gone (trashed or moved away). Returns the ones removed.
     @discardableResult
     public mutating func removeMissing(

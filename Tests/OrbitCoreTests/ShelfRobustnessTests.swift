@@ -81,6 +81,33 @@ import Testing
         #expect(ShelfAvailability.status(of: file, probe: ShelfAvailability.probe) == .missing)
     }
 
+    // MARK: Replacing an item in place (a file found again at a new path)
+
+    @Test func replaceKeepsTheItemsPlace() {
+        let a = Self.url("/tmp/shelf/a.txt"), b = Self.url("/tmp/shelf/b.txt"), c = Self.url("/tmp/shelf/c.txt")
+        var items = ShelfItems([a, b, c])
+        let moved = Self.url("/tmp/shelf/renamed.txt")
+        let replaced = items.replace(b, with: moved)
+        #expect(replaced)
+        #expect(items.urls == [a, moved, c])
+        // Replacing something that is not there does nothing.
+        let nothing = items.replace(Self.url("/tmp/shelf/zzz.txt"), with: Self.url("/tmp/shelf/y.txt"))
+        #expect(!nothing)
+        #expect(items.urls == [a, moved, c])
+        // If the new place is already on the shelf the old entry just goes (no duplicates).
+        let merged = items.replace(a, with: c)
+        #expect(merged)
+        #expect(items.urls == [moved, c])
+        // Replacing a file with itself leaves it alone.
+        let same = items.replace(c, with: Self.url("/tmp/shelf/x/../c.txt"))
+        #expect(same)
+        #expect(items.urls == [moved, c])
+        // A web URL is not a file, so nothing changes.
+        let web = items.replace(c, with: URL(string: "https://example.com/c.txt")!)
+        #expect(!web)
+        #expect(items.urls == [moved, c])
+    }
+
     // MARK: Shake poller (the wheel-style polling that replaces global drag events)
 
     /// x positions of a right-left zig-zag of `legs` legs of 100 pt, `samplesPerLeg` samples each.
