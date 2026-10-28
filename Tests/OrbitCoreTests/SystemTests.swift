@@ -245,4 +245,127 @@ import Testing
         #expect(UptimeFormatter.string(seconds: .nan) == "< 1 m")
         #expect(UptimeFormatter.string(seconds: 400 * day) == "400 d 0 h")
     }
+
+    // MARK: Batteries
+
+    /// The internal battery as `IOPSGetPowerSourceDescription` reports it on Kevo's Mac (on AC, full).
+    private static let internalBattery: [String: Any] = [
+        "Type": "InternalBattery", "Name": "InternalBattery-0", "Transport Type": "Internal",
+        "Current Capacity": 100, "Max Capacity": 100, "Is Charging": false, "Is Charged": true, "Is Present": true,
+        "Power Source State": "AC Power", "Time to Empty": 0, "Time to Full Charge": 0, "Power Source ID": 25_952_355,
+    ]
+
+    @Test func batteryParsesInternal() throws {
+        let full = try #require(BatteryParser.powerSources([Self.internalBattery]).first)
+        #expect(full.kind == .mac)
+        #expect(full.id == "internal")
+        #expect(full.percent == 100)
+        #expect(full.isCharged)
+        #expect(full.onPowerAdapter)
+        #expect(full.statusText == "Charged")
+
+        var charging = Self.internalBattery
+        charging["Current Capacity"] = 62
+        charging["Is Charging"] = true
+        charging["Is Charged"] = false
+        charging["Time to Full Charge"] = 65
+        let c = try #require(BatteryParser.powerSources([charging]).first)
+        #expect(c.percent == 62)
+        #expect(c.isCharging)
+        #expect(c.minutesToFull == 65)
+        #expect(c.statusText == "Charging · 1 h 5 m to full")
+
+        var onBattery = Self.internalBattery
+        onBattery["Current Capacity"] = 41
+        onBattery["Is Charged"] = false
+        onBattery["Power Source State"] = "Battery Power"
+        onBattery["Time to Empty"] = 200
+        let b = try #require(BatteryParser.powerSources([onBattery]).first)
+        #expect(!b.onPowerAdapter)
+        #expect(b.minutesToEmpty == 200)
+        #expect(b.statusText == "3 h 20 m left")
+        onBattery["Time to Empty"] = -1   // still calculating
+        #expect(BatteryParser.powerSources([onBattery]).first?.statusText == "On battery")
+
+        // Plugged in but held below full (optimised charging).
+        var held = Self.internalBattery
+        held["Current Capacity"] = 80
+        held["Is Charged"] = false
+        #expect(BatteryParser.powerSources([held]).first?.statusText == "Not charging")
+
+        // Capacity in mAh rather than percent still gives a percentage; an absent battery gives nothing.
+        var mAh = Self.internalBattery
+        mAh["Current Capacity"] = 3000
+        mAh["Max Capacity"] = 6000
+        #expect(BatteryParser.powerSources([mAh]).first?.percent == 50)
+        var absent = Self.internalBattery
+        absent["Is Present"] = false
+        #expect(BatteryParser.powerSources([absent]).isEmpty)
+        #expect(BatteryParser.powerSources([["Name": "junk"]]).isEmpty)
+    }
+
+    @Test func batteryParsesBluetoothAndDedupes() throws {
+        // Accessory power sources (IOPSCopyPowerSourcesByType) as they appear on Kevo's Mac.
+        let keyboard: [String: Any] = [
+            "Type": "Accessory Source", "Name": "MX KEYS S", "Accessory Category": "Keyboard",
+            "Accessory Identifier": "CA256F50", "Current Capacity": 10, "Max Capacity": 100, "Low Warn Level": 20,
+            "Power Source State": "Battery Power", "Transport Type": "Bluetooth LE",
+        ]
+        let airpodsCase: [String: Any] = [
+            "Type": "Accessory Source", "Name": "Kevo’s AirPods Case", "Accessory Category": "Audio Battery Case",
+            "Accessory Identifier": "7EEB8E78", "Group Identifier": "G1", "Part Identifier": "Case",
+            "Current Capacity": 35, "Max Capacity": 100, "Is Charging": false, "Is Present": true,
+        ]
+        let part = { (side: String, level: Int) -> [String: Any] in
+            ["Part Identifier": side, "Current Capacity": level, "Max Capacity": 100, "Is Charging": true]
+        }
+        let airpods: [String: Any] = [
+            "Type": "Accessory Source", "Name": "Kevo’s AirPods", "Accessory Category": "Headset",
+            "Accessory Identifier": "D3EDA881", "Group Identifier": "G1", "Part Identifier": "Combined",
+            "Current Capacity": 90, "Max Capacity": 100, "Is Charging": true, "Is Present": true,
+            "Combined Parts": [part("Left", 100), part("Right", 90)],
+        ]
+        // IORegistry HID devices with BatteryPercent: one mouse seen twice (same address, different case and
+        // separators), a trackpad, and a keyboard that is also an IOPS accessory.
+        let registry: [[String: Any]] = [
+            ["Product": "Magic Mouse", "BatteryPercent": 64, "DeviceAddress": "a4-83-e7-11-22-33"],
+            ["Product": "Magic Mouse", "BatteryPercent": 64, "DeviceAddress": "A4:83:E7:11:22:33"],
+            ["Product": "Magic Trackpad", "BatteryPercent": 88, "DeviceAddress": "a4-83-e7-44-55-66"],
+            ["Product": "MX Keys S", "BatteryPercent": 10, "DeviceAddress": "c0-ff-ee-00-00-01"],
+            ["Product": "Apple Internal Keyboard / Trackpad"],   // no battery level: skipped
+        ]
+        let all = BatteryParser.readings(powerSources: [keyboard, airpodsCase, Self.internalBattery, airpods], registry: registry)
+        // The Mac first, then devices by name; the case folds into its AirPods; the registry keyboard and the
+        // repeated mouse are dropped.
+        #expect(all.map(\.name) == ["This Mac", "Kevo’s AirPods", "Magic Mouse", "Magic Trackpad", "MX KEYS S"])
+        #expect(all.map(\.kind) == [.mac, .headphones, .mouse, .trackpad, .keyboard])
+
+        let pods = all[1]
+        #expect(pods.percent == 90)
+        #expect(pods.isCharging)
+        #expect(pods.parts == [BatteryReading.Part(name: "L", percent: 100), BatteryReading.Part(name: "R", percent: 90),
+                               BatteryReading.Part(name: "Case", percent: 35)])
+        #expect(pods.statusText == "L 100% · R 90% · Case 35%")
+        #expect(all[2].id == "bt:a4:83:e7:11:22:33")
+        #expect(all[2].percent == 64)
+        #expect(all[2].statusText == nil)
+        #expect(all[4].isLow)
+        #expect(all[4].statusText == "Low battery")
+        #expect(!all[3].isLow)
+
+        // A case whose earbuds aren't connected stays on its own row.
+        let lonelyCase = BatteryParser.powerSources([airpodsCase])
+        #expect(lonelyCase.map(\.name) == ["Kevo’s AirPods Case"])
+        #expect(lonelyCase.first?.kind == .headphones)
+        // A charging device says so.
+        var chargingMouse = keyboard
+        chargingMouse["Accessory Category"] = "Mouse"
+        chargingMouse["Is Charging"] = true
+        #expect(BatteryParser.powerSources([chargingMouse]).first?.statusText == "Charging")
+        #expect(BatteryParser.powerSources([chargingMouse]).first?.kind == .mouse)
+        // Kinds from names when there is no category.
+        #expect(BatteryParser.registryDevices([["Product": "Xbox Wireless Controller", "BatteryPercent": 50]]).first?.kind == .gameController)
+        #expect(BatteryParser.registryDevices([["Product": "Beats Studio Buds", "BatteryPercent": 50]]).first?.kind == .headphones)
+        #expect(BatteryParser.registryDevices([["Product": "Pen", "BatteryPercent": 50]]).first?.kind == .other)
+    }
 }
