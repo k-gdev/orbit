@@ -83,7 +83,7 @@ final class WindowsFeature: SuiteFeature {
     }
 
     static func snapshotViews() -> FeatureSnapshotViews {
-        let defaults = WindowsFixtures.defaults()
+        let defaults = SnapshotFixtures.defaults()
         let settings = WindowsSettings(defaults: defaults)
         // The same state as the Settings snapshot's header: Windows off (a new install's default),
         // Accessibility granted, Screen Recording not.

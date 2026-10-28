@@ -9,16 +9,10 @@ enum ClipboardFixtures {
     /// "Now" for fixture relative times.
     static let now = Date(timeIntervalSince1970: 1_793_000_000)
 
-    /// Settings over an absolute-path suite in the temp folder. `ClipboardSettings` only reads from it
-    /// unless a snapshot changes a value, and then the plist still lands in the temp folder (never in
-    /// ~/Library/Preferences) and is removed when the process exits.
+    /// Settings over `SnapshotFixtures.defaults()`: if a snapshot changes a value, the plist lands in a temp
+    /// folder (never in ~/Library/Preferences) that is removed when the process exits.
     static func settings(ignoredApps: [String] = []) -> ClipboardSettings {
-        let path = FileManager.default.temporaryDirectory.appending(path: "orbit-fixture-clipboard-\(UUID().uuidString).plist").path
-        guard let defaults = UserDefaults(suiteName: path) else {
-            preconditionFailure("ClipboardFixtures: no throwaway defaults suite")
-        }
-        FixtureCleanup.track(path)
-        let settings = ClipboardSettings(defaults: defaults)
+        let settings = ClipboardSettings(defaults: SnapshotFixtures.defaults())
         if !ignoredApps.isEmpty { settings.ignoredBundleIDs = ignoredApps }
         return settings
     }
@@ -84,34 +78,6 @@ enum ClipboardFixtures {
             NSBezierPath(roundedRect: NSRect(x: 26, y: 30, width: 84, height: 7), xRadius: 3, yRadius: 3).fill()
             NSBezierPath(roundedRect: NSRect(x: 26, y: 18, width: 40, height: 7), xRadius: 3, yRadius: 3).fill()
             return true
-        }
-    }
-}
-
-/// Removes the throwaway defaults the fixtures made when the process exits.
-private enum FixtureCleanup {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var paths: [String] = []
-    nonisolated(unsafe) private static var registered = false
-
-    static func track(_ path: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        paths.append(path)
-        if !registered {
-            registered = true
-            atexit { FixtureCleanup.removeAll() }
-        }
-    }
-
-    static func removeAll() {
-        lock.lock()
-        let all = paths
-        paths = []
-        lock.unlock()
-        for path in all {
-            UserDefaults(suiteName: path)?.removePersistentDomain(forName: path)
-            try? FileManager.default.removeItem(atPath: path)
         }
     }
 }

@@ -17,9 +17,6 @@ enum WindowsFixtures {
         case forceQuit = "force-quit"
     }
 
-    /// A throwaway defaults suite in its own temp folder (see `FixtureDefaults`).
-    static func defaults() -> UserDefaults { FixtureDefaults.make() }
-
     // MARK: Apps
 
     private struct FixtureApp {
@@ -224,42 +221,6 @@ struct FakeWindowArt: View {
                 Spacer(minLength: 0)
             }
             .padding(24)
-        }
-    }
-}
-
-/// Throwaway `UserDefaults` for fixtures: an absolute-path suite inside its own temp folder, so nothing is
-/// written to `~/Library/Preferences`; every suite and folder made here is removed when the process exits.
-/// (The same idea as the shell's `SnapshotFixtures.defaults()`, kept local so this feature builds on its own.)
-enum FixtureDefaults {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var made: [(suite: String, folder: URL)] = []
-
-    static func make() -> UserDefaults {
-        let folder = FileManager.default.temporaryDirectory
-            .appending(path: "orbit-windows-fixture-\(UUID().uuidString)", directoryHint: .isDirectory)
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-        } catch {
-            preconditionFailure("FixtureDefaults: couldn't create \(folder.path): \(error)")
-        }
-        let suite = folder.appending(path: "prefs", directoryHint: .notDirectory).path
-        guard let defaults = UserDefaults(suiteName: suite) else { preconditionFailure("FixtureDefaults: no suite at \(suite)") }
-        lock.lock()
-        if made.isEmpty { atexit { FixtureDefaults.removeAll() } }
-        made.append((suite, folder))
-        lock.unlock()
-        return defaults
-    }
-
-    static func removeAll() {
-        lock.lock()
-        let items = made
-        made.removeAll()
-        lock.unlock()
-        for item in items {
-            UserDefaults(suiteName: item.suite)?.removePersistentDomain(forName: item.suite)
-            try? FileManager.default.removeItem(at: item.folder)
         }
     }
 }

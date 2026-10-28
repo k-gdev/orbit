@@ -69,7 +69,7 @@ enum WindowsSnapshot {
         model.contentMaxHeight = 900
         model.pageProvider = { _ in (AnyView(WindowsPanelView(model: fixture)), false) }
         model.update(tabs: FeatureID.allCases, preferred: .windows)
-        let view = PanelView(model: model, settings: SettingsStore(defaults: WindowsFixtures.defaults()), actions: PanelActions())
+        let view = PanelView(model: model, settings: SettingsStore(defaults: SnapshotFixtures.defaults()), actions: PanelActions())
             .padding(.horizontal, 32)
             .padding(.top, 28)
             .padding(.bottom, 40)
