@@ -16,11 +16,11 @@ final class DisplaysDriver {
         BuiltInBrightness.canControl(id) ? BuiltInBrightness.brightness(of: id) : nil
     }
 
-    func write(_ value: Double, control: BrightnessControl, to id: CGDirectDisplayID) {
+    func write(_ value: Double, control: BrightnessControl, to id: CGDirectDisplayID, key: String) {
         switch control {
         case .native: BuiltInBrightness.setBrightness(value, of: id)
         case .ddc: ddc.write(Int(value.rounded()), to: id)
-        case .software: gamma.set(value, for: id)
+        case .software: gamma.set(value, for: id, key: key)
         case .probing, .unavailable: break
         }
     }
@@ -66,7 +66,7 @@ final class DisplaysModel: ObservableObject {
     private var rescanDDC = true
     /// Values when the current linked drag began.
     private var linkBaseline: [CGDirectDisplayID: Double]?
-    private var pendingWrites: [CGDirectDisplayID: (value: Double, control: BrightnessControl)] = [:]
+    private var pendingWrites: [CGDirectDisplayID: (value: Double, control: BrightnessControl, key: String)] = [:]
     private var writeTimer: DispatchWorkItem?
     /// Bumped on every user change, so a DDC reading that was in flight doesn't undo it.
     private var edits: [CGDirectDisplayID: Int] = [:]
@@ -215,7 +215,7 @@ final class DisplaysModel: ObservableObject {
         guard let driver, settings.useGammaFallback, !settings.lastSoftwareDim.isEmpty else { return }
         for info in driver.scan() where answersDDC[info.key] != true && driver.nativeBrightness(info.id) == nil {
             if let level = settings.lastSoftwareDim[info.key], SoftwareDim.dims(level), driver.gamma.dims[info.id] != level {
-                driver.gamma.set(level, for: info.id)
+                driver.gamma.set(level, for: info.id, key: info.key)
             }
         }
     }
@@ -268,7 +268,7 @@ final class DisplaysModel: ObservableObject {
         let id = tiles[index].id
         tiles[index].brightness = value
         edits[id, default: 0] += 1
-        pendingWrites[id] = (value, tiles[index].control)
+        pendingWrites[id] = (value, tiles[index].control, tiles[index].key)
         guard writeTimer == nil else { return }
         let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.flushWrites() } }
         writeTimer = work
@@ -280,7 +280,7 @@ final class DisplaysModel: ObservableObject {
         writeTimer = nil
         let writes = pendingWrites
         pendingWrites.removeAll()
-        for (id, write) in writes { driver?.write(write.value, control: write.control, to: id) }
+        for (id, write) in writes { driver?.write(write.value, control: write.control, to: id, key: write.key) }
     }
 
     /// A drag ended or a scroll burst settled: write now and remember software dimming levels.

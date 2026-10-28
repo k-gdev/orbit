@@ -2,6 +2,39 @@ import Foundation
 import Testing
 @testable import OrbitCore
 
+/// The gamma table Orbit keeps as a display's original (M4).
+@Suite struct GammaRampTests {
+    @Test func trustsANormalTable() {
+        let normal = GammaRamp(red: [0, 0.5, 1], green: [0, 0.48, 0.99], blue: [0, 0.5, 1])
+        #expect(normal.peak == 1)
+        let (ramp, suspect) = normal.trustedOriginal()
+        #expect(ramp == normal)
+        #expect(!suspect)
+    }
+
+    @Test func liftsAnAlreadyDimmedTable() {
+        // Someone dimmed it to half: the original is taken as twice that, channels kept in balance.
+        let dimmed = GammaRamp(red: [0, 0.25, 0.5], green: [0, 0.2, 0.4], blue: [0, 0.25, 0.5])
+        #expect(dimmed.peak == 0.5)
+        let (ramp, suspect) = dimmed.trustedOriginal()
+        #expect(suspect)
+        #expect(ramp == GammaRamp(red: [0, 0.5, 1], green: [0, 0.4, 0.8], blue: [0, 0.5, 1]))
+        // Nearly black: a straight ramp of the same length.
+        let black = GammaRamp(red: [0, 0.01, 0.02], green: [0, 0, 0.01], blue: [0, 0.01, 0.02])
+        let (fallback, wasSuspect) = black.trustedOriginal()
+        #expect(wasSuspect)
+        #expect(fallback == GammaRamp.identity(count: 3))
+        #expect(GammaRamp.identity(count: 3) == GammaRamp(red: [0, 0.5, 1], green: [0, 0.5, 1], blue: [0, 0.5, 1]))
+        #expect(GammaRamp.identity(count: 1).red == [1])
+    }
+
+    @Test func scalesEveryChannel() {
+        let ramp = GammaRamp.identity(count: 3).scaled(by: 0.5)
+        #expect(ramp == GammaRamp(red: [0, 0.25, 0.5], green: [0, 0.25, 0.5], blue: [0, 0.25, 0.5]))
+        #expect(GammaRamp.identity(count: 3).scaled(by: 1) == GammaRamp.identity(count: 3))
+    }
+}
+
 /// Learning a boost range needs two validated readings in a row above the reported maximum (M3).
 @Suite struct BoostLearnerTests {
     @Test func learnsOnlyAfterTwoReadingsInARow() {
