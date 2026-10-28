@@ -74,7 +74,12 @@ final class SystemReadoutItem: NSObject {
         item.menu = nil
     }
 
-    @objc private func hideReadout() { settings.menuBarReadout = .off }
+    /// Turning the readout off removes this very status item, so it waits until the menu has finished
+    /// tracking and the click handler has returned.
+    @objc private func hideReadout() {
+        let settings = settings
+        DispatchQueue.main.async { settings.menuBarReadout = .off }
+    }
 
     @objc private func showSettings() { openSettings() }
 }
