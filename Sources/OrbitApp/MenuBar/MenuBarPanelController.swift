@@ -13,7 +13,10 @@ final class MenuBarPanelController {
     private var panel: MenuBarPanel?
     private var anchor: NSStatusBarButton?
     private var monitors: [Any] = []
-    private var observers: [NSObjectProtocol] = []
+    /// Notification observers that exist while the panel is open, with the center each was added to.
+    private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
+    /// The last mouse-down inside the panel (see `MenuBarPanelDismissal`).
+    private var lastPanelClick: Date?
     private var subscriptions: Set<AnyCancellable> = []
     /// The feature whose `panelDidAppear()` ran without a matching `panelDidDisappear()`.
     private var appeared: FeatureID?
@@ -129,7 +132,7 @@ final class MenuBarPanelController {
         if let id { registry.feature(id).panelDidAppear() }
     }
 
-    // MARK: Closing on outside clicks
+    // MARK: Closing on outside clicks, app switches and display changes
 
     private func installMonitors() {
         removeMonitors()
@@ -141,19 +144,37 @@ final class MenuBarPanelController {
         if let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
             guard let self else { return event }
             let window = event.window
+            if window === self.panel { self.lastPanelClick = Date() }
             if window !== self.panel && window !== self.anchor?.window { self.close() }
             return event
         }) { monitors.append(local) }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.close() }
-            })
+        let workspace = NSWorkspace.shared.notificationCenter
+        observe(NSWorkspace.activeSpaceDidChangeNotification, on: workspace) { [weak self] _ in self?.close() }
+        // Another app became active: ⌘-Tab, a Dock click, an app opening a window of its own.
+        observe(NSWorkspace.didActivateApplicationNotification, on: workspace) { [weak self] note in
+            guard let self else { return }
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            if MenuBarPanelDismissal.closesOnActivation(of: app?.processIdentifier, ownPID: ProcessInfo.processInfo.processIdentifier,
+                                                         lastPanelClick: self.lastPanelClick, now: Date()) {
+                self.close()
+            }
+        }
+        // A display was added, removed or rearranged, or changed resolution: the panel's place is stale.
+        observe(NSApplication.didChangeScreenParametersNotification, on: .default) { [weak self] _ in self?.close() }
+    }
+
+    private func observe(_ name: Notification.Name, on center: NotificationCenter, _ handler: @escaping @MainActor (Notification) -> Void) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { note in
+            MainActor.assumeIsolated { handler(note) }
+        }
+        observers.append((center, token))
     }
 
     private func removeMonitors() {
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         monitors.removeAll()
-        for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        for observer in observers { observer.center.removeObserver(observer.token) }
         observers.removeAll()
+        lastPanelClick = nil
     }
 }
