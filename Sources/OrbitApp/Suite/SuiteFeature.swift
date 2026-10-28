@@ -18,8 +18,10 @@ import SwiftUI
 // - `stop()` is called when the feature is turned off and when Orbit quits (`applicationWillTerminate`
 //   → `FeatureRegistry.stopAll()`). Release EVERYTHING `start()` and the panel created: invalidate
 //   timers, remove event monitors, unregister hot keys (`context.hotKeys.unregister`), remove status
-//   items, close windows, destroy audio taps, release power assertions, and restore any system state
-//   Orbit changed. Idempotent too, and safe to call when never started.
+//   items, close windows, destroy audio taps, release power assertions, and undo the transient system
+//   state Orbit holds while running (audio taps, mic mutes, power assertions, gamma tables, its windows).
+//   Settings the user chose through Orbit, such as Controls' quick toggles (dark mode, hidden files),
+//   are intentionally left as the user set them. Idempotent too, and safe to call when never started.
 // - `panelDidAppear()` / `panelDidDisappear()` bracket the time this feature's tab is visible in the
 //   menu bar panel (opening/closing the panel and switching tabs both count). Do panel-only work, such
 //   as sampling sensors or polling device lists, only in between.
