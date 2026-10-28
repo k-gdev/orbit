@@ -241,3 +241,80 @@ enum WallpaperFixtures {
         #expect(AerialCatalog.load(locations: [AerialCatalog.locations(home: home.appending(path: "nobody"))[0]], preferredLanguages: ["en"]).isEmpty)
     }
 }
+
+// MARK: - Sources and assignments
+
+@Suite struct WallpaperAssignmentsTests {
+    let main = DisplayRef(key: "3E97987E-7C30-4857-BC7F-26602716A7CC", name: "P27u-20 (1)")
+    let side = DisplayRef(key: "6F400F72-AF91-42ED-9EB4-33FFE02D5F89", name: "P27u-20 (2)")
+
+    @Test func assignmentsRoundTrip() throws {
+        var assignments = WallpaperAssignments()
+        #expect(assignments.isEmpty)
+        assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: main)
+        assignments.assign(.video(path: "/Users/kevo/Movies/Rain on glass.mov", bookmark: Data([1, 2, 3])), to: side)
+        let data = try JSONEncoder().encode(assignments)
+        let decoded = try JSONDecoder().decode(WallpaperAssignments.self, from: data)
+        #expect(decoded == assignments)
+        #expect(decoded[main.key] == WallpaperAssignment(source: .aerial(id: WallpaperFixtures.tahoe), displayName: "P27u-20 (1)"))
+        #expect(decoded[side.key]?.source == .video(path: "/Users/kevo/Movies/Rain on glass.mov", bookmark: Data([1, 2, 3])))
+        #expect(decoded["unknown"] == nil)
+        // Reassigning replaces; removing forgets.
+        assignments.assign(.aerial(id: WallpaperFixtures.oregon), to: main)
+        #expect(assignments[main.key]?.source == .aerial(id: WallpaperFixtures.oregon))
+        #expect(assignments.remove(side.key)?.displayName == "P27u-20 (2)")
+        #expect(assignments.remove(side.key) == nil)
+        #expect(assignments.keys == [main.key])
+    }
+
+    @Test func sourceIdentityIgnoresTheBookmark() {
+        let a = WallpaperSource.video(path: "/m/Rain.mov", bookmark: Data([1]))
+        let b = WallpaperSource.video(path: "/m/Rain.mov", bookmark: nil)
+        #expect(a.identity == b.identity)
+        #expect(a.identity != WallpaperSource.aerial(id: "/m/Rain.mov").identity)
+        #expect(a.videoFileName == "Rain.mov")
+        #expect(WallpaperSource.aerial(id: "X").videoFileName == nil)
+        #expect(WallpaperSource.aerial(id: "X").aerialID == "X")
+        #expect(a.aerialID == nil)
+    }
+
+    @Test func adoptsAssignmentWhenDisplayKeyChanges() {
+        var assignments = WallpaperAssignments()
+        assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: DisplayRef(key: "OLD-KEY", name: "Q27G4ZD"))
+        let moved = assignments.adopt([DisplayRef(key: "NEW-KEY", name: "Q27G4ZD"), main])
+        #expect(moved == [WallpaperAssignments.Move(from: "OLD-KEY", to: "NEW-KEY")])
+        #expect(assignments["NEW-KEY"]?.source == .aerial(id: WallpaperFixtures.tahoe))
+        #expect(assignments["OLD-KEY"] == nil)
+        // A second pass finds nothing to do.
+        #expect(assignments.adopt([DisplayRef(key: "NEW-KEY", name: "Q27G4ZD")]).isEmpty)
+    }
+
+    @Test func adoptNeverStealsAnotherDisplaysWallpaper() {
+        var assignments = WallpaperAssignments()
+        assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: main)
+        // A new display that happens to share the name of a connected one gets nothing.
+        let twin = DisplayRef(key: "TWIN", name: main.name)
+        #expect(assignments.adopt([main, twin]).isEmpty)
+        #expect(assignments[twin.key] == nil)
+        // A display that already has its own wallpaper keeps it.
+        assignments.assign(.aerial(id: WallpaperFixtures.jellies), to: DisplayRef(key: "GONE", name: side.name))
+        assignments.assign(.aerial(id: WallpaperFixtures.oregon), to: side)
+        #expect(assignments.adopt([side]).isEmpty)
+        #expect(assignments[side.key]?.source == .aerial(id: WallpaperFixtures.oregon))
+        // Two forgotten keys under one name: one display adopts exactly one of them.
+        var twins = WallpaperAssignments()
+        twins.assign(.aerial(id: "A"), to: DisplayRef(key: "K1", name: "Twin"))
+        twins.assign(.aerial(id: "B"), to: DisplayRef(key: "K2", name: "Twin"))
+        #expect(twins.adopt([DisplayRef(key: "K3", name: "Twin")]) == [WallpaperAssignments.Move(from: "K1", to: "K3")])
+        #expect(twins.keys == ["K2", "K3"])
+    }
+
+    @Test func listsVideosAssignedAnywhere() {
+        var assignments = WallpaperAssignments()
+        assignments.assign(.video(path: "/m/b.mov", bookmark: nil), to: main)
+        assignments.assign(.video(path: "/m/a.mov", bookmark: nil), to: side)
+        assignments.assign(.video(path: "/m/b.mov", bookmark: Data([9])), to: DisplayRef(key: "K", name: "K272HUL"))
+        assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: DisplayRef(key: "Q", name: "Q27G4ZD"))
+        #expect(assignments.videos.map(\.identity) == ["video:/m/a.mov", "video:/m/b.mov"])
+    }
+}
