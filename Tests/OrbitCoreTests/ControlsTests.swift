@@ -1,3 +1,4 @@
+import CoreText
 import Foundation
 import Testing
 @testable import OrbitCore
@@ -450,6 +451,52 @@ extension ControlsTests {
             ]
             #expect(GrabTextResult.readingOrder(lines) == ["left right", "middle", "bottom"])
             #expect(GrabTextResult.readingOrder([]) == [])
+        }
+
+        /// Two lines of black text on white, drawn with Core Text (what a screen capture of a page looks like).
+        private func textImage(_ lines: [String]) -> CGImage {
+            let width = 900, lineHeight = 70, height = lineHeight * lines.count + 60
+            let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+            ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            let font = CTFontCreateWithName("Helvetica" as CFString, 40, nil)
+            for (i, line) in lines.enumerated() {
+                let attributed = NSAttributedString(string: line, attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): font,
+                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1),
+                ])
+                ctx.textPosition = CGPoint(x: 40, y: CGFloat(height - 30 - lineHeight * (i + 1) + 20))
+                CTLineDraw(CTLineCreateWithAttributedString(attributed), ctx)
+            }
+            return ctx.makeImage()!
+        }
+
+        @Test func recognizesRenderedText() throws {
+            let output = try TextRecognizer.recognize(textImage(["Orbit grabs this text", "Second line here"]))
+            #expect(output.payloads.isEmpty)
+            #expect(output.lines.count == 2)
+            #expect(output.lines.first?.lowercased().contains("orbit grabs") == true)
+            #expect(output.lines.last?.lowercased().contains("second line") == true)
+            #expect(GrabTextResult.preferBarcode(payloads: output.payloads, lines: output.lines).hud == "Copied 2 lines")
+        }
+
+        @Test func detectsQRPayload() throws {
+            let dir = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let url = Fixtures.qr("https://orbit.example/grab", in: dir)
+            let image = try ImageFile.loadOriented(url)
+            let output = try TextRecognizer.recognize(image)
+            #expect(output.payloads == ["https://orbit.example/grab"])
+            let result = GrabTextResult.preferBarcode(payloads: output.payloads, lines: output.lines)
+            #expect(result.text == "https://orbit.example/grab")
+            #expect(result.hud == "Copied code")
+        }
+
+        @Test func blankImageFindsNothing() throws {
+            let output = try TextRecognizer.recognize(textImage([""]))
+            #expect(output.lines.isEmpty)
+            #expect(output.payloads.isEmpty)
         }
     }
 }
