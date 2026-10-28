@@ -106,9 +106,15 @@ final class AppAudioTap: @unchecked Sendable {
             // Released meanwhile: the teardown is queued right behind this block.
             guard locked({ lifecycle.beginWaitingStart() }) else { return }
             Log.info("sound: \(bundleID) is quiet; its output waits for the next sound")
+            let began = Date()
             let status = AudioDeviceStart(device.aggregate, device.proc)
             // Released while waiting: torn down from outside already.
-            guard locked({ lifecycle.endWaitingStart() }), status != noErr else { return }
+            guard locked({ lifecycle.endWaitingStart() }) else {
+                Log.info("sound: \(bundleID)'s re-armed start returned after its release (blocked \(Self.seconds(since: began)), status \(status))")
+                return
+            }
+            if status == noErr { Log.info("sound: \(bundleID) is playing again (its start waited \(Self.seconds(since: began)))") }
+            guard status != noErr else { return }
             // The IO won't come back: the app plays as usual meanwhile; let the engine drop this tap.
             Log.error("sound: re-arming \(bundleID) failed (\(status))")
             let report = onFailure
@@ -132,8 +138,18 @@ final class AppAudioTap: @unchecked Sendable {
         case .onQueue:
             queue.async { [self] in teardown() }
         case .fromOutside:
-            DispatchQueue.global(qos: .userInitiated).async { [self] in teardown() }
+            Log.info("sound: releasing \(bundleID) from outside its waiting start")
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let began = Date()
+                teardown()
+                Log.info("sound: outside teardown of \(bundleID) finished in \(Self.seconds(since: began))")
+            }
         }
+    }
+
+    /// "0.42 s", for the logs that hardware checks read.
+    private static func seconds(since start: Date) -> String {
+        String(format: "%.2f s", Date().timeIntervalSince(start))
     }
 
     /// Blocks until the teardown has run, or `deadline` passes. Returns false on timeout (the teardown still
@@ -222,9 +238,14 @@ final class AppAudioTap: @unchecked Sendable {
         // 6. Start. With TapAutoStart this may only return with the app's first audio; a release meanwhile
         //    tears down from outside (`invalidate()`), and then nothing more happens here.
         guard locked({ lifecycle.beginWaitingStart() }) else { throw Released() }
+        let began = Date()
         let status = AudioDeviceStart(aggregate, procID)
-        guard locked({ lifecycle.endWaitingStart() }) else { throw Released() }
+        guard locked({ lifecycle.endWaitingStart() }) else {
+            Log.info("sound: \(bundleID)'s first start returned after its release (blocked \(Self.seconds(since: began)), status \(status))")
+            throw Released()
+        }
         try check(status, "AudioDeviceStart")
+        Log.info("sound: \(bundleID)'s first start returned after \(Self.seconds(since: began))")
     }
 
     /// Stop the IOProc, destroy the aggregate, then the tap. Runs once, from whichever side claims it.
