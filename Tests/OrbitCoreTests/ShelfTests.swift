@@ -284,6 +284,21 @@ import Testing
         #expect(fixture.store.load().isEmpty)
     }
 
+    // MARK: Dragging out
+
+    /// A file dragged off the shelf is removed from it only when the destination moved or deleted the
+    /// file (Finder on the same volume, the Trash); a copy, or opening it in an app, leaves it there.
+    @Test func dragOutMoveRemovesCopyKeeps() {
+        // AppKit's NSDragOperation values: copy 1, link 2, generic 4, private 8, move 16, delete 32.
+        #expect(ShelfDragOutcome.moveOperation == 16 && ShelfDragOutcome.deleteOperation == 32)
+        #expect(ShelfDragOutcome.removesFromShelf(operationRawValue: 16))
+        #expect(ShelfDragOutcome.removesFromShelf(operationRawValue: 32))
+        #expect(!ShelfDragOutcome.removesFromShelf(operationRawValue: 1))
+        #expect(!ShelfDragOutcome.removesFromShelf(operationRawValue: 2))
+        #expect(!ShelfDragOutcome.removesFromShelf(operationRawValue: 4))
+        #expect(!ShelfDragOutcome.removesFromShelf(operationRawValue: 0)) // dropped nowhere
+    }
+
     // MARK: Settings
 
     @Test func settingsRoundTrip() {
