@@ -14,14 +14,13 @@ final class PasteboardWatcher {
 
     private let pasteboard: NSPasteboard
     private var timer: Timer?
-    private var lastChangeCount: Int
+    private var lastChangeCount = 0
     private var ignoredChangeCount: Int?
     private var policy: () -> PasteboardPolicy = { PasteboardPolicy(ignoredBundleIDs: [], maxItemBytes: 0) }
     private var onCapture: (ClipboardCapture) -> Void = { _ in }
 
     init(pasteboard: NSPasteboard = .general) {
         self.pasteboard = pasteboard
-        self.lastChangeCount = pasteboard.changeCount
     }
 
     var isRunning: Bool { timer != nil }

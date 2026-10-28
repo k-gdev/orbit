@@ -7,7 +7,7 @@ import OrbitCore
 /// the store it persists to. Every change is written to disk straight away (the index is small), and
 /// the blob files of removed or evicted entries are deleted with them.
 ///
-/// Nothing is read from disk until `loadIfNeeded()`, and `unload()` gives the memory back. A fixture
+/// Nothing is read from disk until `loadIfNeeded()`. A fixture
 /// model (`store == nil`) holds a fixed list and never touches disk, for snapshots.
 @MainActor
 final class ClipboardModel: ObservableObject {
@@ -58,11 +58,9 @@ final class ClipboardModel: ObservableObject {
         enforceLimits()
     }
 
-    /// Drops the in-memory history (the feature was turned off); the files stay.
-    func unload() {
-        guard store != nil else { return }
-        history = ClipboardHistory()
-        isLoaded = false
+    /// Gives back what can be rebuilt (decoded thumbnails) when the feature is turned off. The history
+    /// itself stays in memory so the Settings page keeps showing the right numbers; it is small.
+    func trimMemory() {
         thumbnailCache.removeAllObjects()
     }
 

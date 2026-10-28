@@ -17,11 +17,18 @@ struct ClipboardPanelView: View {
     @ObservedObject var settings: ClipboardSettings
     let actions: ClipboardPanelActions
 
-    @State private var query = ""
+    @State private var query: String
     @State private var confirmingClear = false
     @State private var listContentHeight: CGFloat = 0
     @Environment(\.panelContentMaxHeight) private var contentMaxHeight
     @Environment(\.colorScheme) private var colorScheme
+
+    init(model: ClipboardModel, settings: ClipboardSettings, actions: ClipboardPanelActions, initialQuery: String = "") {
+        self.model = model
+        self.settings = settings
+        self.actions = actions
+        _query = State(initialValue: initialQuery)
+    }
 
     /// Room the search row and the hint take above and below the list.
     private let chromeHeight: CGFloat = 78

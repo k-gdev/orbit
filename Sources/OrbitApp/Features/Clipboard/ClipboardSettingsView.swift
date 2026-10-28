@@ -77,6 +77,8 @@ struct ClipboardSettingsView: View {
             model.loadIfNeeded()
             permissions.refresh()
         }
+        // A lowered limit takes effect now, not at the next copy.
+        .onChange(of: settings.limits) { _, _ in model.enforceLimits() }
         .confirmationDialog("Clear the clipboard history?", isPresented: $confirmingClear, titleVisibility: .visible) {
             Button("Clear History", role: .destructive) { model.clear(keepPinned: true) }
             Button("Cancel", role: .cancel) {}

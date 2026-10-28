@@ -7,22 +7,26 @@ import SwiftUI
 ///
 ///     Orbit --snapshot-clipboard-popup <out.png> [--query <text>] [--select <row>] [--dark] [--replace]
 ///     Orbit --snapshot-clipboard-settings <out.png> [--dark] [--replace]
+///     Orbit --snapshot-clipboard-panel <out.png> [--query <text>] [--empty] [--dark] [--replace]
 ///
 /// The popup is drawn on a desktop-like backdrop, as it appears at the pointer. The settings mode draws
 /// the page's whole content at its natural height (the page in the Settings window scrolls, so
 /// `--snapshot-settings-page clipboard` only shows its top). Existing PNGs are not replaced without
-/// `--replace`; bad arguments exit 64.
+/// `--replace`; bad arguments exit 64. The panel mode draws just the tab's content (`--empty`: with no
+/// history, `--query`: with search text typed) for the states `--snapshot-panel clipboard` doesn't show.
 enum ClipboardPopupSnapshot {
     static let popupFlag = "--snapshot-clipboard-popup"
     static let settingsFlag = "--snapshot-clipboard-settings"
+    static let panelFlag = "--snapshot-clipboard-panel"
     static let usage = """
         usage: Orbit --snapshot-clipboard-popup <out.png> [--query <text>] [--select <row>] [--dark] [--replace]
                Orbit --snapshot-clipboard-settings <out.png> [--dark] [--replace]
+               Orbit --snapshot-clipboard-panel <out.png> [--query <text>] [--empty] [--dark] [--replace]
         """
 
     @MainActor
     static func runIfRequested(_ arguments: [String]) {
-        let flag = [popupFlag, settingsFlag].first { arguments.contains($0) }
+        let flag = [popupFlag, settingsFlag, panelFlag].first { arguments.contains($0) }
         guard let flag, let start = arguments.firstIndex(of: flag) else { return }
         let args = Array(arguments[(start + 1)...])
         guard let path = args.first, !path.hasPrefix("--"), path.lowercased().hasSuffix(".png") else { fail64() }
@@ -41,6 +45,8 @@ enum ClipboardPopupSnapshot {
             let data: Data
             if flag == popupFlag {
                 data = try popupPNG(query: value(after: "--query") ?? "", select: value(after: "--select").flatMap(Int.init), dark: dark)
+            } else if flag == panelFlag {
+                data = try panelPNG(query: value(after: "--query") ?? "", empty: args.contains("--empty"), dark: dark)
             } else {
                 data = try settingsPNG(dark: dark)
             }
@@ -71,6 +77,21 @@ enum ClipboardPopupSnapshot {
             .padding(.top, 30)
             .padding(.bottom, 44)
             .background(Backdrop(dark: dark))
+        return try SnapshotRenderer.png(of: view, size: nil, dark: dark)
+    }
+
+    @MainActor
+    private static func panelPNG(query: String, empty: Bool, dark: Bool) throws -> Data {
+        let settings = ClipboardFixtures.settings()
+        let model = ClipboardFixtures.model(settings: settings, empty: empty)
+        let view = ClipboardPanelView(model: model, settings: settings, actions: ClipboardPanelActions(), initialQuery: query)
+            .padding(PanelMetrics.inset)
+            .frame(width: PanelMetrics.width)
+            .background(GlassBackground(shape: RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius, style: .continuous),
+                                        tintOpacity: dark ? 0.10 : 0.30))
+            .padding(32)
+            .background(Backdrop(dark: dark))
+            .environment(\.panelContentMaxHeight, 900)
         return try SnapshotRenderer.png(of: view, size: nil, dark: dark)
     }
 

@@ -63,11 +63,10 @@ final class ClipboardFeature: SuiteFeature {
         context.hotKeys.unregister(id: Self.hotKeyID)
         shortcutProblem = nil
         popup.hide(restoreFocus: false)
-        model.unload()
+        model.trimMemory()
     }
 
     func panelDidAppear() {
-        context.permissions.refresh()
         model.enforceLimits()
     }
 
