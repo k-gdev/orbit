@@ -23,6 +23,8 @@ final class PanelModel: ObservableObject {
     @Published private(set) var pageScrollsItself = false
     /// The tallest the content area may be before it scrolls (derived from the screen).
     @Published var contentMaxHeight: CGFloat = 560
+    /// Each tab's last measured content height, so reopening the panel starts at the right size.
+    var measuredHeights: [FeatureID: CGFloat] = [:]
 
     /// Builds the selected feature's panel view (and says whether it scrolls itself).
     var pageProvider: (FeatureID) -> (view: AnyView, scrollsItself: Bool) = { _ in (AnyView(EmptyView()), false) }
@@ -102,9 +104,13 @@ struct PanelView: View {
                     .frame(maxHeight: model.contentMaxHeight)
                     .padding(.horizontal, PanelMetrics.inset)
             } else {
-                PanelScrollArea(maxHeight: model.contentMaxHeight) {
+                let tab = model.selected
+                PanelScrollArea(maxHeight: model.contentMaxHeight,
+                                initialHeight: tab.flatMap { model.measuredHeights[$0] } ?? 0,
+                                onMeasure: { height in if let tab { model.measuredHeights[tab] = height } }) {
                     page.frame(width: PanelMetrics.contentWidth)
                 }
+                .id(tab)
             }
         } else if model.tabs.isEmpty {
             PanelEmptyState(openFeatures: actions.openFeaturesPage)
@@ -116,8 +122,16 @@ struct PanelView: View {
 /// Lays its content out at its natural height, up to `maxHeight`, and scrolls beyond that.
 private struct PanelScrollArea<Content: View>: View {
     let maxHeight: CGFloat
+    let onMeasure: (CGFloat) -> Void
     @ViewBuilder var content: () -> Content
-    @State private var contentHeight: CGFloat = 0
+    @State private var contentHeight: CGFloat
+
+    init(maxHeight: CGFloat, initialHeight: CGFloat, onMeasure: @escaping (CGFloat) -> Void, @ViewBuilder content: @escaping () -> Content) {
+        self.maxHeight = maxHeight
+        self.onMeasure = onMeasure
+        self.content = content
+        _contentHeight = State(initialValue: initialHeight)
+    }
 
     var body: some View {
         ScrollView(.vertical) {
@@ -131,7 +145,10 @@ private struct PanelScrollArea<Content: View>: View {
         .scrollBounceBehavior(.basedOnSize)
         .scrollIndicators(contentHeight > maxHeight ? .automatic : .never)
         .frame(height: min(max(contentHeight, 1), maxHeight))
-        .onPreferenceChange(PanelContentHeightKey.self) { contentHeight = $0 }
+        .onPreferenceChange(PanelContentHeightKey.self) { height in
+            contentHeight = height
+            onMeasure(height)
+        }
     }
 }
 

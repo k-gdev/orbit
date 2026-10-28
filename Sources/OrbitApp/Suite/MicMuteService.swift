@@ -8,15 +8,18 @@ import OrbitCore
 /// works whether or not Sound is on.
 ///
 /// `FeatureRegistry` makes it active while Sound or Controls is on (`setActive`) and calls
-/// `restoreOnQuit()` from `stopAll()`. While active: the shortcut is registered (hot key id `micMute`) and
-/// the badge shows whenever the mic is muted. Going inactive unregisters, removes the badge, and unmutes
-/// (restoring the input device's previous state) if Orbit muted it.
+/// `restoreOnQuit()` from `stopAll()`. While active: the shortcut is registered (hot key id `micMute`)
+/// whenever an input device is available (so a Mac with no mic doesn't lose the key combo for nothing),
+/// and the badge shows whenever the mic is muted. Going inactive unregisters, removes the badge, and
+/// unmutes (restoring the input device's previous state) if Orbit muted it.
 @MainActor
 final class MicMuteService: NSObject, ObservableObject {
     /// Whether the input device is muted (by Orbit).
     @Published private(set) var isMuted = false
-    /// Whether there is an input device to mute.
-    @Published private(set) var isAvailable = false
+    /// Whether there is an input device to mute. The shortcut follows it while active.
+    @Published private(set) var isAvailable = false {
+        didSet { if isAvailable != oldValue { updateShortcut() } }
+    }
 
     let settings: MicMuteSettings
     private let hotKeys: HotKeyCenter?
@@ -37,7 +40,10 @@ final class MicMuteService: NSObject, ObservableObject {
     /// A state-only stand-in for snapshots and previews: no hardware, no hot key, no status item.
     /// `setMuted` just flips `isMuted`.
     static func fixture(muted: Bool = false, available: Bool = true) -> MicMuteService {
-        guard let defaults = UserDefaults(suiteName: "orbit.fixture.\(UUID().uuidString)") else {
+        // An absolute-path suite in the temp folder: nothing is written unless a snapshot changes the
+        // shortcut, and even then never to ~/Library/Preferences.
+        let path = FileManager.default.temporaryDirectory.appending(path: "orbit-fixture-\(UUID().uuidString).plist").path
+        guard let defaults = UserDefaults(suiteName: path) else {
             preconditionFailure("MicMuteService.fixture: no throwaway defaults suite")
         }
         let service = MicMuteService(fixtureSettings: MicMuteSettings(defaults: defaults))
@@ -70,9 +76,9 @@ final class MicMuteService: NSObject, ObservableObject {
         active = on
         if on {
             refreshAvailability()
-            registerShortcut()
+            updateShortcut()
             shortcutSubscription = settings.$muteShortcut.dropFirst().sink { [weak self] _ in
-                DispatchQueue.main.async { self?.registerShortcut() }
+                DispatchQueue.main.async { self?.updateShortcut() }
             }
             updateBadge()
         } else {
@@ -95,8 +101,13 @@ final class MicMuteService: NSObject, ObservableObject {
         active = false
     }
 
-    private func registerShortcut() {
-        guard active else { return }
+    /// Registers the shortcut while active with an input device present; unregisters it otherwise.
+    private func updateShortcut() {
+        guard !isFixture else { return }
+        guard active, isAvailable else {
+            hotKeys?.unregister(id: Self.hotKeyID)
+            return
+        }
         if hotKeys?.register(settings.muteShortcut, id: Self.hotKeyID, action: { [weak self] in self?.toggle() }) == false {
             Log.info("mic mute shortcut \(settings.muteShortcut.display) is unavailable")
         }
@@ -135,7 +146,8 @@ final class MicMuteService: NSObject, ObservableObject {
     // device's previous mute/volume before muting, restore exactly that on unmute and on quit, and follow
     // input device changes. Until then they touch nothing, so the mic is never changed by this build.
 
-    /// Re-reads whether an input device exists. Stub: none.
+    /// Re-reads whether an input device exists (setting `isAvailable` re-registers the shortcut). Call it
+    /// again when the input device list changes. Stub: none.
     private func refreshAvailability() {
         isAvailable = false
     }

@@ -67,7 +67,8 @@ final class PermissionCenter: ObservableObject {
                 openSettingsLater(permission)
             }
         case .systemAudioRecording:
-            if !AudioCaptureTCC.request(completion: { [weak self] _ in
+            // Denied before: macOS won't ask again, so go to the pane. Undetermined: show the prompt.
+            if AudioCaptureTCC.preflight() == .notGranted || !AudioCaptureTCC.request(completion: { [weak self] _ in
                 DispatchQueue.main.async { self?.refresh() }
             }) {
                 openSettings(permission)
@@ -121,7 +122,7 @@ enum AudioCaptureTCC {
     private typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int
     private typealias Request = @convention(c) (CFString, CFDictionary?, @convention(block) (Bool) -> Void) -> Void
 
-    /// 0 = granted, 1 = denied; anything else (or a missing symbol) is unknown.
+    /// 0 = granted, 1 = denied; anything else (not yet asked, or a missing symbol) is unknown.
     static func preflight() -> PermissionStatus {
         guard #available(macOS 14.2, *),
               let fn = PrivateSymbol.load("TCCAccessPreflight", from: framework, as: Preflight.self) else { return .unknown }

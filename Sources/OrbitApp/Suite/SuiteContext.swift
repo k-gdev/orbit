@@ -56,6 +56,7 @@ final class SuiteContext: ObservableObject {
     /// Shows (or clears) a small accent dot on Orbit's menu bar icon. `id` names the asker (for example
     /// `"controls.keepAwake"`); the dot shows while any id is active. Clear yours in `stop()`.
     func setStatusIndicator(_ id: String, active: Bool) {
+        guard statusIndicators.contains(id) != active else { return }
         if active { statusIndicators.insert(id) } else { statusIndicators.remove(id) }
     }
 
