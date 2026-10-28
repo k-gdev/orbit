@@ -1,14 +1,15 @@
 import OrbitCore
 import SwiftUI
 
-/// The Wallpaper tab: one card per connected display with a preview, what it plays and whether it is playing, and a
-/// Choose… menu (a video file, a downloaded aerial, or none). A note at the end says where aerials come from.
+/// The Wallpaper tab: a header with "Same on all displays" (with two or more displays), then one card per connected
+/// display with a preview, what it plays and whether it is playing, and a Choose… menu (a video file, a downloaded
+/// aerial, or none). A note at the end says where aerials come from.
 struct WallpaperPanelView: View {
     @ObservedObject var model: WallpaperModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PanelSectionHeader("Displays")
+            PanelSectionHeader("Displays", trailing: model.connectedDisplays.count > 1 ? AnyView(syncButton) : nil)
             if model.connectedDisplays.isEmpty {
                 PanelTile {
                     Text("No displays found.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -20,6 +21,15 @@ struct WallpaperPanelView: View {
             WallpaperAerialsNote(model: model)
                 .padding(.top, 2)
         }
+    }
+
+    private var syncButton: some View {
+        let synced = model.settings.syncDisplays
+        return PanelLinkButton(synced ? "Synced" : "Same on all displays", systemImage: synced ? "link.circle.fill" : "link") {
+            model.setSyncDisplays(!synced)
+        }
+        .help(synced ? "Choosing a wallpaper sets it on every display. Click to choose each display on its own."
+                     : "Show the main display's wallpaper on every display, and keep them the same.")
     }
 }
 

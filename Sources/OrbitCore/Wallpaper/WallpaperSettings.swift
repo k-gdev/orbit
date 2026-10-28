@@ -10,6 +10,7 @@ public final class WallpaperSettings: ObservableObject {
         static let pauseOnBattery = "wallpaper.pauseOnBattery"
         static let pauseInLowPower = "wallpaper.pauseInLowPower"
         static let setStillFrame = "wallpaper.setStillFrame"
+        static let syncDisplays = "wallpaper.syncDisplays"
         static let desktopPictures = "wallpaper.desktopPictures"
         /// The first build's display key → URL string map, read once to migrate.
         static let legacyPreviousDesktopPictures = "wallpaper.previousDesktopPictures"
@@ -32,6 +33,11 @@ public final class WallpaperSettings: ObservableObject {
     /// Space switches match (default on).
     @Published public var setStillFrame: Bool { didSet { defaults.set(setStillFrame, forKey: Key.setStillFrame) } }
 
+    /// Keep every connected display on the same wallpaper (default on): choosing one sets it everywhere, and turning
+    /// this on, launching or connecting a display brings the ones that differ onto the main display's. See
+    /// `WallpaperSync`.
+    @Published public var syncDisplays: Bool { didSet { defaults.set(syncDisplays, forKey: Key.syncDisplays) } }
+
     /// What Orbit changed about each display's desktop picture: the user's original (with its options), the stills
     /// Orbit set, and which displays wait for their original to come back on the Spaces that still show a still. See
     /// `DesktopPictureLedger`. Stored as JSON; unreadable data reads as empty.
@@ -48,6 +54,7 @@ public final class WallpaperSettings: ObservableObject {
         pauseOnBattery = defaults.object(forKey: Key.pauseOnBattery) as? Bool ?? false
         pauseInLowPower = defaults.object(forKey: Key.pauseInLowPower) as? Bool ?? true
         setStillFrame = defaults.object(forKey: Key.setStillFrame) as? Bool ?? true
+        syncDisplays = defaults.object(forKey: Key.syncDisplays) as? Bool ?? true
         if let data = defaults.data(forKey: Key.desktopPictures) {
             desktopPictures = (try? JSONDecoder().decode(DesktopPictureLedger.self, from: data)) ?? DesktopPictureLedger()
         } else if let legacy = defaults.dictionary(forKey: Key.legacyPreviousDesktopPictures) as? [String: String] {

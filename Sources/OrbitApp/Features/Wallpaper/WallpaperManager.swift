@@ -59,6 +59,8 @@ final class WallpaperManager {
             .sink { [weak self] _ in self?.rebuild() }.store(in: &cancellables)
         settings.$setStillFrame.dropFirst().removeDuplicates().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuild() }.store(in: &cancellables)
+        settings.$syncDisplays.dropFirst().removeDuplicates().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.rebuild() }.store(in: &cancellables)
         settings.$pauseOnBattery.combineLatest(settings.$pauseInLowPower).dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.evaluate() }.store(in: &cancellables)
         rebuild()
@@ -109,6 +111,11 @@ final class WallpaperManager {
             ledger.move(from: move.from, to: move.to)
             if ledger != settings.desktopPictures { settings.desktopPictures = ledger }
             Log.info("wallpaper: \(move.to) took over the wallpaper saved for \(move.from)")
+        }
+        // "Same on all displays": a display that differs (or was just connected) takes the main display's wallpaper.
+        if settings.syncDisplays {
+            let live = WallpaperModel.liveDisplays()
+            assignments.syncDisplays(screens: live.map(\.ref), mainKey: live.first(where: \.isMain)?.key)
         }
         // A newly downloaded aerial isn't in the catalog yet: read the manifest again once.
         let assignedAerials = refs.compactMap { assignments[$0.key]?.source.aerialID }

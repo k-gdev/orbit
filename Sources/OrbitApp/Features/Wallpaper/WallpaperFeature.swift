@@ -115,9 +115,10 @@ final class WallpaperFeature: SuiteFeature {
 
     static func fixtureModel() -> WallpaperModel {
         let settings = WallpaperSettings(defaults: SnapshotFixtures.defaults())
+        settings.syncDisplays = false  // the fixture's displays each show something different
         let displays = [
             WallpaperDisplayItem(key: "fixture-k272hul", name: "K272HUL", detail: "2560 × 1440", isConnected: true),
-            WallpaperDisplayItem(key: "fixture-p27u-1", name: "P27u-20 (1)", detail: "Main display · 3008 × 1692", isConnected: true),
+            WallpaperDisplayItem(key: "fixture-p27u-1", name: "P27u-20 (1)", detail: "Main display · 3008 × 1692", isConnected: true, isMain: true),
             WallpaperDisplayItem(key: "fixture-q27g4zd", name: "Q27G4ZD", detail: "2560 × 1440", isConnected: true),
             WallpaperDisplayItem(key: "fixture-p27u-2", name: "P27u-20 (2)", detail: "3008 × 1692", isConnected: true),
         ]

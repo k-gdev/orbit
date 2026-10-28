@@ -10,6 +10,8 @@ struct WallpaperDisplayItem: Identifiable, Equatable {
     /// "Main display · 3008 × 1692", or "Not connected".
     let detail: String
     let isConnected: Bool
+    /// The display with the menu bar: the one "Same on all displays" copies from.
+    var isMain = false
 
     var id: String { key }
     var ref: DisplayRef { DisplayRef(key: key, name: name) }
@@ -67,6 +69,9 @@ final class WallpaperModel: ObservableObject {
     }
 
     var connectedDisplays: [WallpaperDisplayItem] { displays.filter(\.isConnected) }
+
+    /// The key of the main display among the connected ones.
+    var mainDisplayKey: String? { connectedDisplays.first(where: \.isMain)?.key }
 
     // MARK: Reading
 
@@ -136,13 +141,27 @@ final class WallpaperModel: ObservableObject {
 
     // MARK: Changing
 
-    /// Shows `source` on the display, or removes its wallpaper (nil).
+    /// Shows `source` on the display, or removes its wallpaper (nil). While "Same on all displays" is on, every
+    /// connected display gets it too.
     func assign(_ source: WallpaperSource?, to display: WallpaperDisplayItem) {
-        if let source {
-            settings.assignments.assign(source, to: display.ref)
-        } else {
-            settings.assignments.remove(display.key)
+        let targets = settings.syncDisplays ? [display] + connectedDisplays.filter { $0.key != display.key } : [display]
+        var assignments = settings.assignments
+        for target in targets {
+            if let source {
+                assignments.assign(source, to: target.ref)
+            } else {
+                assignments.remove(target.key)
+            }
         }
+        settings.assignments = assignments
+        refresh()
+    }
+
+    /// Turns "Same on all displays" on or off. Turning it on brings the displays that differ onto the main
+    /// display's wallpaper (`WallpaperSync`); turning it off changes nothing.
+    func setSyncDisplays(_ on: Bool) {
+        settings.syncDisplays = on
+        if on { settings.assignments.syncDisplays(screens: connectedDisplays.map(\.ref), mainKey: mainDisplayKey) }
         refresh()
     }
 
@@ -158,7 +177,8 @@ final class WallpaperModel: ObservableObject {
             guard let key = DisplayIdentity.key(for: screen) else { return nil }
             let size = "\(Int(screen.frame.width)) × \(Int(screen.frame.height))"
             return WallpaperDisplayItem(key: key, name: screen.localizedName,
-                                        detail: screen == main ? "Main display · \(size)" : size, isConnected: true)
+                                        detail: screen == main ? "Main display · \(size)" : size, isConnected: true,
+                                        isMain: screen == main)
         }
     }
 }

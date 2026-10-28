@@ -353,6 +353,107 @@ enum WallpaperFixtures {
     }
 }
 
+// MARK: - Same on all displays
+
+@Suite struct WallpaperSyncTests {
+    let left = DisplayRef(key: "L", name: "K272HUL")
+    let main = DisplayRef(key: "M", name: "P27u-20 (1)")
+    let right = DisplayRef(key: "R", name: "Q27G4ZD")
+    let tahoe = WallpaperSource.aerial(id: WallpaperFixtures.tahoe)
+    let oregon = WallpaperSource.aerial(id: WallpaperFixtures.oregon)
+
+    /// The panel's order: left to right.
+    var screens: [DisplayRef] { [left, main, right] }
+
+    private func assignments(_ pairs: [(DisplayRef, WallpaperSource)]) -> WallpaperAssignments {
+        var result = WallpaperAssignments()
+        for (display, source) in pairs { result.assign(source, to: display) }
+        return result
+    }
+
+    @Test func theMainDisplaysWallpaperWins() {
+        let all = assignments([(left, oregon), (main, tahoe)])
+        #expect(WallpaperSync.source(screens: screens, mainKey: main.key, assignments: all) == tahoe)
+        // The others come into line, in the panel's order; the main display needs nothing.
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: all)
+                == WallpaperSync.Plan(source: tahoe, displays: [left, right]))
+    }
+
+    @Test func fallsBackToTheFirstDisplayThatHasOne() {
+        // The main display has none: the first assigned display in panel order is the source, not the lowest key.
+        let all = assignments([(right, oregon), (left, tahoe)])
+        #expect(WallpaperSync.source(screens: screens, mainKey: main.key, assignments: all) == tahoe)
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: all)
+                == WallpaperSync.Plan(source: tahoe, displays: [main, right]))
+        // No known main display behaves the same.
+        #expect(WallpaperSync.source(screens: screens, mainKey: nil, assignments: all) == tahoe)
+        #expect(WallpaperSync.source(screens: screens, mainKey: "not connected", assignments: all) == tahoe)
+    }
+
+    @Test func nothingToSyncWhenNoDisplayHasOne() {
+        let empty = WallpaperAssignments()
+        #expect(WallpaperSync.source(screens: screens, mainKey: main.key, assignments: empty) == nil)
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: empty) == nil)
+        #expect(WallpaperSync.plan(screens: [], mainKey: nil, assignments: assignments([(main, tahoe)])) == nil)
+    }
+
+    /// Assignments don't tell "None" from "not set" (None removes the entry), so a main display without a
+    /// wallpaper never makes the others lose theirs: choosing None while synced clears every display at once
+    /// (`WallpaperModel.assign`), and a lone leftover wallpaper is the one the rest take.
+    @Test func aMainDisplayWithoutAWallpaperDoesNotSyncToNone() {
+        let all = assignments([(right, oregon)])
+        #expect(WallpaperSync.source(screens: screens, mainKey: main.key, assignments: all) == oregon)
+    }
+
+    @Test func nothingToChangeWhenTheyAlreadyMatch() {
+        let all = assignments([(left, tahoe), (main, tahoe), (right, tahoe)])
+        #expect(WallpaperSync.source(screens: screens, mainKey: main.key, assignments: all) == tahoe)
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: all) == nil)
+        // The same video with a different bookmark is the same wallpaper.
+        let rain = WallpaperSource.video(path: "/m/Rain.mov", bookmark: Data([1]))
+        let sameRain = assignments([(left, .video(path: "/m/Rain.mov", bookmark: Data([2]))), (main, rain),
+                                    (right, .video(path: "/m/Rain.mov", bookmark: nil))])
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: sameRain) == nil)
+    }
+
+    @Test func aNewDisplayJoinsTheSyncedWallpaper() {
+        let all = assignments([(left, tahoe), (main, tahoe)])
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: all)
+                == WallpaperSync.Plan(source: tahoe, displays: [right]))
+    }
+
+    @Test func unpluggedDisplaysAreLeftAlone() {
+        // The unplugged "R" keeps its wallpaper, and does not count as the first display that has one.
+        let all = assignments([(right, oregon)])
+        #expect(WallpaperSync.plan(screens: [left, main], mainKey: main.key, assignments: all) == nil)
+        let mixed = assignments([(right, oregon), (main, tahoe)])
+        #expect(WallpaperSync.plan(screens: [left, main], mainKey: main.key, assignments: mixed)
+                == WallpaperSync.Plan(source: tahoe, displays: [left]))
+    }
+
+    @Test func syncingAssignmentsKeepsTheSourceAndEachDisplaysName() {
+        var all = assignments([(main, .video(path: "/m/Rain.mov", bookmark: Data([5]))), (left, oregon)])
+        all.assign(oregon, to: DisplayRef(key: "GONE", name: "Unplugged"))
+        let changed = all.syncDisplays(screens: screens, mainKey: main.key)
+        #expect(changed)
+        for display in screens {
+            #expect(all[display.key] == WallpaperAssignment(source: .video(path: "/m/Rain.mov", bookmark: Data([5])),
+                                                           displayName: display.name))
+        }
+        #expect(all["GONE"]?.source == oregon)
+        // Already in line: nothing changes.
+        let before = all
+        let changedAgain = all.syncDisplays(screens: screens, mainKey: main.key)
+        #expect(changedAgain == false)
+        #expect(all == before)
+        // Nothing assigned: nothing to do.
+        var empty = WallpaperAssignments()
+        let changedEmpty = empty.syncDisplays(screens: screens, mainKey: main.key)
+        #expect(changedEmpty == false)
+        #expect(empty.isEmpty)
+    }
+}
+
 // MARK: - When wallpapers play, and which displays get a window
 
 @Suite struct WallpaperPausePolicyTests {
@@ -507,6 +608,7 @@ enum WallpaperFixtures {
         #expect(fresh.pauseOnBattery == false)
         #expect(fresh.pauseInLowPower == true)
         #expect(fresh.setStillFrame == true)
+        #expect(fresh.syncDisplays == true)
         #expect(fresh.desktopPictures.isEmpty)
 
         fresh.assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: DisplayRef(key: "A", name: "P27u-20 (1)"))
@@ -514,6 +616,7 @@ enum WallpaperFixtures {
         fresh.pauseOnBattery = true
         fresh.pauseInLowPower = false
         fresh.setStillFrame = false
+        fresh.syncDisplays = false
         fresh.desktopPictures.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
         fresh.desktopPictures.requestRestore("A")
 
@@ -522,13 +625,14 @@ enum WallpaperFixtures {
         #expect(reread.pauseOnBattery == true)
         #expect(reread.pauseInLowPower == false)
         #expect(reread.setStillFrame == false)
+        #expect(reread.syncDisplays == false)
         #expect(reread.desktopPictures == fresh.desktopPictures)
         #expect(reread.desktopPictures["A"]?.original == mountainsPicture)
         #expect(reread.desktopPictures["A"]?.restorePending == true)
         // Every key is the feature's own.
         let keys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("wallpaper.") }
         #expect(Set(keys) == ["wallpaper.assignments", "wallpaper.pauseOnBattery", "wallpaper.pauseInLowPower",
-                              "wallpaper.setStillFrame", "wallpaper.desktopPictures"])
+                              "wallpaper.setStillFrame", "wallpaper.syncDisplays", "wallpaper.desktopPictures"])
         // Unreadable data falls back to none rather than crashing.
         defaults.set(Data("garbage".utf8), forKey: "wallpaper.assignments")
         defaults.set(Data("garbage".utf8), forKey: "wallpaper.desktopPictures")

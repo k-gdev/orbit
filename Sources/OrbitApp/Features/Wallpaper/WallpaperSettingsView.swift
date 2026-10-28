@@ -1,8 +1,8 @@
 import OrbitCore
 import SwiftUI
 
-/// Wallpaper's Settings page: each display's wallpaper (unplugged ones too), the pause preferences, the still frame
-/// switch, and the downloaded aerials.
+/// Wallpaper's Settings page: each display's wallpaper (unplugged ones too), the same-on-all-displays switch, the
+/// pause preferences, the still frame switch, and the downloaded aerials.
 struct WallpaperSettingsView: View {
     @ObservedObject var model: WallpaperModel
     @ObservedObject var settings: WallpaperSettings
@@ -23,6 +23,11 @@ struct WallpaperSettingsView: View {
                     if index > 0 { Divider() }
                     WallpaperSettingsRow(model: model, display: display)
                 }
+            }
+
+            SettingsSection("Sync", footnote: "Choosing a wallpaper sets it on every connected display. Turning this on matches "
+                            + "them to the main display's wallpaper.") {
+                Toggle("Same on all displays", isOn: Binding(get: { settings.syncDisplays }, set: { model.setSyncDisplays($0) }))
             }
 
             SettingsSection("Playback", footnote: "Wallpapers always pause while a full-screen app or window covers the display, "
