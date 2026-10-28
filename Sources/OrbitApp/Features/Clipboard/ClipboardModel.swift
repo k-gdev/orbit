@@ -16,6 +16,9 @@ final class ClipboardModel: ObservableObject {
 
     @Published private(set) var history = ClipboardHistory()
     private var isLoaded = false
+    /// Set when the on-disk index was unreadable and could not be kept: nothing is written, so that
+    /// file (and every blob) stays exactly as it was.
+    private var persistenceBlocked = false
 
     /// The clock, replaced by a fixed one in snapshots so relative times are stable.
     var now: () -> Date = { Date() }
@@ -49,11 +52,18 @@ final class ClipboardModel: ObservableObject {
         let result = store.load()
         let usable = store.itemsWithPayloads(result.items)
         history = ClipboardHistory(items: usable)
-        if result.corruptBackup == nil {
-            store.removeOrphans(keeping: Set(usable.compactMap(\.payloadFile)))
-        } else {
-            Log.error("clipboard: the history index was unreadable; kept as \(result.corruptBackup?.lastPathComponent ?? "a backup")")
+        if result.indexWasUnreadable {
+            if let backup = result.corruptBackup {
+                Log.error("clipboard: the history index was unreadable; kept as \(backup.lastPathComponent)")
+            } else {
+                // It could not be set aside or copied either, so it must not be overwritten: run this
+                // session without saving, and leave every file alone.
+                persistenceBlocked = true
+                Log.error("clipboard: the history index was unreadable and could not be kept; history is not saved this session")
+            }
         }
+        // Orphaned blobs are swept only after a clean read (never after an unreadable or partly read index).
+        store.sweepOrphans(after: result, keeping: Set(usable.compactMap(\.payloadFile)))
         if usable.count != result.items.count || result.droppedCount > 0 { save() }
         enforceLimits()
     }
@@ -69,6 +79,7 @@ final class ClipboardModel: ObservableObject {
     /// Adds a copy. The same content again moves its entry to the top (no second file is written).
     func record(_ capture: ClipboardCapture) {
         loadIfNeeded()
+        guard !persistenceBlocked else { return }
         let limits = settings.limits
         guard limits.allowsItem(ofSize: capture.payload.count) else { return }
         var item = capture.makeItem(payloadFile: nil)
@@ -128,7 +139,7 @@ final class ClipboardModel: ObservableObject {
     }
 
     private func save() {
-        guard let store else { return }
+        guard let store, !persistenceBlocked else { return }
         do { try store.save(history.items) } catch { Log.error("clipboard: could not save the history: \(error)") }
     }
 

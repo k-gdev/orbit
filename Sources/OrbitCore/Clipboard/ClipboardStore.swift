@@ -31,7 +31,13 @@ public struct ClipboardStore: Sendable {
         /// Entries in the index that could not be read and were left out.
         public var droppedCount = 0
         /// Where the original index was kept when it was unusable or entries had to be dropped.
+        /// Nil does NOT mean the index was fine: see `indexWasUnreadable`.
         public var corruptBackup: URL?
+        /// True when an index file existed but could not be used (broken, or from a newer Orbit). Set
+        /// whether or not keeping a copy of it worked. While true, nothing may be deleted on the strength
+        /// of "no entry refers to this blob", and when `corruptBackup` is also nil the file could not be
+        /// preserved, so the caller must not overwrite it.
+        public var indexWasUnreadable = false
     }
 
     // MARK: Index
@@ -48,8 +54,15 @@ public struct ClipboardStore: Sendable {
 
         struct Lossy: Decodable {
             let item: ClipboardItem?
+            /// The entry's blob name even when the rest of the entry could not be read.
+            let rawPayloadFile: String?
+
+            private enum Keys: String, CodingKey { case payloadFile }
+
             init(from decoder: Decoder) throws {
                 item = try? ClipboardItem(from: decoder)
+                rawPayloadFile = (try? decoder.container(keyedBy: Keys.self))
+                    .flatMap { try? $0.decodeIfPresent(String.self, forKey: .payloadFile) }
             }
         }
     }
@@ -68,20 +81,32 @@ public struct ClipboardStore: Sendable {
     }
 
     /// Reads the index. Missing: empty. Unreadable (not JSON, wrong shape, or a newer version): the
-    /// file is renamed to `index.corrupt-<date>.json` and the result is empty. Some entries unreadable:
-    /// the good ones are returned and a copy of the original is kept.
-    public func load(now: Date = Date()) -> LoadResult {
+    /// file is renamed to `index.corrupt-<date>.json` (or, if that fails, copied there) and the result is
+    /// empty with `indexWasUnreadable` set. Some entries unreadable: the good ones are returned and a copy
+    /// of the original is kept. `move` and `copy` are the file operations, replaceable in tests.
+    public func load(now: Date = Date(),
+                     move: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) },
+                     copy: (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }) -> LoadResult {
         let fm = FileManager.default
         guard fm.fileExists(atPath: indexURL.path) else { return LoadResult(items: []) }
         let decoded: LenientIndex? = (try? Data(contentsOf: indexURL))
             .flatMap { try? Self.makeDecoder().decode(LenientIndex.self, from: $0) }
         guard let decoded, decoded.version >= 1, decoded.version <= Self.currentVersion else {
-            return LoadResult(items: [], corruptBackup: moveAsideCorruptIndex(now: now))
+            let target = backupURL(now: now)
+            var kept: URL?
+            if (try? move(indexURL, target)) != nil {
+                kept = target
+            } else if (try? copy(indexURL, target)) != nil {
+                kept = target
+            }
+            return LoadResult(items: [], corruptBackup: kept, indexWasUnreadable: true)
         }
         let items = decoded.items.compactMap(\.item)
         let dropped = decoded.items.count - items.count
         guard dropped > 0 else { return LoadResult(items: items) }
-        return LoadResult(items: items, droppedCount: dropped, corruptBackup: copyAsideIndex(now: now))
+        let target = backupURL(now: now)
+        let kept = (try? copy(indexURL, target)) != nil ? target : nil
+        return LoadResult(items: items, droppedCount: dropped, corruptBackup: kept)
     }
 
     /// Writes the index atomically.
@@ -104,26 +129,6 @@ public struct ClipboardStore: Sendable {
             n += 1
         }
         return candidate
-    }
-
-    private func moveAsideCorruptIndex(now: Date) -> URL? {
-        let target = backupURL(now: now)
-        do {
-            try FileManager.default.moveItem(at: indexURL, to: target)
-            return target
-        } catch {
-            return nil
-        }
-    }
-
-    private func copyAsideIndex(now: Date) -> URL? {
-        let target = backupURL(now: now)
-        do {
-            try FileManager.default.copyItem(at: indexURL, to: target)
-            return target
-        } catch {
-            return nil
-        }
     }
 
     // MARK: Blobs
@@ -183,13 +188,39 @@ public struct ClipboardStore: Sendable {
     }
 
     /// Deletes blob files that no entry refers to (left behind by a crash between writing a blob and
-    /// saving the index) and returns their names. Only files named like blobs are considered.
+    /// saving the index) and returns their names. Only files named like blobs are considered. Blobs that
+    /// an `index.corrupt-*` backup still names are kept (they may be what the user wants back), and when
+    /// a backup is too broken to read, so that nothing can be ruled out, nothing is deleted at all.
     @discardableResult
     public func removeOrphans(keeping referenced: Set<String>) -> [String] {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        let orphans = names.filter { Self.isSafePayloadName($0) && !referenced.contains($0) }
+        guard let inBackups = blobNamesInBackups(among: names) else { return [] }
+        let protected = referenced.union(inBackups)
+        let orphans = names.filter { Self.isSafePayloadName($0) && !protected.contains($0) }
         deletePayloads(orphans)
         return orphans
+    }
+
+    /// The tidy-up after `load()`: removes orphaned blobs, but only when the index was read cleanly
+    /// (nothing unreadable, nothing dropped). After a damaged index nothing is deleted at all.
+    @discardableResult
+    public func sweepOrphans(after load: LoadResult, keeping referenced: Set<String>) -> [String] {
+        guard !load.indexWasUnreadable, load.droppedCount == 0 else { return [] }
+        return removeOrphans(keeping: referenced)
+    }
+
+    /// The blob names the `index.corrupt-*.json` files among `names` still refer to, or nil when one of
+    /// them cannot be parsed (then no blob can be proven unreferenced).
+    private func blobNamesInBackups(among names: [String]) -> Set<String>? {
+        var found = Set<String>()
+        for name in names where name.hasPrefix("index.corrupt-") && name.hasSuffix(".json") {
+            let url = directory.appending(path: name, directoryHint: .notDirectory)
+            guard let data = try? Data(contentsOf: url),
+                  let index = try? Self.makeDecoder().decode(LenientIndex.self, from: data) else { return nil }
+            found.formUnion(index.items.compactMap { $0.item?.payloadFile })
+            found.formUnion(index.items.compactMap { $0.rawPayloadFile })
+        }
+        return found
     }
 
     // MARK: Folder

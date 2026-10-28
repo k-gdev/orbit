@@ -418,6 +418,133 @@ import Testing
             #expect(try Data(contentsOf: stranger) == Data("mine".utf8))
         }
 
+        // MARK: Unreadable index must never cost blobs
+
+        private struct MoveFailure: Error {}
+
+        /// A store with three blobs on disk and an index that is then wrecked (cut off mid-way).
+        private static func storeWithWreckedIndex() throws -> (root: URL, store: ClipboardStore, blobs: [String]) {
+            let root = Fixtures.tempDir()
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            let whole = try Data(contentsOf: store.indexURL)
+            try whole.prefix(whole.count * 3 / 4).write(to: store.indexURL)   // truncated JSON
+            return (root, store, items.compactMap(\.payloadFile))
+        }
+
+        @Test func unreadableIndexNeverSweepsBlobs() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let loaded = store.load()
+            #expect(loaded.items.isEmpty)
+            #expect(loaded.indexWasUnreadable)
+            #expect(loaded.corruptBackup != nil)
+            // The caller's tidy-up must do nothing: those blobs are what the user lost track of.
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+        }
+
+        @Test func failedMoveStillCountsAsUnreadable() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let original = try Data(contentsOf: store.indexURL)
+            // The rename fails: a copy keeps the bytes, and the index still counts as unreadable.
+            let loaded = store.load(move: { _, _ in throw MoveFailure() })
+            #expect(loaded.indexWasUnreadable)
+            let backup = try #require(loaded.corruptBackup, "falls back to copying the file")
+            #expect(try Data(contentsOf: backup) == original)
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+
+            // Neither a rename nor a copy works: nothing is kept, so the caller must not touch anything.
+            let stuck = store.load(move: { _, _ in throw MoveFailure() }, copy: { _, _ in throw MoveFailure() })
+            #expect(stuck.indexWasUnreadable)
+            #expect(stuck.corruptBackup == nil)
+            #expect(store.sweepOrphans(after: stuck, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+        }
+
+        @Test func readOnlyFolderLosesNothing() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+                try? FileManager.default.removeItem(at: root)
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+            let loaded = store.load()   // the real rename and copy both fail here
+            #expect(loaded.indexWasUnreadable)
+            #expect(loaded.items.isEmpty)
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+            #expect(FileManager.default.fileExists(atPath: store.indexURL.path), "the unreadable index is still there")
+        }
+
+        @Test func sweepNeedsAHealthyIndex() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let kept = ClipboardStore.newPayloadName(for: .text)
+            let orphan = ClipboardStore.newPayloadName(for: .text)
+            for name in [kept, orphan] { try store.writePayload(Data("x".utf8), named: name) }
+            // Healthy: the orphan goes.
+            let healthy = ClipboardStore.LoadResult(items: [])
+            #expect(store.sweepOrphans(after: healthy, keeping: [kept]) == [orphan])
+            // Entries were dropped on load: hold off, their blobs may be recoverable.
+            let partial = ClipboardStore.LoadResult(items: [], droppedCount: 1, corruptBackup: nil)
+            let again = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: again)
+            #expect(store.sweepOrphans(after: partial, keeping: [kept]).isEmpty)
+            #expect(store.payloadExists(named: again))
+        }
+
+        @Test func backupsKeepTheirBlobs() throws {
+            // One entry of the index was unreadable: the good ones were kept and the original was copied
+            // aside. On the next launch the blob only the backup names must survive the sweep, while a
+            // true orphan still goes.
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            var json = try #require(String(data: Data(contentsOf: store.indexURL), encoding: .utf8))
+            json = json.replacingOccurrences(of: "\"kind\":\"text\"", with: "\"kind\":\"hologram\"", options: [], range: json.range(of: "\"kind\":\"text\""))
+            try Data(json.utf8).write(to: store.indexURL)
+
+            let first = store.load()
+            #expect(first.droppedCount == 1)
+            #expect(first.corruptBackup != nil)
+            let lost = try #require(items.first { entry in !first.items.contains { $0.id == entry.id } }?.payloadFile)
+            try store.save(first.items)   // the cleaned-up history
+            let stranger = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: stranger)
+
+            let second = store.load()
+            #expect(!second.indexWasUnreadable && second.droppedCount == 0)
+            let swept = store.sweepOrphans(after: second, keeping: Set(second.items.compactMap(\.payloadFile)))
+            #expect(swept == [stranger], "only the blob no entry and no backup names is an orphan")
+            #expect(store.payloadExists(named: lost), "the backup still names this one")
+        }
+
+        @Test func aBrokenBackupBlocksSweepingAltogether() throws {
+            // The index was cut off, set aside, and a fresh one written. The backup can't be read, so no
+            // blob can be proven unneeded: nothing is deleted on later launches either.
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let first = store.load()
+            #expect(first.corruptBackup != nil)
+            try store.save([])   // the history started over
+            let stranger = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: stranger)
+
+            let second = store.load()
+            #expect(!second.indexWasUnreadable)
+            #expect(store.sweepOrphans(after: second, keeping: []).isEmpty)
+            for name in blobs + [stranger] { #expect(store.payloadExists(named: name)) }
+        }
+
         @Test func storeIsPrivate() throws {
             let root = Fixtures.tempDir()
             defer { try? FileManager.default.removeItem(at: root) }
