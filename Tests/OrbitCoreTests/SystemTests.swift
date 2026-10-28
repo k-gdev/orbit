@@ -38,4 +38,30 @@ import Testing
         #expect(CPULoad(previous: [], current: []).total == 0)
         #expect(CPULoad(previous: [], current: []).perCore.isEmpty)
     }
+
+    @Test func clustersSplitByPerfLevel() {
+        // M5 Max: hw.perflevel0 "Super" (6), hw.perflevel1 "Performance" (12). The kernel numbers the
+        // slowest level first: cpu0-11 are the Performance cores, cpu12-17 the Super cores.
+        let m5 = ClusterLayout([(name: "Super", logicalCPUs: 6), (name: "Performance", logicalCPUs: 12)])
+        #expect(m5.coreCount == 18)
+        let perCore = Array(repeating: 0.1, count: 12) + Array(repeating: 0.9, count: 6)
+        let clusters = m5.clusters(perCore)
+        #expect(clusters.map(\.name) == ["Super", "Performance"])
+        #expect(clusters.map(\.cores.count) == [6, 12])
+        #expect(abs(clusters[0].average - 0.9) < 1e-9)
+        #expect(abs(clusters[1].average - 0.1) < 1e-9)
+
+        // M1: perflevel0 "Performance" (4), perflevel1 "Efficiency" (4); cpu0-3 are Efficiency.
+        let m1 = ClusterLayout([(name: "Performance", logicalCPUs: 4), (name: "Efficiency", logicalCPUs: 4)])
+        let m1Clusters = m1.clusters([0.2, 0.2, 0.2, 0.2, 0.5, 0.6, 0.7, 0.8])
+        #expect(m1Clusters.map(\.name) == ["Performance", "Efficiency"])
+        #expect(m1Clusters[0].cores == [0.5, 0.6, 0.7, 0.8])
+        #expect(abs(m1Clusters[0].average - 0.65) < 1e-9)
+        #expect(m1Clusters[1].cores == [0.2, 0.2, 0.2, 0.2])
+
+        // Loads that don't match the layout (or no perf levels at all, as on Intel) make one "CPU" cluster.
+        #expect(m1.clusters([0.5, 0.5]).map(\.name) == ["CPU"])
+        #expect(ClusterLayout([]).clusters([0.25, 0.75]) == [ClusterLoad(name: "CPU", cores: [0.25, 0.75])])
+        #expect(ClusterLayout([]).clusters([]).isEmpty)
+    }
 }
