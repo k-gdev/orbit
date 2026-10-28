@@ -16,7 +16,8 @@ import OrbitCore
 ///   tap of the app, a failure of the current tap releases it and every older one (a failed replaced tap takes
 ///   only itself), and releasing an app releases all its taps, so no replaced tap can outlive its app's release.
 ///   Only the newest replaced tap that has started is kept that way; replaced taps that never started (a quiet
-///   app rebuilt as its output flaps) are released at once, so they can't pile up.
+///   app rebuilt as its output flaps) are released at once, so they can't pile up. While the app plays, the newest
+///   one not yet noted as started is kept too (its start may just have returned).
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
 /// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
 ///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
@@ -253,9 +254,9 @@ final class SoundEngine {
     }
 
     /// Builds a new current tap for the app (`TapRoster`). Of the taps it replaces, the newest one that has started
-    /// retires until the new one has started; the others never started (they aren't playing) and are released at
-    /// once. The new tap's start releases every older tap, its failure (while current) releases it and every older
-    /// tap.
+    /// retires until the new one has started, and so does the newest one not noted as started if its processes are
+    /// playing right now; the others never started (they aren't playing) and are released at once. The new tap's
+    /// start releases every older tap, its failure (while current) releases it and every older tap.
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
         let serial = nextSerial
         nextSerial += 1
@@ -275,7 +276,9 @@ final class SoundEngine {
                                   self.onAppsChanged?()
                               })
         alive[serial] = tap
-        releaseTaps(roster.install(serial, for: bundleID))
+        // A replaced tap whose start just returned (its app began to play) may not have set `hasStarted` yet: while
+        // its processes play right now, it is kept rather than released mid-sound (`TapRoster.install`).
+        releaseTaps(roster.install(serial, for: bundleID, isPlaying: { self.alive[$0]?.processesArePlaying() ?? false }))
         activity[bundleID] = TapActivity(now: .now, isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
         onAppsChanged?()
     }

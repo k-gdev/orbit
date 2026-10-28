@@ -165,12 +165,15 @@ public struct TapLifecycle: Equatable, Sendable {
 /// current tap and all its predecessors (a tap released before it got going reports nothing, so its
 /// predecessors can't wait for its report). Only a tap that has started can be playing the app, so a new tap
 /// keeps just the newest such predecessor and releases the others at once: a quiet app rebuilt again and again
-/// (an output flapping, its processes churning) never piles up replaced taps. Pure bookkeeping; the engine
-/// invalidates what the calls return.
+/// (an output flapping, its processes churning) never piles up replaced taps. The one exception: while the app is
+/// playing, the newest replaced tap that hasn't been noted as started is kept too, since its start may just have
+/// returned (with its report still on the way) and it may be the tap playing the app. Pure bookkeeping; the
+/// engine invalidates what the calls return.
 public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     /// Each app's current tap.
     public private(set) var currentByApp: [String: ID] = [:]
-    /// Each app's replaced taps still alive, oldest first (after an install, at most one: one that has started).
+    /// Each app's replaced taps still alive, oldest first. After an install, at most two: the newest one that has
+    /// started, and (only if the app was playing then) the newest one not noted as started.
     private var retiringByApp: [String: [ID]] = [:]
     /// The live taps that have started (their IO has run, so they may be playing, or paused and re-armed).
     private var startedTaps: Set<ID> = []
@@ -183,19 +186,24 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     public var all: [ID] { Array(currentByApp.values) + retiringByApp.values.flatMap { $0 } }
     public var isEmpty: Bool { currentByApp.isEmpty && retiringByApp.isEmpty }
 
-    /// `tap` becomes the app's current tap. Of the taps it replaces, only the newest one that has started stays
-    /// (it may be playing the app at its setting) until `tap` starts. The others never started: their start still
-    /// waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would hold a
-    /// process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
-    /// sound at stale gains and devices. Returns those to release.
+    /// `tap` becomes the app's current tap. Of the taps it replaces, the newest one that has started stays (it may be
+    /// playing the app at its setting) until `tap` starts. The others haven't been noted as started: normally their
+    /// start still waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would
+    /// hold a process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
+    /// sound at stale gains and devices. But if the newest of them belongs to an app playing right now (`isPlaying`,
+    /// asked about that one tap only: its processes' `IsRunningOutput`), its start may have just returned with the
+    /// report still on its way, so it may be playing the app: it stays too. Returns those to release.
     @discardableResult
-    public mutating func install(_ tap: ID, for app: String) -> [ID] {
+    public mutating func install(_ tap: ID, for app: String, isPlaying: (ID) -> Bool = { _ in false }) -> [ID] {
         var replaced = retiringByApp.removeValue(forKey: app) ?? []
         if let old = currentByApp[app] { replaced.append(old) }
         currentByApp[app] = tap
-        let kept = replaced.last(where: startedTaps.contains)
-        if let kept { retiringByApp[app] = [kept] }
-        return forget(replaced.filter { $0 != kept })
+        // A start releases every older tap, so taps not noted as started are all newer than the newest that started.
+        let started = replaced.last(where: startedTaps.contains)
+        let justStarting = replaced.last.flatMap { !startedTaps.contains($0) && isPlaying($0) ? $0 : nil }
+        let kept = [started, justStarting].compactMap { $0 }
+        if !kept.isEmpty { retiringByApp[app] = kept }
+        return forget(replaced.filter { !kept.contains($0) })
     }
 
     /// `tap` has started: every tap of the app built before it is done. Returns those to release.

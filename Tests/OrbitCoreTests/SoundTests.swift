@@ -1151,6 +1151,83 @@ extension SoundTests {
             }
         }
 
+        /// G2: a rebuild in the gap between a tap's start returning (its app began to play) and that start being noted
+        /// (`started`). The tap still counts as never started, but its app's processes are playing right now, so it may
+        /// be the one playing the app: it is kept until its successor starts, not released while it plays. The newest
+        /// tap that started stays too. Only the newest never-started tap is kept that way; a quiet app's never-started
+        /// taps still go at once.
+        @Test func aTapThatJustStartedIsKeptWhileItsAppPlays() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
+            roster.install("B", for: "chrome")                          // B's start returns as Chrome plays; not noted yet
+            var asked: [String] = []
+            let c = roster.install("C", for: "chrome", isPlaying: { asked.append($0); return $0 == "B" })
+            #expect(c.isEmpty)
+            #expect(asked == ["B"])                                     // only the newest never-started tap is looked at
+            #expect(roster.retiring(for: "chrome") == ["A", "B"])
+            let cStarted = roster.started("C", for: "chrome")
+            #expect(Set(cStarted) == ["A", "B"])
+            #expect(roster.all == ["C"])
+            // B's start is noted before C starts: B takes A with it, then C takes B.
+            var noted = TapRoster<String>()
+            noted.install("A", for: "chrome")
+            _ = noted.started("A", for: "chrome")
+            noted.install("B", for: "chrome")
+            _ = noted.install("C", for: "chrome", isPlaying: { _ in true })
+            #expect(noted.started("B", for: "chrome") == ["A"])
+            #expect(noted.retiring(for: "chrome") == ["B"])
+            #expect(noted.started("C", for: "chrome") == ["B"])
+            // Several never-started taps while playing: only the newest is kept.
+            var app = TapRoster<String>()
+            app.install("B", for: "app")
+            #expect(app.install("C", for: "app", isPlaying: { _ in true }).isEmpty)
+            #expect(app.retiring(for: "app") == ["B"])
+            #expect(app.install("D", for: "app", isPlaying: { _ in true }) == ["B"])
+            #expect(app.retiring(for: "app") == ["C"])
+            // Quiet again: never-started taps go at once.
+            #expect(Set(app.install("E", for: "app", isPlaying: { _ in false })) == ["C", "D"])
+            #expect(app.retiring(for: "app").isEmpty)
+            // A started tap is kept without asking.
+            var started = TapRoster<String>()
+            started.install("A", for: "app")
+            _ = started.started("A", for: "app")
+            var looked = false
+            #expect(started.install("B", for: "app", isPlaying: { _ in looked = true; return true }).isEmpty)
+            #expect(!looked && started.retiring(for: "app") == ["A"])
+
+            // Any mix of rebuilds (playing or quiet), starts and failures: at most two replaced taps stay, at most one
+            // of them not noted as started, and that one only if the app was playing at the last rebuild.
+            var mix = TapRoster<Int>()
+            var seen: Set<Int> = []
+            var seed: UInt64 = 11
+            func next(_ bound: Int) -> Int {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return Int((seed >> 33) % UInt64(bound))
+            }
+            var serial = 0
+            var playingAtLastInstall = false
+            for _ in 0..<500 {
+                switch next(4) {
+                case 0, 1:
+                    serial += 1
+                    let playing = next(2) == 0
+                    playingAtLastInstall = playing
+                    _ = mix.install(serial, for: "app", isPlaying: { _ in playing })
+                case 2:
+                    let tap = next(serial + 1)
+                    if mix.all.contains(tap) { seen.insert(tap) }
+                    _ = mix.started(tap, for: "app")
+                default:
+                    _ = mix.failed(next(serial + 1), for: "app")
+                }
+                let retiring = mix.retiring(for: "app")
+                let unnoted = retiring.filter { !seen.contains($0) }
+                #expect(retiring.count <= 2)
+                #expect(unnoted.count <= (playingAtLastInstall ? 1 : 0))
+            }
+        }
+
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {
             #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)
