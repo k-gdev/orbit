@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import OrbitCore
@@ -271,6 +272,32 @@ import Testing
         #expect(AudioTransport(fourCC: 0x6772_7570) == .aggregate)    // 'grup'
         #expect(AudioTransport(fourCC: 0) == .unknown)
         #expect(device("x", .usb, input: 1, output: 0).hasInput && !device("x", .usb, input: 1, output: 0).hasOutput)
+    }
+
+    /// A volume drag changes the state live (the engine follows it) but writes defaults only when it ends.
+    @Test func settingsDeferWritesDuringDrag() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let s = SoundSettings(defaults: d)
+        var published = 0
+        let watch = s.$appStates.dropFirst().sink { _ in published += 1 }
+        for volume in stride(from: 99.0, through: 80, by: -1) {
+            s.setPreference(AppAudioPreference(volume: volume), for: "com.apple.Music", persist: false)
+        }
+        #expect(published == 20)                              // every tick is live
+        #expect(s.preference(for: "com.apple.Music").volume == 80)
+        #expect(d.data(forKey: "sound.appStates") == nil)     // but nothing was written yet
+        s.persistAppStates()
+        #expect(SoundSettings(defaults: d).preference(for: "com.apple.Music").volume == 80)
+        // Ordinary changes (mute, output, reset) still write at once.
+        s.setPreference(AppAudioPreference(volume: 80, muted: true), for: "com.apple.Music")
+        #expect(SoundSettings(defaults: d).preference(for: "com.apple.Music").muted)
+        // With "remember" off, finishing a drag writes nothing.
+        s.rememberAppStates = false
+        s.setPreference(AppAudioPreference(volume: 30), for: "com.apple.Music", persist: false)
+        s.persistAppStates()
+        #expect(d.data(forKey: "sound.appStates") == nil)
+        watch.cancel()
     }
 
     @Test func settingsRejectBadData() throws {

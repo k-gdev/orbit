@@ -74,6 +74,7 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        settings.persistAppStates()
         subscriptions.removeAll()
         if #available(macOS 14.2, *) { engine?.stop() }
         engineBox = nil
@@ -92,6 +93,7 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
 
     func panelDidDisappear() {
         panelVisible = false
+        settings.persistAppStates()   // in case a drag didn't report its end
         if #available(macOS 14.2, *) { engine?.panelVisible = false }
     }
 

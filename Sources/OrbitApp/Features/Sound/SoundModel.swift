@@ -111,10 +111,16 @@ final class SoundPanelModel: ObservableObject {
 
     func preference(for bundleID: String) -> AppAudioPreference { settings.preference(for: bundleID) }
 
+    /// Each tick of a drag: live (the engine follows it), written to defaults by `finishVolumeChange()`.
     func setVolume(_ percent: Double, for bundleID: String) {
         var preference = settings.preference(for: bundleID)
         preference.volume = percent.rounded()
-        settings.setPreference(preference, for: bundleID)
+        settings.setPreference(preference, for: bundleID, persist: false)
+    }
+
+    /// The drag (or scroll) ended: write the per-app states once.
+    func finishVolumeChange() {
+        settings.persistAppStates()
     }
 
     func toggleMute(_ bundleID: String) {

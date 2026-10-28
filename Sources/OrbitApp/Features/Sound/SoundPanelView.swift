@@ -188,7 +188,8 @@ struct SoundAppRow: View {
                        leading: AnyView(SoundAppIconView(icon: app.identity.icon, size: 22).opacity(preference.muted ? 0.5 : 1)),
                        label: AnyView(label(muted: preference.muted, pinned: pinned)),
                        valueText: { preference.muted ? "Muted" : "\(Int($0.rounded()))%" },
-                       onLeadingTap: { model.toggleMute(app.bundleID) })
+                       onLeadingTap: { model.toggleMute(app.bundleID) },
+                       onEditingEnded: { model.finishVolumeChange() })
                 .help(app.tapFailed
                       ? "Orbit couldn't take over \(app.name)'s audio, so this volume and output aren't applied (it plays as usual). See Orbit's log for why."
                       : (preference.muted ? "Click the icon to unmute \(app.name)" : "Click the icon to mute \(app.name)"))

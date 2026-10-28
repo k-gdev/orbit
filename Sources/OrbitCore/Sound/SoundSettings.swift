@@ -75,8 +75,11 @@ public final class SoundSettings: ObservableObject {
     /// Bundle ID → that app's volume, mute and output. Only non-default states are kept. Persisted (as
     /// JSON) only while `rememberAppStates` is on.
     @Published public var appStates: [String: AppAudioPreference] {
-        didSet { saveAppStates() }
+        didSet { if !deferringSave { saveAppStates() } }
     }
+
+    /// True while `setPreference(_:for:persist: false)` changes the state without writing it.
+    private var deferringSave = false
 
     /// Whether per-app volume, mute and output survive a relaunch (default on). Turning it off removes the
     /// stored copy; the states still apply until Orbit quits.
@@ -122,13 +125,21 @@ public final class SoundSettings: ObservableObject {
         appStates[bundleID] ?? .unity
     }
 
-    /// Stores the app's settings; the default state removes its entry.
-    public func setPreference(_ preference: AppAudioPreference, for bundleID: String) {
+    /// Stores the app's settings; the default state removes its entry. With `persist: false` (each tick of a
+    /// volume drag) the change is live (published) but not written to defaults until `persistAppStates()`.
+    public func setPreference(_ preference: AppAudioPreference, for bundleID: String, persist: Bool = true) {
+        deferringSave = !persist
+        defer { deferringSave = false }
         if preference.isDefault {
             if appStates[bundleID] != nil { appStates[bundleID] = nil }
         } else if appStates[bundleID] != preference {
             appStates[bundleID] = preference
         }
+    }
+
+    /// Writes the per-app states (when "remember" is on): the end of a volume drag, the panel closing.
+    public func persistAppStates() {
+        saveAppStates()
     }
 
     /// Drops every app's settings (they all go back to 100 %, unmuted, Same as Output).
