@@ -487,7 +487,7 @@ extension SoundTests {
         /// "unmuted". That must not be taken for the user unmuting elsewhere: until a reading shows Orbit's write
         /// (or `timeout` passes) it is projected to what the write will leave and not trusted.
         @Test func ownWriteIsNotMistakenForOutsideUnmute() {
-            let t0 = Date(timeIntervalSinceReferenceDate: 2000)
+            let t0 = ContinuousClock.now
             var state = MicMuteState()
             var guardian = MicWriteConfirmation()
             let r0 = guardian.review(headset, now: t0)
@@ -496,7 +496,7 @@ extension SoundTests {
             guardian.wrote(actions, at: t0)
             #expect(guardian.isWaiting)
             // Still reads unmuted a moment later: shown as muted, not trusted, Orbit's mute stays.
-            let r1 = guardian.review(headset, now: t0.addingTimeInterval(0.02))
+            let r1 = guardian.review(headset, now: t0 + .seconds(0.02))
             #expect(!r1.trusted)
             #expect(r1.reading.isMuted)
             #expect(state.presentation(for: r1.reading) == .mutedByOrbit)
@@ -504,33 +504,33 @@ extension SoundTests {
             // The write lands: confirmed, the wait ends.
             var muted = headset
             muted.isMuted = true
-            let r2 = guardian.review(muted, now: t0.addingTimeInterval(0.05))
+            let r2 = guardian.review(muted, now: t0 + .seconds(0.05))
             #expect(r2.trusted)
             #expect(!guardian.isWaiting)
             let stillMuted = state.deviceChanged(r2.reading)
             #expect(stillMuted)
             // Later the user really unmutes elsewhere: trusted, Orbit lets go.
-            let r3 = guardian.review(headset, now: t0.addingTimeInterval(9))
+            let r3 = guardian.review(headset, now: t0 + .seconds(9))
             #expect(r3.trusted)
             let after = state.deviceChanged(r3.reading)
             #expect(!after)
             // A write that never shows up: after the timeout the reading counts again (the mute didn't take).
             let again = state.mute(headset) ?? []
             guardian.wrote(again, at: t0)
-            let r4 = guardian.review(headset, now: t0.addingTimeInterval(MicWriteConfirmation.timeout - 0.1))
+            let r4 = guardian.review(headset, now: t0 + MicWriteConfirmation.timeout - .milliseconds(100))
             #expect(!r4.trusted)
-            let r5 = guardian.review(headset, now: t0.addingTimeInterval(MicWriteConfirmation.timeout))
+            let r5 = guardian.review(headset, now: t0 + MicWriteConfirmation.timeout)
             #expect(r5.trusted && r5.reading == headset)
             #expect(!guardian.isWaiting)
             // Volume-muted: projected to 0 until the volume reads 0.
             var volumeState = MicMuteState()
             let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
             guardian.wrote(volumeState.mute(noMute) ?? [], at: t0)
-            let r6 = guardian.review(noMute, now: t0.addingTimeInterval(0.01))
+            let r6 = guardian.review(noMute, now: t0 + .seconds(0.01))
             #expect(!r6.trusted && r6.reading.volume == 0)
             var atZero = noMute
             atZero.volume = 0
-            let r7 = guardian.review(atZero, now: t0.addingTimeInterval(0.02))
+            let r7 = guardian.review(atZero, now: t0 + .seconds(0.02))
             #expect(r7.trusted)
             #expect(volumeState.reflects(atZero))
             #expect(!volumeState.reflects(noMute))
@@ -538,7 +538,7 @@ extension SoundTests {
             guardian.wrote([.setMute(deviceUID: "Headset", muted: true)], at: t0)
             var other = headset
             other.deviceUID = "Other"
-            let r8 = guardian.review(other, now: t0.addingTimeInterval(0.01))
+            let r8 = guardian.review(other, now: t0 + .seconds(0.01))
             #expect(r8.trusted && r8.reading == other)
             #expect(guardian.isWaiting)
             // Writing nothing waits for nothing, and doesn't end the wait for a write still landing.
@@ -553,7 +553,7 @@ extension SoundTests {
         /// and a quick second press must mute (not unmute again): the reading is projected to unmuted until the
         /// unmute shows, or the timeout passes (then the device's own state shows: the unmute didn't take).
         @Test func ownUnmuteDoesNotFlashOutsideMute() {
-            let t0 = Date(timeIntervalSinceReferenceDate: 3000)
+            let t0 = ContinuousClock.now
             var state = MicMuteState()
             _ = state.mute(headset)
             let undo = state.restoreActions()
@@ -562,25 +562,25 @@ extension SoundTests {
             guardian.wrote(undo, at: t0)
             var stillMuted = headset
             stillMuted.isMuted = true
-            let r1 = guardian.review(stillMuted, now: t0.addingTimeInterval(0.02))
+            let r1 = guardian.review(stillMuted, now: t0 + .seconds(0.02))
             #expect(!r1.trusted)
             #expect(!r1.reading.isMuted)
             #expect(state.presentation(for: r1.reading) == .unmuted)            // not .mutedElsewhere
-            let r2 = guardian.review(headset, now: t0.addingTimeInterval(0.05))  // the unmute landed
+            let r2 = guardian.review(headset, now: t0 + .seconds(0.05))  // the unmute landed
             #expect(r2.trusted && !guardian.isWaiting)
             // An unmute that never lands: after the timeout the device's own (muted) state shows.
             guardian.wrote(undo, at: t0)
-            let r3 = guardian.review(stillMuted, now: t0.addingTimeInterval(MicWriteConfirmation.timeout))
+            let r3 = guardian.review(stillMuted, now: t0 + MicWriteConfirmation.timeout)
             #expect(r3.trusted && r3.reading.isMuted)
             #expect(state.presentation(for: r3.reading) == .mutedElsewhere)
             // Unmuting a mute made elsewhere (a direct user action) is covered the same way.
             guardian.wrote(MicMuteState.directUnmute(stillMuted), at: t0)
-            let r4 = guardian.review(stillMuted, now: t0.addingTimeInterval(0.01))
+            let r4 = guardian.review(stillMuted, now: t0 + .seconds(0.01))
             #expect(!r4.trusted && !r4.reading.isMuted)
             // A volume restore is projected to the restored volume.
             let atZero = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0)
             guardian.wrote([.setVolume(deviceUID: "USB", volume: 0.62)], at: t0)
-            let r5 = guardian.review(atZero, now: t0.addingTimeInterval(0.01))
+            let r5 = guardian.review(atZero, now: t0 + .seconds(0.01))
             #expect(!r5.trusted && r5.reading.volume == 0.62)
         }
 
@@ -589,8 +589,8 @@ extension SoundTests {
         /// and the unmute landing afterwards is not taken for the user unmuting elsewhere: the mic ends up muted, as
         /// the last press asked. Writing nothing never ends the wait for a write still landing.
         @Test func quickMuteAfterOwnUnmuteIsNotLost() {
-            let t0 = Date(timeIntervalSinceReferenceDate: 4000)
-            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            let t0 = ContinuousClock.now
+            func at(_ seconds: Double) -> ContinuousClock.Instant { t0 + .seconds(seconds) }
             var muted = headset
             muted.isMuted = true
             var state = MicMuteState()
@@ -656,8 +656,8 @@ extension SoundTests {
         /// moves from the headset to the built-in mic (headset put back, built-in muted) and straight back while the
         /// headset still reads muted: the put-back still covers it, so muting it again records "was unmuted".
         @Test func writesToSeveralDevicesWaitApart() {
-            let t0 = Date(timeIntervalSinceReferenceDate: 5000)
-            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            let t0 = ContinuousClock.now
+            func at(_ seconds: Double) -> ContinuousClock.Instant { t0 + .seconds(seconds) }
             var mutedHeadset = headset
             mutedHeadset.isMuted = true
             let builtIn = MicDeviceReading(deviceUID: "BuiltIn", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
@@ -688,12 +688,12 @@ extension SoundTests {
             #expect(!superseded.trusted && !superseded.reading.isMuted)
             // Each write has its own timeout, and one that never shows stops waiting even if its mic isn't read again.
             guardian.wrote([.setMute(deviceUID: "BuiltIn", muted: true)], at: at(2.5))
-            let headsetExpired = guardian.review(mutedHeadset, now: at(1.01 + MicWriteConfirmation.timeout))
+            let headsetExpired = guardian.review(mutedHeadset, now: at(1.01) + MicWriteConfirmation.timeout)
             #expect(headsetExpired.trusted && headsetExpired.reading.isMuted)
-            let builtInWaits = guardian.review(builtIn, now: at(1.01 + MicWriteConfirmation.timeout))
+            let builtInWaits = guardian.review(builtIn, now: at(1.01) + MicWriteConfirmation.timeout)
             #expect(!builtInWaits.trusted)
             let other = MicDeviceReading(deviceUID: "Other", canSetMute: true, isMuted: false, canSetVolume: false, volume: nil)
-            _ = guardian.review(other, now: at(2.5 + MicWriteConfirmation.timeout))
+            _ = guardian.review(other, now: at(2.5) + MicWriteConfirmation.timeout)
             #expect(!guardian.isWaiting)
         }
 
@@ -927,15 +927,15 @@ extension SoundTests {
         /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
         /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
         @Test func tapPausesAfterIdleDelay() {
-            let t0 = Date(timeIntervalSinceReferenceDate: 1000)
-            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            let t0 = ContinuousClock.now
+            func at(_ seconds: Double) -> ContinuousClock.Instant { t0 + .seconds(seconds) }
             var activity = TapActivity(now: t0, isPlaying: true)
             #expect(activity.update(isPlaying: true, now: at(1)) == nil)
             #expect(activity.nextCheck() == nil)                       // playing: nothing to wait for
             #expect(activity.update(isPlaying: false, now: at(10)) == nil)
-            #expect(activity.nextCheck() == at(10 + TapActivity.idleDelay))
-            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay - 0.1)) == nil)
-            #expect(activity.update(isPlaying: false, now: at(10 + TapActivity.idleDelay)) == .pause)
+            #expect(activity.nextCheck() == at(10) + TapActivity.idleDelay)
+            #expect(activity.update(isPlaying: false, now: at(10) + TapActivity.idleDelay - .milliseconds(100)) == nil)
+            #expect(activity.update(isPlaying: false, now: at(10) + TapActivity.idleDelay) == .pause)
             #expect(activity.isPaused)
             #expect(activity.nextCheck() == nil)
             #expect(activity.update(isPlaying: false, now: at(60)) == nil)  // already paused: once per quiet spell
@@ -944,21 +944,21 @@ extension SoundTests {
             #expect(!activity.isPaused)
             #expect(activity.update(isPlaying: true, now: at(90)) == nil)
             #expect(activity.update(isPlaying: false, now: at(100)) == nil)
-            #expect(activity.nextCheck() == at(100 + TapActivity.idleDelay))
-            #expect(activity.update(isPlaying: false, now: at(100 + TapActivity.idleDelay)) == .pause)
+            #expect(activity.nextCheck() == at(100) + TapActivity.idleDelay)
+            #expect(activity.update(isPlaying: false, now: at(100) + TapActivity.idleDelay) == .pause)
             // N2: a tap built while its app is quiet is already waiting for audio (its own TapAutoStart start), so
             // it counts as paused: no pause gets queued behind that start to fire on the first sound.
             var quiet = TapActivity(now: t0, isPlaying: false)
             #expect(quiet.isPaused)
             #expect(quiet.nextCheck() == nil)
-            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == nil)
+            #expect(quiet.update(isPlaying: false, now: t0 + TapActivity.idleDelay) == nil)
             #expect(quiet.update(isPlaying: false, now: at(60)) == nil)
             // Once it has played, the usual quiet spell applies.
             #expect(quiet.update(isPlaying: true, now: at(61)) == nil)
             #expect(!quiet.isPaused)
             #expect(quiet.update(isPlaying: false, now: at(70)) == nil)
-            #expect(quiet.update(isPlaying: false, now: at(70 + TapActivity.idleDelay)) == .pause)
-            #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
+            #expect(quiet.update(isPlaying: false, now: at(70) + TapActivity.idleDelay) == .pause)
+            #expect(TapActivity.idleDelay >= .seconds(2) && TapActivity.idleDelay <= .seconds(10))
         }
 
         /// N3: releasing a tap never waits for a start that may only return with the app's next sound. While the

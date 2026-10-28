@@ -214,8 +214,8 @@ final class SoundEngine {
         activityCheck = nil
         guard isRunning else { return }
         let apps = monitor.apps()
-        let now = Date()
-        var next: Date?
+        let now = ContinuousClock.now
+        var next: ContinuousClock.Instant?
         for (bundleID, tap) in currentTaps {
             let playing = apps[bundleID]?.isPlaying ?? false
             var state = activity[bundleID] ?? TapActivity(now: now, isPlaying: playing)
@@ -229,7 +229,7 @@ final class SoundEngine {
         guard let next else { return }
         let work = DispatchWorkItem { [weak self] in self?.updateActivity() }
         activityCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(next.timeIntervalSince(now), 0.05), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max((next - now) / .seconds(1), 0.05), execute: work)
     }
 
     /// Where "Same as Output" keeps this app: the device it plays to on its own (an app that chose one in its
@@ -276,7 +276,7 @@ final class SoundEngine {
                               })
         alive[serial] = tap
         releaseTaps(roster.install(serial, for: bundleID))
-        activity[bundleID] = TapActivity(now: Date(), isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
+        activity[bundleID] = TapActivity(now: .now, isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
         onAppsChanged?()
     }
 

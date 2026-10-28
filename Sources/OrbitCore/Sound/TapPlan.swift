@@ -58,6 +58,9 @@ public struct TapPlan: Equatable, Sendable {
 /// coreaudiod's idle-sleep assertion up. So once the app has been quiet for `idleDelay` the aggregate is
 /// stopped and re-armed with `kAudioAggregateDeviceTapAutoStartKey`, which restarts it with the app's next
 /// audio. Nothing is rebuilt; with `.mutedWhenTapped` the app is never muted while the IO is stopped.
+///
+/// Times are on the monotonic `ContinuousClock`, so a change of the wall clock can't stretch a quiet spell (and
+/// keep an aggregate streaming silence meanwhile).
 public struct TapActivity: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
         /// Stop the aggregate's IO and re-arm it for the next audio.
@@ -65,38 +68,38 @@ public struct TapActivity: Equatable, Sendable {
     }
 
     /// How long an app must stay quiet before its aggregate pauses.
-    public static let idleDelay: TimeInterval = 5
+    public static let idleDelay: Duration = .seconds(5)
 
     /// The aggregate is stopped, waiting for the app's next audio.
     public private(set) var isPaused = false
     /// When the app went quiet; nil while it plays.
-    private var quietSince: Date?
+    private var quietSince: ContinuousClock.Instant?
 
     /// A tap built while its app is quiet counts as paused from the start: its first start already waits for
     /// the app's audio (TapAutoStart), so a pause queued behind it would only fire on the first sound.
-    public init(now: Date, isPlaying: Bool) {
+    public init(now: ContinuousClock.Instant, isPlaying: Bool) {
         quietSince = isPlaying ? nil : now
         isPaused = !isPlaying
     }
 
     /// Feeds whether the app is playing now (`kAudioProcessPropertyIsRunningOutput`). Returns `.pause` once per
     /// quiet spell, when it has lasted `idleDelay`.
-    public mutating func update(isPlaying: Bool, now: Date) -> Action? {
+    public mutating func update(isPlaying: Bool, now: ContinuousClock.Instant) -> Action? {
         if isPlaying {
             quietSince = nil
             isPaused = false
             return nil
         }
         if quietSince == nil { quietSince = now }
-        guard !isPaused, let since = quietSince, now.timeIntervalSince(since) >= Self.idleDelay else { return nil }
+        guard !isPaused, let since = quietSince, now - since >= Self.idleDelay else { return nil }
         isPaused = true
         return .pause
     }
 
     /// When to call `update` again (the end of the current quiet spell's delay), or nil when nothing is pending.
-    public func nextCheck() -> Date? {
+    public func nextCheck() -> ContinuousClock.Instant? {
         guard !isPaused, let since = quietSince else { return nil }
-        return since.addingTimeInterval(Self.idleDelay)
+        return since + Self.idleDelay
     }
 }
 

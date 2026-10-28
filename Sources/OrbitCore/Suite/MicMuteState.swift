@@ -49,13 +49,16 @@ public enum MicMutePresentation: Equatable, Sendable {
 /// evidently didn't take, and the device's own state shows again). Each write waits on its own: one to another
 /// device (the old mic put back as the input moves, a reconnected mic's pending undo) never ends the wait for the
 /// current input, and still covers its device if the input switches straight back to it.
+///
+/// Times are on the monotonic `ContinuousClock` (time asleep counts), so a change of the wall clock can't stretch a
+/// wait or end one early.
 public struct MicWriteConfirmation: Equatable, Sendable {
-    public static let timeout: TimeInterval = 2
+    public static let timeout: Duration = .seconds(2)
 
     /// One write of Orbit's that hasn't shown yet, and when it was made.
     private struct Written: Equatable, Sendable {
         var action: MicMuteAction
-        var at: Date
+        var at: ContinuousClock.Instant
     }
 
     private var written: [Written] = []
@@ -68,7 +71,7 @@ public struct MicWriteConfirmation: Equatable, Sendable {
     /// Orbit just wrote `actions`. Each replaces an earlier write of the same control on the same device (the device
     /// will show the later one); other writes keep waiting. Writing nothing changes nothing: a write still landing
     /// keeps its wait (ending it would let that write's late arrival be taken for a change made outside Orbit).
-    public mutating func wrote(_ actions: [MicMuteAction], at now: Date) {
+    public mutating func wrote(_ actions: [MicMuteAction], at now: ContinuousClock.Instant) {
         for action in actions {
             written.removeAll { Self.sameControl($0.action, action) }
             written.append(Written(action: action, at: now))
@@ -77,10 +80,10 @@ public struct MicWriteConfirmation: Equatable, Sendable {
 
     /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
     /// `MicMuteState.deviceChanged`). Readings of other devices pass through untouched.
-    public mutating func review(_ reading: MicDeviceReading, now: Date) -> (reading: MicDeviceReading, trusted: Bool) {
+    public mutating func review(_ reading: MicDeviceReading, now: ContinuousClock.Instant) -> (reading: MicDeviceReading, trusted: Bool) {
         // A write that hasn't shown within the timeout evidently didn't take. Dropped on every review, so a write to a
         // mic that isn't read again doesn't wait forever.
-        written.removeAll { now.timeIntervalSince($0.at) >= Self.timeout }
+        written.removeAll { now - $0.at >= Self.timeout }
         let mine = written.filter { Self.device(of: $0.action) == reading.deviceUID }
         guard !mine.isEmpty else { return (reading, true) }
         if mine.allSatisfy({ Self.shows($0.action, in: reading) }) {
@@ -242,7 +245,7 @@ public struct MicMuteState: Codable, Equatable, Sendable {
     /// before Orbit" and write nothing, and the unmute landing afterwards would look like the user unmuting
     /// elsewhere, leaving the mic live although the last press was a mute.
     public mutating func mute(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
-                              now: Date) -> [MicMuteAction]? {
+                              now: ContinuousClock.Instant) -> [MicMuteAction]? {
         mute(confirmation.review(reading, now: now).reading)
     }
 
@@ -250,7 +253,7 @@ public struct MicMuteState: Codable, Equatable, Sendable {
     /// and whether it shows that the user unmuted Orbit's mute outside Orbit (Orbit's mute is then over, with nothing
     /// to restore). Only a reading that may be taken at face value can say so.
     public mutating func observe(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
-                                 now: Date) -> (shown: MicDeviceReading, unmutedOutside: Bool) {
+                                 now: ContinuousClock.Instant) -> (shown: MicDeviceReading, unmutedOutside: Bool) {
         let reviewed = confirmation.review(reading, now: now)
         guard reviewed.trusted, isMuted else { return (reviewed.reading, false) }
         return (reviewed.reading, !deviceChanged(reviewed.reading))

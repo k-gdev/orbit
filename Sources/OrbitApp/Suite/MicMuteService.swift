@@ -223,7 +223,7 @@ final class MicMuteService: NSObject, ObservableObject {
         // A write can take effect asynchronously: right after Orbit's own mute (or unmute) the device may still read
         // as it was. Until the write shows (or evidently didn't take), the reading is shown as the write will
         // leave it and nothing is concluded from it (`MicMuteState.observe`).
-        let observed = MicHAL.reading(for: device).map { state.observe($0, confirming: &confirmation, now: Date()) }
+        let observed = MicHAL.reading(for: device).map { state.observe($0, confirming: &confirmation, now: .now) }
         if let observed, observed.unmutedOutside {
             Log.info("mic mute: \(observed.shown.deviceUID) was unmuted outside Orbit")
             saveRecord()
@@ -243,7 +243,7 @@ final class MicMuteService: NSObject, ObservableObject {
     private func muteInput() -> Bool {
         let device = MicHAL.defaultInputDevice()
         guard let reading = MicHAL.reading(for: device),
-              let actions = state.mute(reading, confirming: &confirmation, now: Date()) else {
+              let actions = state.mute(reading, confirming: &confirmation, now: .now) else {
             Log.info("mic mute: the input device can't be muted")
             return false
         }
@@ -271,7 +271,7 @@ final class MicMuteService: NSObject, ObservableObject {
     /// if no listener fires. Writing nothing changes nothing: a write still landing keeps its wait and its look.
     private func noteWrite(_ actions: [MicMuteAction]) {
         guard !actions.isEmpty else { return }
-        confirmation.wrote(actions, at: Date())
+        confirmation.wrote(actions, at: .now)
         confirmationCheck?.cancel()
         confirmationCheck = nil
         let work = DispatchWorkItem { [weak self] in
@@ -279,7 +279,7 @@ final class MicMuteService: NSObject, ObservableObject {
             self?.refreshLiveState()
         }
         confirmationCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + MicWriteConfirmation.timeout + 0.1, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + MicWriteConfirmation.timeout / .seconds(1) + 0.1, execute: work)
     }
 
     /// Undoes Orbit's mute, or switches off a mute made elsewhere (the user asked). True when the mic is no
