@@ -362,12 +362,14 @@ final class MicMuteService: NSObject, ObservableObject {
     }
 
     /// Listens to the current input device's mute and volume (the live state). Re-attached when the device
-    /// changes, including a device re-enumerated under a new object ID.
+    /// object changes, including a device re-enumerated under a new object ID; a device on which no listener
+    /// could be installed is not retried on every refresh.
     private func watchInput(_ device: AudioObjectID) {
-        guard device != watchedInput || inputListeners.isEmpty else { return }
-        unwatchInput()
-        guard device != kAudioObjectUnknown else { return }
+        guard device != watchedInput else { return }
+        inputListeners.forEach { $0.remove() }
+        inputListeners = []
         watchedInput = device
+        guard device != kAudioObjectUnknown else { return }
         let changed: () -> Void = { [weak self] in self?.refreshLiveState() }
         inputListeners = [
             MicHALListener(object: device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeInput, action: changed),
