@@ -58,10 +58,12 @@ public struct MicWriteConfirmation: Equatable, Sendable {
     /// A write of Orbit's is waiting to show up.
     public var isWaiting: Bool { since != nil }
 
-    /// Orbit just wrote `actions` (an empty list waits for nothing).
+    /// Orbit just wrote `actions`. Writing nothing changes nothing: a write still landing keeps its wait (ending it
+    /// would let that write's late arrival be taken for a change made outside Orbit).
     public mutating func wrote(_ actions: [MicMuteAction], at now: Date) {
+        guard !actions.isEmpty else { return }
         written = actions
-        since = actions.isEmpty ? nil : now
+        since = now
     }
 
     /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
@@ -213,6 +215,28 @@ public struct MicMuteState: Codable, Equatable, Sendable {
             if let volume = reading.volume, volume > Self.silent { self.applied = nil }
         }
         return isMuted
+    }
+
+    // MARK: Readings taken while Orbit's own writes land
+
+    /// `mute(_:)` for a fresh reading of the device, taken while one of Orbit's own writes may still be landing: the
+    /// mute is built from the device as that write will leave it (`MicWriteConfirmation.review`), not from the stale
+    /// reading. Right after Orbit's unmute the device can still read muted; muting from that would record "muted
+    /// before Orbit" and write nothing, and the unmute landing afterwards would look like the user unmuting
+    /// elsewhere, leaving the mic live although the last press was a mute.
+    public mutating func mute(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
+                              now: Date) -> [MicMuteAction]? {
+        mute(confirmation.review(reading, now: now).reading)
+    }
+
+    /// A fresh reading of the input device, reviewed against Orbit's own writes still landing: the reading to show,
+    /// and whether it shows that the user unmuted Orbit's mute outside Orbit (Orbit's mute is then over, with nothing
+    /// to restore). Only a reading that may be taken at face value can say so.
+    public mutating func observe(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
+                                 now: Date) -> (shown: MicDeviceReading, unmutedOutside: Bool) {
+        let reviewed = confirmation.review(reading, now: now)
+        guard reviewed.trusted, isMuted else { return (reviewed.reading, false) }
+        return (reviewed.reading, !deviceChanged(reviewed.reading))
     }
 
     // MARK: Pending records

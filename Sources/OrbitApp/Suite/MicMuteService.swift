@@ -222,14 +222,13 @@ final class MicMuteService: NSObject, ObservableObject {
         let device = MicHAL.defaultInputDevice()
         // A write can take effect asynchronously: right after Orbit's own mute (or unmute) the device may still read
         // as it was. Until the write shows (or evidently didn't take), the reading is shown as the write will
-        // leave it and nothing is concluded from it.
-        let reviewed = MicHAL.reading(for: device).map { confirmation.review($0, now: Date()) }
-        let reading = reviewed?.reading
-        if let reviewed, reviewed.trusted, state.isMuted, !state.deviceChanged(reviewed.reading) {
-            Log.info("mic mute: \(reviewed.reading.deviceUID) was unmuted outside Orbit")
+        // leave it and nothing is concluded from it (`MicMuteState.observe`).
+        let observed = MicHAL.reading(for: device).map { state.observe($0, confirming: &confirmation, now: Date()) }
+        if let observed, observed.unmutedOutside {
+            Log.info("mic mute: \(observed.shown.deviceUID) was unmuted outside Orbit")
             saveRecord()
         }
-        let presentation = state.presentation(for: reading)
+        let presentation = state.presentation(for: observed?.shown)
         isAvailable = presentation != .unavailable
         isMutedByOrbit = presentation == .mutedByOrbit
         isMuted = presentation == .mutedByOrbit || presentation == .mutedElsewhere
@@ -237,11 +236,14 @@ final class MicMuteService: NSObject, ObservableObject {
         updateBadge()
     }
 
-    /// Orbit's mute on the current input device, remembering its previous state. True when it took.
+    /// Orbit's mute on the current input device, remembering its previous state. True when it took. The previous
+    /// state is the device as Orbit's own writes still landing will leave it (right after Orbit's unmute it can still
+    /// read muted), so a quick second press mutes for real.
     @discardableResult
     private func muteInput() -> Bool {
         let device = MicHAL.defaultInputDevice()
-        guard let reading = MicHAL.reading(for: device), let actions = state.mute(reading) else {
+        guard let reading = MicHAL.reading(for: device),
+              let actions = state.mute(reading, confirming: &confirmation, now: Date()) else {
             Log.info("mic mute: the input device can't be muted")
             return false
         }
@@ -259,12 +261,13 @@ final class MicMuteService: NSObject, ObservableObject {
 
     /// Orbit just wrote `actions` to the input device: readings are reviewed against them until they show. One
     /// look is scheduled for just after the confirmation window, so a write the driver silently ignored is
-    /// noticed even if no listener fires.
+    /// noticed even if no listener fires. Writing nothing changes nothing: a write still landing keeps its wait
+    /// and its scheduled look.
     private func noteWrite(_ actions: [MicMuteAction]) {
+        guard !actions.isEmpty else { return }
         confirmation.wrote(actions, at: Date())
         confirmationCheck?.cancel()
         confirmationCheck = nil
-        guard !actions.isEmpty else { return }
         let work = DispatchWorkItem { [weak self] in
             self?.confirmationCheck = nil
             self?.refreshLiveState()

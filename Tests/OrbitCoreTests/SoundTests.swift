@@ -541,9 +541,12 @@ extension SoundTests {
             let r8 = guardian.review(other, now: t0.addingTimeInterval(0.01))
             #expect(r8.trusted && r8.reading == other)
             #expect(guardian.isWaiting)
-            // Writing nothing waits for nothing.
+            // Writing nothing waits for nothing, and doesn't end the wait for a write still landing.
             guardian.wrote([], at: t0)
-            #expect(!guardian.isWaiting)
+            #expect(guardian.isWaiting)
+            var idle = MicWriteConfirmation()
+            idle.wrote([], at: t0)
+            #expect(!idle.isWaiting)
         }
 
         /// R3: right after Orbit's own unmute the device may still read muted. It must not flash "Muted outside Orbit",
@@ -579,6 +582,73 @@ extension SoundTests {
             guardian.wrote([.setVolume(deviceUID: "USB", volume: 0.62)], at: t0)
             let r5 = guardian.review(atZero, now: t0.addingTimeInterval(0.01))
             #expect(!r5.trusted && r5.reading.volume == 0.62)
+        }
+
+        /// F1: a quick second press right after Orbit's own unmute, while the device still reads muted. The mute is
+        /// built from the device as the unmute will leave it, so it really writes a mute (recorded as "was unmuted"),
+        /// and the unmute landing afterwards is not taken for the user unmuting elsewhere: the mic ends up muted, as
+        /// the last press asked. Writing nothing never ends the wait for a write still landing.
+        @Test func quickMuteAfterOwnUnmuteIsNotLost() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 4000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var muted = headset
+            muted.isMuted = true
+            var state = MicMuteState()
+            var guardian = MicWriteConfirmation()
+            // Orbit's mute, landed.
+            let first = state.mute(headset, confirming: &guardian, now: t0) ?? []
+            guardian.wrote(first, at: t0)
+            let shown = state.observe(muted, confirming: &guardian, now: at(0.05))
+            #expect(!shown.unmutedOutside && state.isMuted && !guardian.isWaiting)
+            // Orbit's unmute is written; the device still reads muted for a moment.
+            let undo = state.restoreActions()
+            state.commitRestore()
+            guardian.wrote(undo, at: at(1))
+            let between = state.observe(muted, confirming: &guardian, now: at(1.01))
+            #expect(state.presentation(for: between.shown) == .unmuted)
+            // The second press, from that stale reading: a real mute of an unmuted mic.
+            let second = state.mute(muted, confirming: &guardian, now: at(1.02))
+            #expect(second == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.applied?.method == .muteFlag(wasMuted: false))
+            guardian.wrote(second ?? [], at: at(1.02))
+            // The unmute lands: Orbit's mute stays (shown muted, nothing concluded from it).
+            let landed = state.observe(headset, confirming: &guardian, now: at(1.05))
+            #expect(!landed.unmutedOutside)
+            #expect(state.isMuted)
+            #expect(state.presentation(for: landed.shown) == .mutedByOrbit)
+            // The mute lands: confirmed, and the next unmute really unmutes.
+            let confirmed = state.observe(muted, confirming: &guardian, now: at(1.08))
+            #expect(!confirmed.unmutedOutside)
+            #expect(!guardian.isWaiting)
+            #expect(state.isMuted)
+            #expect(state.restoreActions() == [.setMute(deviceUID: "Headset", muted: false)])
+
+            // Writing nothing (say, a press on a mic that already reads muted) leaves a write still landing waiting.
+            guardian.wrote(undo, at: at(10))
+            guardian.wrote([], at: at(10.01))
+            #expect(guardian.isWaiting)
+            let stale = guardian.review(muted, now: at(10.02))
+            #expect(!stale.trusted && !stale.reading.isMuted)
+
+            // Volume fallback: the second mute records the volume being restored, not the stale 0.
+            let usb = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            var atZero = usb
+            atZero.volume = 0
+            var volumeState = MicMuteState()
+            var volumeGuardian = MicWriteConfirmation()
+            let down = volumeState.mute(usb, confirming: &volumeGuardian, now: t0) ?? []
+            volumeGuardian.wrote(down, at: t0)
+            _ = volumeState.observe(atZero, confirming: &volumeGuardian, now: at(0.05))
+            let up = volumeState.restoreActions()
+            volumeState.commitRestore()
+            volumeGuardian.wrote(up, at: at(1))
+            let again = volumeState.mute(atZero, confirming: &volumeGuardian, now: at(1.02))
+            #expect(again == [.setVolume(deviceUID: "USB", volume: 0)])
+            #expect(volumeState.applied?.method == .volume(previous: 0.62))
+            volumeGuardian.wrote(again ?? [], at: at(1.02))
+            let raised = volumeState.observe(usb, confirming: &volumeGuardian, now: at(1.05))
+            #expect(!raised.unmutedOutside)
+            #expect(volumeState.isMuted)
         }
 
         /// M2: the mic's live state, whoever muted it. A mute made outside Orbit shows as such; a direct unmute
