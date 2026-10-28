@@ -246,6 +246,16 @@ import Testing
         #expect(policy.hoverChanged(to: 11, delay: 0) == .schedule(pid: 11, after: 0))
     }
 
+    /// The Dock is watched only with the preview on and Accessibility granted; Screen Recording only adds
+    /// thumbnails.
+    @Test func dockPreviewReadiness() {
+        #expect(DockPreviewReadiness(enabled: false, accessibility: true, screenRecording: true) == .off)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: false, screenRecording: true) == .needsAccessibility)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: false) == .titlesOnly)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: true) == .ready)
+        #expect(DockPreviewReadiness.allCases.filter(\.watchesDock) == [.titlesOnly, .ready])
+    }
+
     // MARK: Thumbnail cache
 
     /// Thumbnails are reused for a few seconds, then captured again; the cache never grows without bound.
