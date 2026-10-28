@@ -37,12 +37,19 @@ final class QuickToggleService {
         }
     }
 
-    /// Writes `value` (Finder settings restart Finder). Throws when the change didn't take.
-    func write(_ id: QuickToggleID, _ value: PreferenceValue) async throws {
-        Log.info("quick toggle: \(id.rawValue) → \(value)")
+    /// Whether the appearance is on Auto (light by day, dark by night).
+    var isAutomaticAppearance: Bool { AppearanceSwitch.isAutomatic }
+
+    /// Writes `value` (Finder settings restart Finder). For Dark Mode, `automatic` turns the
+    /// appearance's Auto setting off before switching, or back on after restoring (nil: untouched).
+    /// Throws when the change didn't take.
+    func write(_ id: QuickToggleID, _ value: PreferenceValue, automatic: Bool? = nil) async throws {
+        Log.info("quick toggle: \(id.rawValue) → \(value)\(automatic.map { " (Auto \($0 ? "on" : "off"))" } ?? "")")
         switch id {
         case .darkMode:
             let dark = value == .bool(true)
+            // Auto off first, as System Settings does when you pick Light or Dark, so the choice sticks.
+            if automatic == false { AppearanceSwitch.setAutomatic(false) }
             try AppearanceSwitch.set(dark: dark)
             // The appearance preference follows within a moment; if it doesn't, say so rather than pretend.
             for _ in 0..<10 where AppearanceSwitch.isDark != dark {
@@ -51,6 +58,8 @@ final class QuickToggleService {
             guard AppearanceSwitch.isDark == dark else {
                 throw QuickToggleError(message: "macOS didn’t switch the appearance.")
             }
+            // Restoring: Auto back on, which then picks the appearance for the time of day.
+            if automatic == true { AppearanceSwitch.setAutomatic(true) }
         case .hideDesktopIcons:
             try FinderPreferences.write(FinderPreferences.createDesktop, value)
             await FinderPreferences.relaunchFinder()
@@ -78,10 +87,31 @@ struct QuickToggleError: LocalizedError {
 // MARK: - Dark Mode
 
 /// The system appearance. Reading needs nothing; switching uses SkyLight's private
-/// `SLSSetAppearanceThemeLegacy(bool)`, loaded with `PrivateSymbol` (missing → unavailable).
+/// `SLSSetAppearanceThemeLegacy(bool)` and `SLSSetAppearanceThemeSwitchesAutomatically(bool)` (Auto),
+/// loaded with `PrivateSymbol` (missing → unavailable / Auto left alone).
 enum AppearanceSwitch {
     private static let skyLight = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
     private typealias SetTheme = @convention(c) (Bool) -> Void
+    private typealias GetFlag = @convention(c) () -> Bool
+
+    /// Whether the appearance is on Auto: SkyLight's getter, else the `AppleInterfaceStyleSwitchesAutomatically` preference.
+    static var isAutomatic: Bool {
+        if let get = PrivateSymbol.load("SLSGetAppearanceThemeSwitchesAutomatically", from: skyLight, as: GetFlag.self) {
+            return get()
+        }
+        let value = CFPreferencesCopyValue("AppleInterfaceStyleSwitchesAutomatically" as CFString, kCFPreferencesAnyApplication,
+                                           kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        return PreferenceValue.parse(value) == .bool(true)
+    }
+
+    /// Turns Auto on or off. Without the SkyLight call, Auto is left as it is (logged).
+    static func setAutomatic(_ on: Bool) {
+        guard let set = PrivateSymbol.load("SLSSetAppearanceThemeSwitchesAutomatically", from: skyLight, as: SetTheme.self) else {
+            Log.info("appearance: can't change Auto on this macOS")
+            return
+        }
+        set(on)
+    }
 
     static var isDark: Bool {
         let value = CFPreferencesCopyValue("AppleInterfaceStyle" as CFString, kCFPreferencesAnyApplication,
@@ -204,35 +234,61 @@ final class NightShiftClient {
 // MARK: - Shortcuts (Do Not Disturb)
 
 enum ShortcutsRunner {
-    /// The user's Shortcut names (`shortcuts list`), or [] when the tool fails.
+    /// The user's Shortcut names (`shortcuts list`), or [] when the tool fails or takes too long.
     static func list() async -> [String] {
-        guard let result = try? await ProcessRunner.run(FocusShortcut.executable, ["list"]) else { return [] }
+        guard let result = try? await FocusShortcut.withTimeout(FocusShortcut.timeout, {
+            try await ProcessRunner.run(FocusShortcut.executable, ["list"])
+        }) else { return [] }
         return FocusShortcut.parseList(result.stdout)
     }
 
-    /// Runs one Shortcut by name; throws when it fails.
+    /// Runs one Shortcut by name; throws when it fails, or `FocusShortcut.TimedOut` (after terminating
+    /// `shortcuts`) when it takes longer than `FocusShortcut.timeout`.
     static func run(_ name: String) async throws {
-        _ = try await ProcessRunner.run(FocusShortcut.executable, FocusShortcut.runArguments(name))
+        _ = try await FocusShortcut.withTimeout(FocusShortcut.timeout) {
+            try await ProcessRunner.run(FocusShortcut.executable, FocusShortcut.runArguments(name))
+        }
     }
 }
 
 // MARK: - Volumes (Eject)
 
 enum VolumeLister {
-    private static let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsInternalKey, .volumeIsRemovableKey, .volumeIsEjectableKey,
-                                                 .volumeIsLocalKey, .volumeIsRootFileSystemKey, .volumeIsBrowsableKey]
+    private static let keys: Set<URLResourceKey> = [.volumeNameKey, .volumeIsInternalKey, .volumeIsRemovableKey, .volumeIsEjectableKey,
+                                                    .volumeIsLocalKey, .volumeIsRootFileSystemKey, .volumeIsBrowsableKey]
 
-    /// Mounted volumes Eject may touch (see `EjectableVolumeFilter`). Missing facts read conservatively.
-    static func ejectable() -> [VolumeInfo] {
-        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: []) ?? []
-        let volumes = urls.compactMap { url -> VolumeInfo? in
-            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
-            return VolumeInfo(path: url.path, name: v.volumeName ?? url.lastPathComponent, isInternal: v.volumeIsInternal,
-                              isRemovable: v.volumeIsRemovable ?? false, isEjectable: v.volumeIsEjectable ?? false,
-                              isLocal: v.volumeIsLocal ?? false, isRootFileSystem: v.volumeIsRootFileSystem ?? true,
-                              isBrowsable: v.volumeIsBrowsable ?? false)
+    /// Mounted volumes Eject may touch (see `EjectableVolumeFilter`), found off the main thread. The
+    /// kernel's mount table is read with `MNT_NOWAIT` (cached, never waits on a server) and network
+    /// mounts are dropped before any resource value is read, so a stale SMB/NFS share can't stall it.
+    /// Missing facts read conservatively.
+    static func ejectable() async -> [VolumeInfo] {
+        await Task.detached(priority: .utility) {
+            let volumes = EjectableVolumeFilter.worthInspecting(mounts()).compactMap { path -> VolumeInfo? in
+                let url = URL(fileURLWithPath: path, isDirectory: true)
+                guard let v = try? url.resourceValues(forKeys: keys) else { return nil }
+                return VolumeInfo(path: path, name: v.volumeName ?? url.lastPathComponent, isInternal: v.volumeIsInternal,
+                                  isRemovable: v.volumeIsRemovable ?? false, isEjectable: v.volumeIsEjectable ?? false,
+                                  isLocal: v.volumeIsLocal ?? false, isRootFileSystem: v.volumeIsRootFileSystem ?? true,
+                                  isBrowsable: v.volumeIsBrowsable ?? false)
+            }
+            return EjectableVolumeFilter.ejectable(volumes)
+        }.value
+    }
+
+    /// The mount table (`getmntinfo_r_np` with `MNT_NOWAIT`: the kernel's cached copy, thread-safe,
+    /// never waits on a server): each mount point and whether it is local.
+    private static func mounts() -> [MountEntry] {
+        var table: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo_r_np(&table, MNT_NOWAIT)
+        defer { free(table) }
+        guard count > 0, let table else { return [] }
+        return (0..<Int(count)).map { index in
+            var entry = table[index]
+            let path = withUnsafeBytes(of: &entry.f_mntonname) { raw in
+                String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            return MountEntry(path: path, isLocal: entry.f_flags & UInt32(MNT_LOCAL) != 0)
         }
-        return EjectableVolumeFilter.ejectable(volumes)
     }
 
     /// Unmounts and ejects each volume off the main thread; returns the names ejected and the names that

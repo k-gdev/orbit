@@ -43,9 +43,13 @@ final class ControlsModel: ObservableObject {
     /// The user's Shortcuts, for the Do Not Disturb picker (loaded when Settings shows it).
     @Published private(set) var shortcuts: [String] = []
 
+    /// Whether the appearance is on Auto (the Dark Mode button says so).
+    @Published private(set) var appearanceAutomatic = false
+
     private let service: QuickToggleService?
     private var forwarders: Set<AnyCancellable> = []
     private var liveObservers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var volumeTask: Task<Void, Never>?
 
     var showToast: (ToastContent) -> Void = { _ in }
     var grabText: () -> Void = {}
@@ -80,16 +84,21 @@ final class ControlsModel: ObservableObject {
 
     // MARK: Reading
 
-    /// Re-reads every visible toggle, the drives, the running apps and Screen Recording. Panel open only.
+    /// Re-reads every visible toggle, the drives (off the main thread), the running apps and Screen
+    /// Recording. Panel open only.
     func refresh() {
+        guard service != nil else { return }
+        refreshToggles()
+        refreshVolumes()
+        runningApps = Self.readRunningApps()
+        screenRecordingGranted = permissionGranted()
+    }
+
+    private func refreshToggles() {
         guard let service else { return }
         for id in [QuickToggleID.darkMode, .hideDesktopIcons, .showHiddenFiles, .nightShift] {
             refresh(id, with: service)
         }
-        volumes = VolumeLister.ejectable()
-        if volumes.isEmpty { confirmingEject = false }
-        runningApps = Self.readRunningApps()
-        screenRecordingGranted = permissionGranted()
     }
 
     private func refresh(_ id: QuickToggleID, with service: QuickToggleService) {
@@ -100,6 +109,21 @@ final class ControlsModel: ObservableObject {
             unavailable[id] = nil
             values[id] = service.read(id)
         }
+        if id == .darkMode { appearanceAutomatic = service.isAutomaticAppearance }
+    }
+
+    /// Lists ejectable drives off the main thread (a stale network mount must never freeze the panel);
+    /// a newer listing replaces one still running.
+    private func refreshVolumes() {
+        guard service != nil else { return }
+        volumeTask?.cancel()
+        volumeTask = Task { [weak self] in
+            let found = await VolumeLister.ejectable()
+            guard let self, !Task.isCancelled else { return }
+            self.volumeTask = nil
+            self.volumes = found
+            if found.isEmpty { self.confirmingEject = false }
+        }
     }
 
     /// While the panel is open: follow appearance changes, drives coming and going, apps launching and
@@ -109,13 +133,17 @@ final class ControlsModel: ObservableObject {
         let distributed = DistributedNotificationCenter.default()
         liveObservers.append((distributed, distributed.addObserver(forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
                                                                    object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated { self?.refreshToggles() }
         }))
         let workspace = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification,
-                     NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             liveObservers.append((workspace, workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                MainActor.assumeIsolated { self?.refreshVolumes() }
+            }))
+        }
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            liveObservers.append((workspace, workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.runningApps = Self.readRunningApps() }
             }))
         }
     }
@@ -123,6 +151,8 @@ final class ControlsModel: ObservableObject {
     func endLiveUpdates() {
         for (center, observer) in liveObservers { center.removeObserver(observer) }
         liveObservers.removeAll()
+        volumeTask?.cancel()
+        volumeTask = nil
         confirmingEject = false
     }
 
@@ -143,7 +173,11 @@ final class ControlsModel: ObservableObject {
     func display(_ id: QuickToggleID) -> QuickToggleDisplay {
         if let reason = unavailable[id] { return .unavailable(reason) }
         switch id {
-        case .darkMode, .nightShift:
+        case .darkMode:
+            guard let value = values[id] else { return .unavailable("Not available") }
+            let auto = appearanceAutomatic ? " · Auto" : ""
+            return id.isOn(value) ? .on("On" + auto) : .off("Off" + auto)
+        case .nightShift:
             guard let value = values[id] else { return .unavailable("Not available") }
             return id.isOn(value) ? .on("On") : .off("Off")
         case .hideDesktopIcons:
@@ -184,24 +218,32 @@ final class ControlsModel: ObservableObject {
     }
 
     /// Turns a setting toggle on or off, recording (or restoring) its previous state.
+    ///
+    /// The live value is re-read first: when it already matches what the user asked for (the panel was
+    /// showing a stale state), nothing is written and Finder is not restarted. The change is planned
+    /// against the restore book without touching it, and its record is committed to the book as it is
+    /// when the write finishes, so two toggles in flight never drop each other's record.
     private func setToggle(_ id: QuickToggleID, on: Bool) {
         guard let service else {
             values[id] = on ? (id == .hideDesktopIcons ? .bool(false) : .bool(true)) : .absent
             return
         }
-        guard let current = service.read(id) else { return }
-        var book = settings.restoreBook
-        let target = on ? book.turnOn(id, current: current) : book.turnOff(id, current: current)
-        guard target != current else {
-            settings.restoreBook = book
+        guard let current = service.read(id), id.isOn(current) != on else {
+            refresh(id, with: service)
+            return
+        }
+        let automatic = id == .darkMode ? service.isAutomaticAppearance : nil
+        let change = settings.restoreBook.change(id, on: on, current: current, automatic: automatic)
+        guard change.write != current || change.automatic != nil else {
+            settings.restoreBook.commit(id, change)
             refresh(id, with: service)
             return
         }
         busy.insert(id)
         Task {
             do {
-                try await service.write(id, target)
-                settings.restoreBook = book
+                try await service.write(id, change.write, automatic: change.automatic)
+                settings.restoreBook.commit(id, change)
             } catch {
                 Log.error("quick toggle \(id.rawValue) failed: \(error.localizedDescription)")
                 showToast(ToastContent(message: "\(id.title) didn’t change", detail: error.localizedDescription, isError: true))
@@ -222,6 +264,10 @@ final class ControlsModel: ObservableObject {
             do {
                 try await ShortcutsRunner.run(name)
                 showToast(ToastContent(message: "Ran “\(name)”"))
+            } catch is FocusShortcut.TimedOut {
+                showToast(ToastContent(message: "“\(name)” took too long",
+                                       detail: "Orbit stopped it after \(Int(FocusShortcut.timeout)) seconds. Check the Shortcut in the Shortcuts app.",
+                                       isError: true))
             } catch {
                 showToast(ToastContent(message: "“\(name)” didn’t run", detail: "Check the Shortcut in the Shortcuts app.", isError: true))
             }
@@ -238,7 +284,7 @@ final class ControlsModel: ObservableObject {
         Task {
             let result = await VolumeLister.eject(targets)
             busy.remove(.ejectDrives)
-            volumes = VolumeLister.ejectable()
+            volumes = await VolumeLister.ejectable()
             showToast(ToastContent(message: EjectableVolumeFilter.summary(ejected: result.ejected, failed: result.failed),
                                    detail: result.failed.isEmpty ? nil : "Quit the apps using it and try again.",
                                    isError: !result.failed.isEmpty))

@@ -17,7 +17,8 @@ struct ControlsPanelView: View {
                     EjectConfirmation(model: model)
                 }
                 if model.settings.visibleToggles.contains(where: \.restartsFinder) {
-                    PanelFootnote(text: "Hide Desktop and Hidden Files restart Finder.", systemImage: "arrow.clockwise")
+                    PanelFootnote(text: "Hide Desktop and Hidden Files restart Finder, which stops any Finder copy in progress.",
+                                  systemImage: "arrow.clockwise")
                 }
             }
 
@@ -340,6 +341,7 @@ private struct PanelFootnote: View {
         Label(text, systemImage: systemImage)
             .font(.system(size: 11))
             .foregroundStyle(PanelStyle.colors(for: colorScheme).secondaryInk)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 4)
     }
 }
