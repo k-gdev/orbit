@@ -37,7 +37,7 @@ struct ShelfDragSource: NSViewRepresentable {
     var onHover: (Bool) -> Void = { _ in }
     var onOpen: () -> Void = {}
     var onRemove: () -> Void = {}
-    /// Called when a drag from here ended with a destination that moved or deleted the files.
+    /// Called when a drag from here ended with a move or delete result: the files may have left, to be re-checked shortly.
     var onMovedOut: ([URL]) -> Void = { _ in }
     var menu: () -> [ShelfMenuEntry] = { [] }
     /// Show the hover state without a pointer (snapshots).
@@ -155,7 +155,13 @@ final class ShelfDragSourceView: NSView, NSDraggingSource {
     }
 
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files" }
+    override func accessibilityLabel() -> String? {
+        switch urls.count {
+        case 0: toolTip?.components(separatedBy: "\n").first.map { URL(fileURLWithPath: $0).lastPathComponent }
+        case 1: urls[0].lastPathComponent
+        default: "\(urls.count) files"
+        }
+    }
 
     // MARK: Mouse
 
@@ -202,7 +208,8 @@ final class ShelfDragSourceView: NSView, NSDraggingSource {
         let iconSize: CGFloat = 48
         let items = urls.prefix(6).enumerated().map { index, url -> NSDraggingItem in
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
-            let icon = ShelfIcon.icon(for: url)
+            // A copy: the cached icon is shared, and its size must not change under the views using it.
+            let icon = (ShelfIcon.icon(for: url).copy() as? NSImage) ?? ShelfIcon.icon(for: url)
             icon.size = NSSize(width: iconSize, height: iconSize)
             // A stack of icons for several files, each a little off the last.
             let offset = CGFloat(index) * 4
@@ -230,7 +237,7 @@ final class ShelfDragSourceView: NSView, NSDraggingSource {
         mouseDownEvent = nil
         let dragged = draggingURLs
         draggingURLs = []
-        if ShelfDragOutcome.removesFromShelf(operationRawValue: operation.rawValue) { onMovedOut(dragged) }
+        if ShelfDragOutcome.mayHaveMovedFiles(operationRawValue: operation.rawValue) { onMovedOut(dragged) }
     }
 }
 

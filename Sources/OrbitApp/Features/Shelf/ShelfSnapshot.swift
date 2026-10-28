@@ -13,8 +13,12 @@ enum ShelfFixtures {
             URL(fileURLWithPath: "/Users/kevo/Documents/Trip notes.txt"),
             URL(fileURLWithPath: "/Users/kevo/Documents/Site assets", isDirectory: true),
             URL(fileURLWithPath: "/Users/kevo/Movies/Demo clip.mov"),
+            URL(fileURLWithPath: "/Volumes/NAS/Archive 2026.zip"),
         ]
     }
+
+    /// The demo item that shows as not reachable (its drive is not connected).
+    static var demoOffline: Set<URL> { [URL(fileURLWithPath: "/Volumes/NAS/Archive 2026.zip")] }
 
     /// Real files in a fresh temp folder (removed at exit), so the floating shelf snapshot shows genuine
     /// Quick Look previews: two pictures, a one-page PDF, a text file, a folder and a movie placeholder.
@@ -82,7 +86,7 @@ enum ShelfFixtures {
 /// Hidden command-line modes that render the Shelf offscreen (nothing is shown on screen, no real files
 /// are touched; fixture files live in a temp folder that is removed at exit).
 ///
-///     Orbit --snapshot-shelf <out.png> [--empty] [--targeted] [--hover N] [--dark] [--replace]
+///     Orbit --snapshot-shelf <out.png> [--empty] [--targeted] [--hover N] [--count N] [--offline N] [--dark] [--replace]
 ///     Orbit --snapshot-shelf-wheel <on|off> <out.png> [--highlight N] [--dark] [--replace]
 ///
 /// `--snapshot-shelf` draws the floating shelf over real fixture files (`--targeted`: a file drag is over
@@ -92,7 +96,7 @@ enum ShelfSnapshot {
     static let shelfFlag = "--snapshot-shelf"
     static let wheelFlag = "--snapshot-shelf-wheel"
     static let usage = """
-        usage: Orbit --snapshot-shelf <out.png> [--empty] [--targeted] [--hover N] [--dark] [--replace]
+        usage: Orbit --snapshot-shelf <out.png> [--empty] [--targeted] [--hover N] [--count N] [--offline N] [--dark] [--replace]
                Orbit --snapshot-shelf-wheel <on|off> <out.png> [--highlight N] [--dark] [--replace]
         """
 
@@ -153,9 +157,12 @@ enum ShelfSnapshot {
         let hover = try number(after: "--hover", in: args)
 
         let count = try number(after: "--count", in: args) ?? 5
+        let offline = try number(after: "--offline", in: args) ?? 0
         let files = args.contains("--empty") ? [] : try ShelfFixtures.makeRealFiles(count: count)
+        ShelfIcon.prime(files) // the real icons, as the app reads them off the main thread
         for file in files { _ = await ShelfThumbnails.load(file, side: 48) } // so previews are in place when drawn
-        let model = ShelfModel.fixture(files)
+        // `--offline N` shows the last N as if their drive were not connected.
+        let model = ShelfModel.fixture(files, unreachable: Set(files.suffix(offline)))
         model.isDropTargeted = args.contains("--targeted")
 
         // The real panel content: the SwiftUI shelf plus the AppKit resize grip.

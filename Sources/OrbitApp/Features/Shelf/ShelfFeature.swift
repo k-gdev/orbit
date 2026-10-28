@@ -58,6 +58,7 @@ final class ShelfFeature: SuiteFeature {
         cancellables.removeAll()
         watcher.stop()
         window.close()
+        model.stop() // cancels work in flight, lets the last save land, and releases the items
     }
 
     /// The wheel's Shelf action: puts `urls` on the shelf and shows it centred on `point`.
@@ -71,8 +72,9 @@ final class ShelfFeature: SuiteFeature {
     }
 
     func panelDidAppear() {
-        // Files trashed or moved away while the panel was closed leave the list.
-        if isRunning { model.removeMissing() }
+        // Files trashed or moved away while the panel was closed leave the list; files on a drive that is
+        // offline stay and show dimmed. The checks run off the main thread.
+        if isRunning { model.refreshAvailability() }
     }
 
     func makePanelView() -> AnyView {
@@ -85,7 +87,7 @@ final class ShelfFeature: SuiteFeature {
     }
 
     static func snapshotViews() -> FeatureSnapshotViews {
-        let model = ShelfModel.fixture(ShelfFixtures.demoURLs)
+        let model = ShelfModel.fixture(ShelfFixtures.demoURLs, unreachable: ShelfFixtures.demoOffline)
         let settings = ShelfSettings(defaults: SnapshotFixtures.defaults())
         return FeatureSnapshotViews(panel: ShelfPanelView(model: model, toggleShelf: {}, hint: hint(shakeToOpen: true)),
                                     settings: ShelfSettingsView(settings: settings, model: model))

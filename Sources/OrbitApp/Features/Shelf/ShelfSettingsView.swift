@@ -22,7 +22,7 @@ struct ShelfSettingsView: View {
             }
             SettingsSection("Files", footnote: "The shelf holds references to your files, not copies. Dragging one out moves or copies it where you drop it, the way Finder would. Clearing the shelf never touches the files.") {
                 HStack {
-                    Text(model.urls.isEmpty ? "Nothing is on the shelf." : "\(ShelfStripView.countText(model.urls.count)) on the shelf")
+                    Text(model.urls.isEmpty ? "Nothing is on the shelf." : "\(ShelfStripView.countText(model.urls.count, offline: model.unreachable.count)) on the shelf")
                     Spacer()
                     Button("Clear Shelf") { model.clear() }
                         .disabled(model.urls.isEmpty)

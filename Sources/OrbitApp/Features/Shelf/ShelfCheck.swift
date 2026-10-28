@@ -46,19 +46,85 @@ enum ShelfCheck {
         let one = try file("one.txt")
         let two = try file("two.txt")
 
-        // Model and store: add persists, a move-out removes, a second model sees the result.
+        /// Runs the main run loop (so the model's background work can report back) until `condition` holds.
+        func wait(_ timeout: TimeInterval = 6, until condition: () -> Bool) {
+            let end = Date().addingTimeInterval(timeout)
+            while !condition(), Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        func shelfFile(_ directory: URL) -> String {
+            (try? String(contentsOf: directory.appending(path: ShelfStore.fileName), encoding: .utf8)) ?? ""
+        }
+
+        // Model and store: loading is off the main thread, add persists, a move-out is re-checked, a relaunch sees it.
         let storeDirectory = dir.appending(path: "Shelf", directoryHint: .isDirectory)
         let model = ShelfModel(store: ShelfStore(directory: storeDirectory))
-        check("a new model has nothing to load and wrote nothing", model.urls.isEmpty && !fm.fileExists(atPath: storeDirectory.path))
+        model.load()
+        check("load returns at once and reads in the background", !model.isLoaded)
+        wait { model.isLoaded }
+        check("a fresh shelf loads empty and wrote nothing", model.isLoaded && model.urls.isEmpty && !fm.fileExists(atPath: storeDirectory.path))
         check("add counts new files only", model.add([one, two, one]) == 2 && model.urls.count == 2)
-        check("add wrote shelf.json", fm.fileExists(atPath: storeDirectory.appending(path: ShelfStore.fileName).path))
-        model.removeMoved([one])
+        model.flush()
+        check("add wrote shelf.json (in the background)", shelfFile(storeDirectory).contains("one.txt") && shelfFile(storeDirectory).contains("two.txt"))
+        // A drag out ended with a move result. Finder really moved `one`; its move of `two` was cancelled.
+        let movedAway = dir.appending(path: "one-moved.txt")
+        try fm.moveItem(at: one, to: movedAway)
+        model.verifyMoved([one, two])
+        check("nothing leaves the shelf at the drop itself (Finder hasn't done anything yet)", model.urls.count == 2)
+        wait { model.urls.count == 1 }
+        check("after the re-check only the file that really went is dropped", model.urls.map(\.lastPathComponent) == ["two.txt"])
+        model.flush()
         let reloaded = ShelfModel(store: ShelfStore(directory: storeDirectory))
         reloaded.load()
-        check("a moved-out file leaves the shelf, and a relaunch sees the rest", reloaded.urls.map(\.lastPathComponent) == ["two.txt"])
-        check("the files themselves are untouched", fm.fileExists(atPath: one.path) && fm.fileExists(atPath: two.path))
+        wait { reloaded.isLoaded }
+        check("a relaunch sees the rest", reloaded.urls.map(\.lastPathComponent) == ["two.txt"])
+        check("the files themselves are untouched", fm.fileExists(atPath: movedAway.path) && fm.fileExists(atPath: two.path))
+
+        // Items on a drive that is offline are kept; gone files are dropped; a renamed file is followed.
+        let offlineDrive = URL(fileURLWithPath: "/Volumes/OrbitShelfCheck-\(UUID().uuidString)", isDirectory: true)
+        let offlineFile = offlineDrive.appending(path: "Archive.zip", directoryHint: .notDirectory)
+        let doomed = try file("doomed.txt")
+        let renameMe = try file("rename-me.txt")
+        model.add([offlineFile, doomed, renameMe])
+        model.flush() // saved, with a bookmark for each file that exists
+        try fm.removeItem(at: doomed)
+        let renamed = dir.appending(path: "renamed.txt")
+        try fm.moveItem(at: renameMe, to: renamed)
+        model.refreshAvailability()
+        wait { model.urls.count == 3 && model.urls.map(\.lastPathComponent) == ["two.txt", "Archive.zip", "renamed.txt"] }
+        check("a file gone from a drive that is up is dropped", !model.urls.contains { $0.lastPathComponent == "doomed.txt" })
+        check("a renamed file is followed and keeps its place", model.urls.map(\.lastPathComponent) == ["two.txt", "Archive.zip", "renamed.txt"])
+        check("a file on a drive that is not there is kept, and shown as unreachable",
+              model.urls.contains { $0.lastPathComponent == "Archive.zip" } && model.unreachable.contains { $0.lastPathComponent == "Archive.zip" })
+        check("only that one is unreachable, and it is not offered for dragging all",
+              model.unreachable.count == 1 && !model.availableURLs.contains { $0.lastPathComponent == "Archive.zip" })
+        model.flush()
+        check("the offline item is still in shelf.json", shelfFile(storeDirectory).contains("Archive.zip"))
+        // After a relaunch it is still there, and with the drive absent still unreachable.
+        let afterRelaunch = ShelfModel(store: ShelfStore(directory: storeDirectory))
+        afterRelaunch.load()
+        wait { afterRelaunch.isLoaded && afterRelaunch.unreachable.count == 1 }
+        check("a relaunch keeps the offline item and marks it unreachable",
+              afterRelaunch.urls.contains { $0.lastPathComponent == "Archive.zip" } && afterRelaunch.unreachable.count == 1)
+        afterRelaunch.stop()
+        check("stopping releases the items and leaves the file", afterRelaunch.urls.isEmpty && shelfFile(storeDirectory).contains("Archive.zip"))
+
         model.clear()
+        model.flush()
         check("clear empties the shelf but not the files", model.urls.isEmpty && fm.fileExists(atPath: two.path))
+
+        // A damaged shelf file is kept, never silently overwritten.
+        let damagedDirectory = dir.appending(path: "Damaged", directoryHint: .isDirectory)
+        try fm.createDirectory(at: damagedDirectory, withIntermediateDirectories: false)
+        try Data("{ this is not json".utf8).write(to: damagedDirectory.appending(path: ShelfStore.fileName))
+        let damaged = ShelfModel(store: ShelfStore(directory: damagedDirectory))
+        damaged.load()
+        wait { damaged.isLoaded }
+        damaged.add([two])
+        damaged.flush()
+        let kept = (try? fm.contentsOfDirectory(atPath: damagedDirectory.path).filter { $0.hasPrefix("shelf.json.corrupt-") }) ?? []
+        check("a damaged shelf file is moved aside before the first save, with its content", kept.count == 1
+              && (try? String(contentsOf: damagedDirectory.appending(path: kept[0]), encoding: .utf8)) == "{ this is not json")
+        check("and the new shelf file is valid", shelfFile(damagedDirectory).contains("two.txt"))
 
         // Drop target.
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("com.kevo.orbit.shelfcheck"))
@@ -141,9 +207,63 @@ enum ShelfCheck {
         watcher.start()
         watcher.start()
         check("start installs one monitor (idempotent)", watcher.isRunning)
+        check("an idle watcher has no timer (nothing polls until a button is pressed)", !watcher.isPolling)
         watcher.stop()
         watcher.stop()
-        check("stop removes it (idempotent)", !watcher.isRunning)
+        check("stop removes it (idempotent)", !watcher.isRunning && !watcher.isPolling)
+
+        // Polling glue with a scripted mouse and pasteboard (no real drag): a press starts a timer, a text drag is
+        // never a shake, a file drag shaken is one shake, and releasing the button stops the timer.
+        final class ScriptedMouse {
+            var down = true
+            var changeCount = 10
+            var holdsFiles = false
+            var point = CGPoint(x: 600, y: 400)
+            var time: TimeInterval = 100
+        }
+        let mouse = ScriptedMouse()
+        let scripted = ShakeWatcher(inputs: .init(buttonDown: { mouse.down }, changeCount: { mouse.changeCount },
+                                                  holdsFiles: { mouse.holdsFiles }, location: { mouse.point }, now: { mouse.time }))
+        var shakes: [CGPoint] = []
+        scripted.onShake = { shakes.append($0) }
+        /// Six 100 pt legs, six samples each, at 60 Hz.
+        func shakeTheMouse() {
+            var sign = 1.0
+            for _ in 0..<6 {
+                for _ in 0..<6 {
+                    mouse.point.x += sign * 100 / 6
+                    mouse.time += 1.0 / 60
+                    scripted.poll()
+                }
+                sign = -sign
+            }
+        }
+        scripted.pressBegan()
+        check("a press starts the timer, slowly", scripted.isPolling && !scripted.isTracking)
+        shakeTheMouse() // a file URL left from an earlier drag, nothing new dragged
+        mouse.holdsFiles = true
+        shakeTheMouse()
+        check("a stale file pasteboard never counts, however hard the mouse is shaken", shakes.isEmpty && !scripted.isTracking)
+        mouse.changeCount = 11 // a drag began and it holds files: now it is a file drag...
+        mouse.holdsFiles = false // ...no: this one is text
+        shakeTheMouse()
+        check("shaking a text drag does nothing", shakes.isEmpty && !scripted.isTracking)
+        mouse.down = false
+        scripted.poll()
+        check("releasing the button stops the timer", !scripted.isPolling)
+
+        mouse.down = true
+        mouse.changeCount = 20
+        scripted.pressBegan()
+        mouse.changeCount = 21
+        mouse.holdsFiles = true
+        shakeTheMouse()
+        check("shaking a file drag opens the shelf, once", shakes.count == 1)
+        check("and the timer is at the fast rate while the file drag lasts", scripted.isPolling && scripted.isTracking)
+        mouse.down = false
+        scripted.poll()
+        check("the timer stops when the button is released", !scripted.isPolling && !scripted.isTracking)
+        scripted.stop()
 
         let context = SuiteContext(settings: SettingsStore(defaults: defaults), suite: SuiteSettings(defaults: defaults), defaults: defaults,
                                    hotKeys: HotKeyCenter(), permissions: PermissionCenter(live: false, fixed: [:]),
