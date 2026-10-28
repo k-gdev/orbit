@@ -259,6 +259,27 @@ import Testing
         #expect(loaded.urls.first?.resolvingSymlinksInPath().path == renamed.resolvingSymlinksInPath().path)
     }
 
+    /// Trashing a file keeps it findable through its bookmark (it is only moved into ~/.Trash), but the shelf
+    /// must not follow it there: it counts as missing and leaves the list.
+    @Test func storeDoesNotFollowAFileIntoTheTrash() throws {
+        let fixture = StoreFixture()
+        defer { fixture.remove() }
+        let original = fixture.file("trashed.txt", "bye")
+        try fixture.store.save(ShelfItems([original]))
+        let trash = fixture.root.appending(path: ".Trash", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: false)
+        let inTrash = trash.appending(path: "trashed.txt", directoryHint: .notDirectory)
+        try FileManager.default.moveItem(at: original, to: inTrash)
+
+        let reader = ShelfStore(directory: fixture.storeDirectory)
+        var loaded = reader.load()
+        // Still listed at its old path (not at the Trash path), so the caller prunes it.
+        #expect(loaded.urls.map(\.path) == [original.standardizedFileURL.path])
+        #expect(reader.follow(original) == nil)
+        #expect(loaded.removeMissing().count == 1)
+        #expect(loaded.isEmpty)
+    }
+
     @Test func storeKeepsAMissingFileByPath() throws {
         let fixture = StoreFixture()
         defer { fixture.remove() }

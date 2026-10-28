@@ -112,7 +112,7 @@ public final class ShelfStore: @unchecked Sendable {
     }
 
     /// `loadStored()`, then an item whose file is no longer at its path is looked up through its bookmark
-    /// (renamed or moved on the same volume). An item that can't be found keeps its old path. Checks each
+    /// (renamed or moved on the same volume, but not into the Trash). An item that can't be found keeps its old path. Checks each
     /// item's path, so call it off the main thread.
     public func load() -> ShelfItems {
         let stored = loadStored()
@@ -122,7 +122,8 @@ public final class ShelfStore: @unchecked Sendable {
     }
 
     /// Where the file saved at `url` is now, found through its bookmark (without any prompt or mounting), or
-    /// nil when it has no bookmark, can't be resolved, or isn't there either. Blocks on the file system.
+    /// nil when it has no bookmark, can't be resolved, isn't there either, or is in a Trash folder (a trashed
+    /// file is gone as far as the shelf is concerned). Blocks on the file system.
     public func follow(_ url: URL) -> URL? {
         let key = url.standardizedFileURL.path
         lock.lock()
@@ -132,6 +133,7 @@ public final class ShelfStore: @unchecked Sendable {
         var stale = false
         guard let found = try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting],
                                    relativeTo: nil, bookmarkDataIsStale: &stale),
+              !ShelfAvailability.isInTrash(found),
               ShelfAvailability.probe(found) == .exists else { return nil }
         // A stale bookmark is made again on the next save.
         lock.lock()

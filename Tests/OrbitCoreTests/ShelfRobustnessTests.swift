@@ -58,6 +58,19 @@ import Testing
         #expect(ShelfAvailability.status(of: Self.url("/Volumes/NAS/a.txt"), probe: stuck) == .unreachable)
     }
 
+    /// A file moved to the Trash is gone as far as the shelf is concerned, although its bookmark still finds it.
+    @Test func trashFoldersAreRecognisedFromThePath() {
+        #expect(ShelfAvailability.isInTrash(Self.url("/Users/demo/.Trash/report.pdf")))
+        #expect(ShelfAvailability.isInTrash(Self.url("/Users/demo/.Trash/Site assets/logo.svg")))
+        #expect(ShelfAvailability.isInTrash(Self.url("/Volumes/Backup Drive/.Trashes/501/report.pdf")))
+        #expect(ShelfAvailability.isInTrash(Self.url("/Users/demo/.Trash")))
+        #expect(!ShelfAvailability.isInTrash(Self.url("/Users/demo/Documents/report.pdf")))
+        #expect(!ShelfAvailability.isInTrash(Self.url("/Users/demo/Trash/report.pdf")))           // no dot: an ordinary folder
+        #expect(!ShelfAvailability.isInTrash(Self.url("/Users/demo/.Trashy/report.pdf")))
+        #expect(!ShelfAvailability.isInTrash(Self.url("/Users/demo/Documents/.Trash notes.txt")))
+        #expect(!ShelfAvailability.isInTrash(Self.url("/Users/demo/Documents/a.Trash")))
+    }
+
     @Test func errnoMapsToAProbeResult() {
         #expect(ShelfAvailability.probeResult(errnoValue: nil) == .exists)
         #expect(ShelfAvailability.probeResult(errnoValue: ENOENT) == .absent)

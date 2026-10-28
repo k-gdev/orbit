@@ -31,6 +31,13 @@ public enum ShelfAvailability {
         return URL(fileURLWithPath: "/", isDirectory: true)
     }
 
+    /// Whether `url` is in a Trash folder: a `.Trash` (the home folder's) or `.Trashes` (another volume's)
+    /// path component. A trashed file is only moved there, so its bookmark still finds it; the shelf treats it
+    /// as gone instead of following it into the Trash.
+    public static func isInTrash(_ url: URL) -> Bool {
+        url.standardizedFileURL.pathComponents.contains { $0 == ".Trash" || $0 == ".Trashes" }
+    }
+
     /// Classifies `url`. It is `missing` only when the check says the path is absent AND its volume is mounted
     /// (the volume's folder exists); any error, and any absent path on a volume that is not there, is
     /// `unreachable`.

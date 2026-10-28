@@ -72,8 +72,10 @@ final class ShelfFeature: SuiteFeature {
     }
 
     func panelDidAppear() {
-        // Files trashed or moved away while the panel was closed leave the list; files on a drive that is
-        // offline stay and show dimmed. The checks run off the main thread.
+        // Files deleted or trashed while the panel was closed leave the list (a trashed file's bookmark still
+        // finds it, but the shelf never follows it into the Trash); files renamed or moved on the same volume
+        // are followed through their bookmark; files on a drive that is offline stay and show dimmed. The
+        // checks run off the main thread.
         if isRunning { model.refreshAvailability() }
     }
 
