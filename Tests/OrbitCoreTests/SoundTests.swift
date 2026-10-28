@@ -159,3 +159,82 @@ import Testing
         #expect(!AppAudioPreference(outputUID: "x").isDefault)
     }
 }
+
+extension SoundTests {
+    /// When an app gets a process tap (Review Focus 1): only when it is not at 100 %, unmuted, on the
+    /// output it would use anyway, and only when there is a device to play on.
+    @Suite struct TapPlanTests {
+        @Test func noTapAtUnityOnDefaultOutput() {
+            let plan = TapPlan(preference: .unity, defaultOutputUID: "Headset")
+            #expect(!plan.needsTap)
+            #expect(plan.destinationUID == "Headset")
+            #expect(plan.gain == 1)
+            #expect(!TapPlan(preference: .unity, defaultOutputUID: "Headset", availableOutputUIDs: ["Headset", "Speakers"]).needsTap)
+            #expect(!TapPlan(preference: .unity, defaultOutputUID: nil).needsTap)
+            // A stored 100 % from an old run is still unity.
+            #expect(!TapPlan(preference: AppAudioPreference(volume: 100, muted: false, outputUID: nil), defaultOutputUID: "Headset").needsTap)
+        }
+
+        @Test func tapWhenBoosted() {
+            let boosted = TapPlan(preference: AppAudioPreference(volume: 130), defaultOutputUID: "Headset")
+            #expect(boosted.needsTap)
+            #expect(boosted.destinationUID == "Headset")
+            #expect(abs(boosted.gain - 1.3) < 1e-6)
+            #expect(boosted.isBoosted)
+            let quieter = TapPlan(preference: AppAudioPreference(volume: 40), defaultOutputUID: "Headset")
+            #expect(quieter.needsTap)
+            #expect(abs(quieter.gain - 0.16) < 1e-6)
+            #expect(!quieter.isBoosted)
+            let muted = TapPlan(preference: AppAudioPreference(volume: 130, muted: true), defaultOutputUID: "Headset")
+            #expect(muted.needsTap)
+            #expect(muted.gain == 0)
+            #expect(muted.muted)
+        }
+
+        @Test func tapWhenRoutedElsewhere() {
+            let plan = TapPlan(preference: AppAudioPreference(outputUID: "Speakers"), defaultOutputUID: "Headset",
+                               availableOutputUIDs: ["Headset", "Speakers"])
+            #expect(plan.needsTap)
+            #expect(plan.destinationUID == "Speakers")
+            #expect(plan.gain == 1)
+            #expect(plan.isRoutedAway)
+            #expect(!plan.routeUnavailable)
+            // Without a device list the route is taken at its word.
+            #expect(TapPlan(preference: AppAudioPreference(outputUID: "Speakers"), defaultOutputUID: "Headset").needsTap)
+        }
+
+        @Test func noTapWhenRoutedToCurrentDefault() {
+            let plan = TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: "Headset",
+                               availableOutputUIDs: ["Headset", "Speakers"])
+            #expect(!plan.needsTap)
+            #expect(plan.destinationUID == "Headset")
+            #expect(!plan.isRoutedAway)
+            // ...but a volume change on top of it still needs one, to the same device.
+            let quieter = TapPlan(preference: AppAudioPreference(volume: 70, outputUID: "Headset"), defaultOutputUID: "Headset")
+            #expect(quieter.needsTap)
+            #expect(quieter.destinationUID == "Headset")
+        }
+
+        /// A routed device that is unplugged falls back to the system output instead of building an
+        /// aggregate around a missing device.
+        @Test func routedDeviceMissingFallsBack() {
+            let plan = TapPlan(preference: AppAudioPreference(outputUID: "Speakers"), defaultOutputUID: "Headset",
+                               availableOutputUIDs: ["Headset"])
+            #expect(!plan.needsTap)
+            #expect(plan.destinationUID == "Headset")
+            #expect(plan.routeUnavailable)
+            let quieter = TapPlan(preference: AppAudioPreference(volume: 50, outputUID: "Speakers"), defaultOutputUID: "Headset",
+                                  availableOutputUIDs: ["Headset"])
+            #expect(quieter.needsTap)
+            #expect(quieter.destinationUID == "Headset")
+        }
+
+        /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
+        @Test func noTapWithoutOutput() {
+            #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)
+            #expect(!TapPlan(preference: AppAudioPreference(muted: true), defaultOutputUID: nil, availableOutputUIDs: []).needsTap)
+            #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Speakers"), defaultOutputUID: nil, availableOutputUIDs: []).needsTap)
+            #expect(TapPlan(preference: AppAudioPreference(outputUID: "Speakers"), defaultOutputUID: nil, availableOutputUIDs: ["Speakers"]).needsTap)
+        }
+    }
+}
