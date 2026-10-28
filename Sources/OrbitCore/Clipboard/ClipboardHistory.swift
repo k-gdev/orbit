@@ -51,10 +51,11 @@ public struct ClipboardHistory: Equatable, Sendable {
         items.contains { $0.contentHash == contentHash }
     }
 
-    /// Flips the pin of one entry and returns the new state; nil when there is no such entry.
+    /// Flips the pin of one entry and returns the new state; nil when there is no such entry or it is a
+    /// copied password (those are never pinned: pinned entries outlive every limit).
     @discardableResult
     public mutating func togglePin(id: UUID) -> Bool? {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        guard let index = items.firstIndex(where: { $0.id == id }), !items[index].concealed else { return nil }
         items[index].pinned.toggle()
         return items[index].pinned
     }
@@ -93,6 +94,12 @@ public struct ClipboardHistory: Equatable, Sendable {
         return removed
     }
 
+    /// Removes every copied password and returns them, newest first.
+    @discardableResult
+    public mutating func removeConcealed() -> [ClipboardItem] {
+        removeAll(where: \.concealed)
+    }
+
     /// The order a list shows: pinned entries first, then the rest, each group newest first.
     public var displayItems: [ClipboardItem] {
         items.filter(\.pinned) + items.filter { !$0.pinned }
@@ -100,11 +107,13 @@ public struct ClipboardHistory: Equatable, Sendable {
 
     /// The entries matching `query`, in display order. Every word of the query must appear in the
     /// preview or the source app's name; case and accents are ignored ("cafe" finds "Café"). An empty
-    /// query returns everything.
+    /// query returns everything. Copied passwords never match a query (their text is masked, and the
+    /// source app's name would only point at them), but they are listed when there is none.
     public func search(_ query: String) -> [ClipboardItem] {
         let words = Self.fold(query).split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return displayItems }
         return displayItems.filter { item in
+            guard !item.concealed else { return false }
             let haystack = Self.fold(item.preview + " " + (item.sourceName ?? ""))
             return words.allSatisfy { haystack.contains($0) }
         }

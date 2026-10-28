@@ -7,10 +7,11 @@ struct ClipboardSourceApp: Equatable {
     var name: String?
 }
 
-/// What the user's rules say about a copy: apps to ignore and the size limits.
+/// What the user's rules say about a copy: apps to ignore, the size limits and whether copied passwords are kept.
 struct PasteboardPolicy {
     var ignoredBundleIDs: [String]
     var limits: ClipboardLimits
+    var recordPasswords = false
 }
 
 /// What reading the pasteboard produced.
@@ -46,19 +47,22 @@ enum PasteboardReader {
         let before = pasteboard.changeCount
         let types = (pasteboard.types ?? []).map(\.rawValue)
         let source = sourceApp(of: pasteboard, frontmost: frontmost)
-        guard PasteboardFilter.shouldRecord(types: types, sourceBundleID: source.bundleID, ignoredBundleIDs: policy.ignoredBundleIDs) else {
+        let verdict = PasteboardFilter.verdict(types: types, sourceBundleID: source.bundleID,
+                                               ignoredBundleIDs: policy.ignoredBundleIDs, recordPasswords: policy.recordPasswords)
+        guard verdict != .skip else {
             return .skipped("marked concealed or from an ignored app")
         }
         afterTypes?()
-        let result = readContents(pasteboard, policy: policy, source: source, now: now)
+        let result = readContents(pasteboard, policy: policy, source: source, now: now, concealed: verdict == .recordConcealed)
         guard pasteboard.changeCount == before else { return .skipped("the pasteboard changed while it was being read") }
         return result
     }
 
     @MainActor
-    private static func readContents(_ pasteboard: NSPasteboard, policy: PasteboardPolicy, source: ClipboardSourceApp, now: Date) -> PasteboardRead {
+    private static func readContents(_ pasteboard: NSPasteboard, policy: PasteboardPolicy, source: ClipboardSourceApp, now: Date,
+                                     concealed: Bool) -> PasteboardRead {
         func raw(_ content: RawPasteboardCopy.Content) -> PasteboardRead {
-            .copy(RawPasteboardCopy(content: content, sourceBundleID: source.bundleID, sourceName: source.name, date: now))
+            .copy(RawPasteboardCopy(content: content, sourceBundleID: source.bundleID, sourceName: source.name, date: now, concealed: concealed))
         }
         let maxBytes = policy.limits.maxItemBytes
 

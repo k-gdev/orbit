@@ -109,10 +109,11 @@ public struct ClipboardStore: Sendable {
         return LoadResult(items: items, droppedCount: dropped, corruptBackup: kept)
     }
 
-    /// Writes the index atomically.
+    /// Writes the index atomically. Copied passwords (`ClipboardItem.concealed`) are left out: they live in
+    /// memory only and must not reach the disk in any form.
     public func save(_ items: [ClipboardItem]) throws {
         try ensureDirectory()
-        let data = try Self.makeEncoder().encode(IndexFile(version: Self.currentVersion, items: items))
+        let data = try Self.makeEncoder().encode(IndexFile(version: Self.currentVersion, items: items.filter { !$0.concealed }))
         try data.write(to: indexURL, options: .atomic)
         Self.makePrivate(indexURL)
     }

@@ -28,10 +28,21 @@ public struct ClipboardItem: Codable, Identifiable, Hashable, Sendable {
     public var byteSize: Int
     /// The blob's file name inside the history folder; nil for an entry that has no stored content.
     public var payloadFile: String?
+    /// A copied password (the source marked it concealed). Its content lives in memory only, its preview
+    /// is `maskedPreview`, it is not searchable and cannot be pinned. Not part of the stored index: the
+    /// store never writes these entries, and an entry read from disk is never one.
+    public var concealed = false
+
+    /// What a concealed entry shows instead of its content.
+    public static let maskedPreview = "••••••••"
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, preview, sourceBundleID, sourceName, date, pinned, contentHash, byteSize, payloadFile
+    }
 
     public init(id: UUID = UUID(), kind: ClipboardKind, preview: String, sourceBundleID: String? = nil,
                 sourceName: String? = nil, date: Date, pinned: Bool = false, contentHash: String,
-                byteSize: Int, payloadFile: String? = nil) {
+                byteSize: Int, payloadFile: String? = nil, concealed: Bool = false) {
         self.id = id
         self.kind = kind
         self.preview = preview
@@ -42,6 +53,7 @@ public struct ClipboardItem: Codable, Identifiable, Hashable, Sendable {
         self.contentHash = contentHash
         self.byteSize = byteSize
         self.payloadFile = payloadFile
+        self.concealed = concealed
     }
 
     /// `text` shortened for a list row: surrounding whitespace dropped, every run of whitespace and
@@ -82,12 +94,15 @@ public struct ClipboardItem: Codable, Identifiable, Hashable, Sendable {
 }
 
 /// The hash that makes two copies "the same". SHA-256 over the kind and the stored content, so the same
-/// text copied as plain text and as rich text stay separate entries.
+/// text copied as plain text and as rich text stay separate entries. A concealed copy hashes apart from
+/// the same content copied normally: otherwise one would be folded into the other, and a password could
+/// end up as an entry that is saved to disk (or an ordinary copy as one that is lost at quit).
 public enum ClipboardHash {
-    public static func make(kind: ClipboardKind, payload: Data) -> String {
+    public static func make(kind: ClipboardKind, payload: Data, concealed: Bool = false) -> String {
         var hasher = SHA256()
         hasher.update(data: Data(kind.rawValue.utf8))
         hasher.update(data: Data([0]))
+        if concealed { hasher.update(data: Data("concealed".utf8) + Data([0])) }
         hasher.update(data: payload)
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -127,6 +142,8 @@ public struct ClipboardCapture: Sendable {
     public var date: Date
     /// `ClipboardHash` of kind + payload when already computed (see `hashed()`); nil otherwise.
     public var contentHash: String?
+    /// A copied password (see `ClipboardItem.concealed`); set through `concealing()`.
+    public private(set) var concealed = false
 
     public init(kind: ClipboardKind, payload: Data, preview: String, sourceBundleID: String?,
                 sourceName: String?, date: Date, contentHash: String? = nil) {
@@ -143,7 +160,18 @@ public struct ClipboardCapture: Sendable {
     /// app does it on a background queue, before the capture reaches the history on the main thread.
     public func hashed() -> ClipboardCapture {
         var copy = self
-        copy.contentHash = ClipboardHash.make(kind: kind, payload: payload)
+        copy.contentHash = ClipboardHash.make(kind: kind, payload: payload, concealed: concealed)
+        return copy
+    }
+
+    /// This capture as a copied password: the preview is masked (the content itself stays in `payload`,
+    /// for copying it back) and the hash, if one was computed, is dropped so `hashed()` redoes it apart
+    /// from ordinary copies of the same content.
+    public func concealing() -> ClipboardCapture {
+        var copy = self
+        copy.concealed = true
+        copy.preview = ClipboardItem.maskedPreview
+        copy.contentHash = nil
         return copy
     }
 
@@ -173,7 +201,8 @@ public struct ClipboardCapture: Sendable {
     /// The history entry for this capture. `payloadFile` is the blob the content was (or will be) written to.
     public func makeItem(payloadFile: String?) -> ClipboardItem {
         ClipboardItem(kind: kind, preview: preview, sourceBundleID: sourceBundleID, sourceName: sourceName,
-                      date: date, pinned: false, contentHash: contentHash ?? ClipboardHash.make(kind: kind, payload: payload),
-                      byteSize: payload.count, payloadFile: payloadFile)
+                      date: date, pinned: false,
+                      contentHash: contentHash ?? ClipboardHash.make(kind: kind, payload: payload, concealed: concealed),
+                      byteSize: payload.count, payloadFile: payloadFile, concealed: concealed)
     }
 }

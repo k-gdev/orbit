@@ -8,6 +8,8 @@ import SwiftUI
 /// Return and Esc keys still reach `onKey`.
 final class ClipboardPopupPanel: NSPanel {
     var onKey: ((NSEvent) -> Bool)?
+    /// ⌘C / ⌘O / ⌘R: returns whether the popup took the key (it did something with the selected entry).
+    var onShortcut: ((ClipboardPopupShortcut) -> Bool)?
     var onResignKey: (() -> Void)?
 
     init(contentView: NSView) {
@@ -40,10 +42,23 @@ final class ClipboardPopupPanel: NSPanel {
         if onKey?(event) != true { super.keyDown(with: event) }
     }
 
-    /// ⌘X / ⌘C / ⌘V / ⌘A / ⌘Z / ⇧⌘Z in the search field: Orbit isn't the active app while the popup is up,
-    /// so the main menu's Edit items may not see them (`EditMenu`).
+    /// ⌘C / ⌘O / ⌘R act on the selected entry (⌘C only while the search field has no selected text, which
+    /// is then its own Copy). ⌘X / ⌘C / ⌘V / ⌘A / ⌘Z / ⇧⌘Z in the search field: Orbit isn't the active app
+    /// while the popup is up, so the main menu's Edit items may not see them (`EditMenu`).
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        EditMenu.perform(event, in: self) || super.performKeyEquivalent(with: event)
+        if let shortcut = popupShortcut(for: event), onShortcut?(shortcut) == true { return true }
+        return EditMenu.perform(event, in: self) || super.performKeyEquivalent(with: event)
+    }
+
+    /// The popup's own key for `event`, unless the search field keeps it.
+    private func popupShortcut(for event: NSEvent) -> ClipboardPopupShortcut? {
+        guard event.type == .keyDown else { return nil }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard let shortcut = ClipboardPopupShortcut(key: event.charactersIgnoringModifiers ?? "", command: flags.contains(.command),
+                                                    shift: flags.contains(.shift), option: flags.contains(.option),
+                                                    control: flags.contains(.control)) else { return nil }
+        let selected = (firstResponder as? NSText)?.selectedRange.length ?? 0
+        return shortcut.yieldsToTextField(selectionLength: selected) ? nil : shortcut
     }
 }
 
@@ -67,6 +82,9 @@ final class ClipboardPopupController {
 
     /// An entry was chosen (Return or a click). The popup is already closed.
     var onChoose: (ClipboardItem, NSRunningApplication?) -> Void = { _, _ in }
+    /// Something else was asked of an entry (a key or its menu): copy, open or reveal it, which close the
+    /// popup first, or pin, unpin or remove it, which keep it up.
+    var onAction: (ClipboardEntryAction, ClipboardItem) -> Void = { _, _ in }
     /// Whether choosing will also paste (shown in the hint line).
     var willPaste: () -> Bool = { false }
 
@@ -88,12 +106,18 @@ final class ClipboardPopupController {
 
         let view = ClipboardPopupView(state: state, model: model, verb: willPaste() ? "paste" : "copy",
                                       choose: { [weak self] in self?.choose($0) },
-                                      cancel: { [weak self] in self?.hide(restoreFocus: true) })
+                                      cancel: { [weak self] in self?.hide(restoreFocus: true) },
+                                      perform: { [weak self] action, item in self?.perform(action, on: item) },
+                                      dragEnded: { [weak self] in
+                                          // Not from inside the drag's own callback: the window it came from goes away.
+                                          DispatchQueue.main.async { self?.hide(restoreFocus: false) }
+                                      })
         let host = PanelHostingView(rootView: view)
         host.onSizeChange = { [weak self] in self?.resize() }
         let panel = ClipboardPopupPanel(contentView: host)
         panel.onResignKey = { [weak self] in self?.hide(restoreFocus: false) }
         panel.onKey = { [weak self] event in self?.handleKey(event) ?? false }
+        panel.onShortcut = { [weak self] shortcut in self?.handle(shortcut) ?? false }
         self.panel = panel
 
         let size = host.fittingSize
@@ -116,6 +140,7 @@ final class ClipboardPopupController {
         mouseMonitor = nil
         panel.onResignKey = nil
         panel.onKey = nil
+        panel.onShortcut = nil
         panel.orderOut(nil)
         panel.contentView = nil
         panel.close()
@@ -130,6 +155,28 @@ final class ClipboardPopupController {
         let app = previousApp
         hide(restoreFocus: false)
         onChoose(item, app)
+    }
+
+    /// Does what the key says to the selected entry; false when nothing is selected or the key means
+    /// nothing for it (⌘O on text), so the key goes on as usual.
+    private func handle(_ shortcut: ClipboardPopupShortcut) -> Bool {
+        guard let item = state.selected, let action = shortcut.action(for: item) else { return false }
+        perform(action, on: item)
+        return true
+    }
+
+    private func perform(_ action: ClipboardEntryAction, on item: ClipboardItem) {
+        switch action {
+        case .pin, .unpin, .remove:
+            onAction(action, item)
+            state.reload(history: model.history)
+        case .copy:
+            hide(restoreFocus: true)
+            onAction(action, item)
+        case .open, .showInFinder, .openInPreview:
+            hide(restoreFocus: false)
+            onAction(action, item)
+        }
     }
 
     /// Arrow keys, Return and Esc for when the search field isn't the first responder.

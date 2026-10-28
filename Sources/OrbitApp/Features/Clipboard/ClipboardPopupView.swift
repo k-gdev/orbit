@@ -46,6 +46,13 @@ final class ClipboardPopupState: ObservableObject {
         selectedID = id
     }
 
+    /// The history changed while the popup is up (a pin or a removal): list it again, keeping the search
+    /// and, when it is still there, the selection.
+    func reload(history: ClipboardHistory) {
+        self.history = history
+        refresh()
+    }
+
     private func refresh() {
         results = history.search(query)
         if !results.contains(where: { $0.id == selectedID }) { selectedID = results.first?.id }
@@ -53,7 +60,8 @@ final class ClipboardPopupState: ObservableObject {
 }
 
 /// The popup that opens at the pointer on the global shortcut: a search field, the history as compact
-/// rows (↑/↓ to move, Return to choose, Esc to close) and a hint line.
+/// rows (↑/↓ to move, Return to choose, ⌘C / ⌘O / ⌘R to copy, open or reveal, Esc to close) and a hint
+/// line. A row has a right-click menu and can be dragged out into another app.
 struct ClipboardPopupView: View {
     @ObservedObject var state: ClipboardPopupState
     @ObservedObject var model: ClipboardModel
@@ -62,6 +70,10 @@ struct ClipboardPopupView: View {
     var autofocus = true
     let choose: (ClipboardItem) -> Void
     let cancel: () -> Void
+    /// A row's menu asked for something other than choosing it.
+    var perform: (ClipboardEntryAction, ClipboardItem) -> Void = { _, _ in }
+    /// A row was dragged out and dropped somewhere.
+    var dragEnded: () -> Void = {}
 
     static let width: CGFloat = 380
     static let rowHeight: CGFloat = 44
@@ -78,9 +90,11 @@ struct ClipboardPopupView: View {
             list(style: style)
                 .frame(height: CGFloat(visibleRows) * Self.rowHeight + 10)
             Rectangle().fill(style.tileStroke).frame(height: 0.5)
-            Text("↑↓ select    ↩ \(verb)    esc close")
+            Text(ClipboardPopupShortcut.hint(verb: verb, for: state.selected))
                 .font(.system(size: 10.5))
                 .foregroundStyle(style.secondaryInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .frame(height: 26)
         }
@@ -120,7 +134,8 @@ struct ClipboardPopupView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(state.results) { item in
                             ClipboardPopupRow(item: item, model: model, now: model.now(), isSelected: item.id == state.selectedID,
-                                              choose: { choose(item) }, hover: { state.hover(item.id) })
+                                              choose: { choose(item) }, hover: { state.hover(item.id) },
+                                              perform: { perform($0, item) }, dragEnded: dragEnded)
                                 .id(item.id)
                         }
                     }
@@ -142,44 +157,52 @@ private struct ClipboardPopupRow: View {
     let isSelected: Bool
     let choose: () -> Void
     let hover: () -> Void
+    let perform: (ClipboardEntryAction) -> Void
+    let dragEnded: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let style = PanelStyle.colors(for: colorScheme)
         let accent = PanelStyle.accent(for: colorScheme)
-        Button(action: choose) {
-            HStack(spacing: 9) {
-                ClipboardKindBadge(item: item, model: model, size: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.preview.isEmpty ? "(empty)" : item.preview)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    ClipboardMetaLine(item: item, now: now)
-                }
-                Spacer(minLength: 4)
-                if item.pinned {
-                    Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(accent)
-                }
-                if isSelected {
-                    Image(systemName: "return").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(style.secondaryInk)
-                }
+        HStack(spacing: 9) {
+            ClipboardKindBadge(item: item, model: model, size: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.preview.isEmpty ? "(empty)" : item.preview)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                ClipboardMetaLine(item: item, model: model, now: now)
             }
-            .padding(.horizontal, 8)
-            .frame(height: ClipboardPopupView.rowHeight)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? accent.opacity(colorScheme == .dark ? 0.30 : 0.16) : Color.clear)
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isSelected ? accent.opacity(0.55) : Color.clear, lineWidth: 1))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Spacer(minLength: 4)
+            if item.pinned {
+                Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(accent)
+            }
+            if isSelected {
+                Image(systemName: "return").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(style.secondaryInk)
+            }
         }
-        .buttonStyle(.plain)
-        .onHover { inside in if inside { hover() } }
+        .padding(.horizontal, 8)
+        .frame(height: ClipboardPopupView.rowHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected ? accent.opacity(colorScheme == .dark ? 0.30 : 0.16) : Color.clear)
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isSelected ? accent.opacity(0.55) : Color.clear, lineWidth: 1))
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            ClipboardRowSurface(label: item.preview,
+                                onClick: choose,
+                                onHover: { inside in if inside { hover() } },
+                                dragContent: { model.dragContent(for: item) },
+                                onDragEnded: { operation in if operation != [] { dragEnded() } },
+                                menu: { ClipboardEntryMenu.entries(for: item, files: model.checkFiles(of: item)) },
+                                onMenuAction: perform)
+        }
+        .task(id: item.id) { await model.refreshFileStatus(of: item) }
     }
 }
 

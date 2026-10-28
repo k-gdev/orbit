@@ -7,6 +7,10 @@ import OrbitCore
 /// the store it persists to. Every change is written to disk straight away (the index is small), and
 /// the blob files of removed or evicted entries are deleted with them.
 ///
+/// Copied passwords (`ClipboardItem.concealed`, kept only while `settings.recordPasswords` is on) are the
+/// exception: their content lives in `concealedPayloads` in memory, the store never writes them, and they are
+/// gone when Orbit quits or the setting is turned off.
+///
 /// Nothing is read from disk until `loadIfNeeded()`. A fixture
 /// model (`store == nil`) holds a fixed list and never touches disk, for snapshots.
 @MainActor
@@ -31,10 +35,16 @@ final class ClipboardModel: ObservableObject {
 
     private var fixtureThumbnails: [UUID: NSImage] = [:]
     private let thumbnailCache = NSCache<NSUUID, NSImage>()
+    /// The content of the copied passwords, by entry id. Memory only.
+    private var concealedPayloads: [UUID: Data] = [:]
+    /// What was last found out about each files entry's files (see `refreshFileStatus`). Absent: not checked.
+    @Published private(set) var fileStatuses: [UUID: ClipboardFileStatus] = [:]
+    private var passwordsSubscription: AnyCancellable?
 
     init(settings: ClipboardSettings, store: ClipboardStore) {
         self.settings = settings
         self.store = store
+        watchPasswordSetting()
     }
 
     /// A model over a fixed list of entries and in-memory thumbnails; it never reads or writes a file.
@@ -45,6 +55,18 @@ final class ClipboardModel: ObservableObject {
         self.fixtureThumbnails = thumbnails
         self.now = { now }
         self.isLoaded = true
+        watchPasswordSetting()
+    }
+
+    /// Turning "Keep copied passwords" off removes the ones already kept, at once.
+    private func watchPasswordSetting() {
+        passwordsSubscription = settings.$recordPasswords
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] keep in
+                guard !keep else { return }
+                MainActor.assumeIsolated { self?.removeConcealed() }
+            }
     }
 
     // MARK: Loading
@@ -117,7 +139,16 @@ final class ClipboardModel: ObservableObject {
     private func add(_ capture: ClipboardCapture, generation: Int) async {
         guard generation == ingestGeneration, !persistenceBlocked,
               settings.limits.allowsItem(ofSize: capture.payload.count) else { return }
+        // The setting may have been turned off while the copy was being prepared.
+        guard !capture.concealed || settings.recordPasswords else { return }
         var item = capture.makeItem(payloadFile: nil)   // the hash was computed off the main thread
+        if capture.concealed {
+            // A copied password: its content stays in memory, no blob is written, the index never lists it.
+            if !history.contains(contentHash: item.contentHash) { concealedPayloads[item.id] = capture.payload }
+            history.add(item)
+            enforceLimits()
+            return
+        }
         if !history.contains(contentHash: item.contentHash) {
             let name = ClipboardStore.newPayloadName(for: capture.kind)
             let payload = capture.payload
@@ -143,8 +174,16 @@ final class ClipboardModel: ObservableObject {
     func enforceLimits() {
         let evicted = history.enforce(limits: settings.limits, now: now())
         guard !evicted.isEmpty else { return }
-        store?.deletePayloads(evicted.compactMap(\.payloadFile))
-        save()
+        forget(evicted)
+        // A password leaving changes nothing on disk.
+        if evicted.contains(where: { !$0.concealed }) { save() }
+    }
+
+    /// Releases what removed entries held: blob files, and the memory of copied passwords.
+    private func forget(_ items: [ClipboardItem]) {
+        store?.deletePayloads(items.compactMap(\.payloadFile))
+        for item in items where item.concealed { concealedPayloads[item.id] = nil }
+        for item in items { fileStatuses[item.id] = nil }
     }
 
     func togglePin(_ id: UUID) {
@@ -154,8 +193,8 @@ final class ClipboardModel: ObservableObject {
 
     func remove(_ id: UUID) {
         guard let removed = history.remove(id: id) else { return }
-        store?.deletePayloads(removed.payloadFile.map { [$0] } ?? [])
-        save()
+        forget([removed])
+        if !removed.concealed { save() }
     }
 
     /// Clears the history; pinned entries stay unless `keepPinned` is false.
@@ -163,8 +202,13 @@ final class ClipboardModel: ObservableObject {
         loadIfNeeded()
         let removed = history.clear(keepPinned: keepPinned)
         guard !removed.isEmpty else { return }
-        store?.deletePayloads(removed.compactMap(\.payloadFile))
+        forget(removed)
         save()
+    }
+
+    /// Drops every copied password (the setting was turned off, or the feature was). Nothing on disk changes.
+    func removeConcealed() {
+        forget(history.removeConcealed())
     }
 
     /// An entry was just pasted or copied again: it goes to the top.
@@ -174,7 +218,46 @@ final class ClipboardModel: ObservableObject {
     }
 
     func payload(for item: ClipboardItem) -> Data? {
-        item.payloadFile.flatMap { store?.readPayload(named: $0) }
+        if item.concealed { return concealedPayloads[item.id] }
+        return item.payloadFile.flatMap { store?.readPayload(named: $0) }
+    }
+
+    // MARK: Files and images as real files
+
+    /// The files a files entry points at (none for other kinds, or when the list cannot be read).
+    func filePaths(of item: ClipboardItem) -> [String] {
+        guard item.kind == .files, let payload = payload(for: item) else { return [] }
+        return ClipboardPayload.filePaths(from: payload)
+    }
+
+    /// Checks now which of the entry's files still exist and remembers it for the row. This stats each
+    /// file, so it is for the moment a row or its menu appears, not for polling. Nil (nothing remembered)
+    /// for other kinds and for a list that cannot be read.
+    @discardableResult
+    func checkFiles(of item: ClipboardItem) -> ClipboardFileStatus? {
+        let paths = filePaths(of: item)
+        guard !paths.isEmpty else { return nil }
+        let status = ClipboardFileStatus(paths: paths)
+        if fileStatuses[item.id] != status { fileStatuses[item.id] = status }
+        return status
+    }
+
+    /// `checkFiles(of:)` for a row that has just appeared, with the stat calls off the main thread (a
+    /// file on a disconnected volume can take a while to answer).
+    func refreshFileStatus(of item: ClipboardItem) async {
+        let paths = filePaths(of: item)
+        guard !paths.isEmpty else { return }
+        let status = await Task.detached(priority: .utility) { ClipboardFileStatus(paths: paths) }.value
+        if fileStatuses[item.id] != status { fileStatuses[item.id] = status }
+    }
+
+    /// A PNG file for an image entry, for Preview or a drag. Nil when its content is gone.
+    func exportedImageURL(for item: ClipboardItem) -> URL? {
+        guard item.kind == .image, let png = payload(for: item) else { return nil }
+        do { return try ClipboardExportFolder.standard.writeImage(png, for: item.id, now: now()) } catch {
+            Log.error("clipboard: could not export an image: \(error)")
+            return nil
+        }
     }
 
     private func save() {

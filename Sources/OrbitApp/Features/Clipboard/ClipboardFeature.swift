@@ -32,6 +32,7 @@ final class ClipboardFeature: SuiteFeature {
         model = ClipboardModel(settings: settings, store: ClipboardStore(directory: folder))
         popup = ClipboardPopupController(model: model)
         popup.onChoose = { [weak self] item, app in self?.paste(item, into: app) }
+        popup.onAction = { [weak self] action, item in self?.perform(action, on: item) }
         popup.willPaste = { [weak self] in self?.canPasteDirectly() ?? false }
     }
 
@@ -43,7 +44,8 @@ final class ClipboardFeature: SuiteFeature {
         model.loadIfNeeded()
         watcher.start(
             policy: { [settings] in
-                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, limits: settings.limits)
+                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, limits: settings.limits,
+                                 recordPasswords: settings.recordPasswords)
             },
             onCapture: { [weak self] copy in self?.model.ingest(copy) })
         registerHotKey(settings.popupShortcut)
@@ -64,6 +66,8 @@ final class ClipboardFeature: SuiteFeature {
         context.hotKeys.unregister(id: Self.hotKeyID)
         shortcutProblem = nil
         popup.hide(restoreFocus: false)
+        // Copied passwords are kept only while the feature is watching.
+        model.removeConcealed()
         model.trimMemory()
     }
 
@@ -75,7 +79,7 @@ final class ClipboardFeature: SuiteFeature {
 
     func makePanelView() -> AnyView {
         AnyView(ClipboardPanelView(model: model, settings: settings,
-                                   actions: ClipboardPanelActions(copy: { [weak self] item in self?.copyFromPanel(item) })))
+                                   actions: ClipboardPanelActions(perform: { [weak self] action, item in self?.perform(action, on: item) })))
     }
 
     func makeSettingsView() -> AnyView {
@@ -170,11 +174,50 @@ final class ClipboardFeature: SuiteFeature {
         }
     }
 
-    /// A click in the menu bar tab: copy only (the panel closes; the user pastes where they like).
-    private func copyFromPanel(_ item: ClipboardItem) {
-        guard writeToPasteboard(item) else { return }
-        context.closePanel()
-        showCopiedHint(nil)
+    /// Everything but pasting that a tab row or the popup can ask of an entry. Copying, opening and
+    /// revealing close the menu bar panel (the popup has closed itself); pinning and removing change the
+    /// history and nothing else.
+    private func perform(_ action: ClipboardEntryAction, on item: ClipboardItem) {
+        switch action {
+        case .copy:
+            // A click in the tab, ⌘C or the menu in the popup: copy only (the user pastes where they like).
+            guard writeToPasteboard(item) else { return }
+            context.closePanel()
+            showCopiedHint(nil)
+        case .open:
+            guard let urls = existingFiles(of: item) else { return }
+            context.closePanel()
+            for url in urls { NSWorkspace.shared.open(url) }
+        case .showInFinder:
+            guard let urls = existingFiles(of: item) else { return }
+            context.closePanel()
+            NSWorkspace.shared.activateFileViewerSelecting(urls)
+        case .openInPreview:
+            guard let url = model.exportedImageURL(for: item) else {
+                context.toasts.show(ToastContent(message: "That copy is no longer available", isError: true))
+                return
+            }
+            context.closePanel()
+            if let preview = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") {
+                NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: NSWorkspace.OpenConfiguration())
+            } else {
+                NSWorkspace.shared.open(url)
+            }
+        case .pin, .unpin:
+            model.togglePin(item.id)
+        case .remove:
+            model.remove(item.id)
+        }
+    }
+
+    /// The files of a files entry that are still there, checked now; nil (with a toast) when none are.
+    private func existingFiles(of item: ClipboardItem) -> [URL]? {
+        let present = model.checkFiles(of: item)?.present ?? []
+        guard !present.isEmpty else {
+            context.toasts.show(ToastContent(message: "Those files are no longer there", isError: true))
+            return nil
+        }
+        return present.map { URL(fileURLWithPath: $0) }
     }
 
     /// Puts the entry on the general pasteboard, tells the watcher it was Orbit's own write, and moves

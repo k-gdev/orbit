@@ -53,8 +53,13 @@ struct ClipboardSettingsView: View {
                          presets: [5, 10, 20, 50, 100, 200]) { Self.megabytes($0) }
             }
 
+            SettingsSection("Passwords",
+                            footnote: "Password managers mark what they copy as secret, and Orbit skips those copies. With this on they are kept only until Orbit quits, never saved to disk, shown as dots and left out of search.") {
+                Toggle("Keep copied passwords", isOn: $settings.recordPasswords)
+            }
+
             SettingsSection("Ignored apps",
-                            footnote: "Copies made in these apps are not recorded. Password managers that mark their copies as secret are skipped automatically.") {
+                            footnote: "Copies made in these apps are not recorded. Password managers that mark their copies as secret are skipped unless you keep copied passwords above.") {
                 if settings.ignoredBundleIDs.isEmpty {
                     Text("No apps ignored.").foregroundStyle(.secondary)
                 }

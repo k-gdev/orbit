@@ -1,7 +1,8 @@
 import AppKit
 import OrbitCore
 
-/// Puts a history entry back on a pasteboard, in the formats it was copied in.
+/// Puts a history entry back on a pasteboard, in the formats it was copied in. A copied password goes back
+/// marked concealed again, so other clipboard tools skip it just as Orbit's history does by default.
 enum PasteboardWriter {
     enum Outcome: Equatable {
         /// Written; `changeCount` is the pasteboard's count right after, so the watcher can ignore it.
@@ -33,6 +34,9 @@ enum PasteboardWriter {
             guard !urls.isEmpty else { return .unavailable("Those files are no longer there") }
             pasteboard.clearContents()
             pasteboard.writeObjects(urls as [NSURL])
+        }
+        if item.concealed {
+            pasteboard.setString("", forType: NSPasteboard.PasteboardType(PasteboardFilter.concealedType))
         }
         return .written(changeCount: pasteboard.changeCount)
     }

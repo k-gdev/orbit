@@ -19,6 +19,7 @@ public final class ClipboardSettings: ObservableObject {
         static let popupShortcut = "clipboard.popupShortcut"
         static let ignoredBundleIDs = "clipboard.ignoredBundleIDs"
         static let pasteDirectly = "clipboard.pasteDirectly"
+        static let recordPasswords = "clipboard.recordPasswords"
     }
 
     /// How many entries to keep (default 200).
@@ -52,6 +53,12 @@ public final class ClipboardSettings: ObservableObject {
         didSet { defaults.set(pasteDirectly, forKey: Key.pasteDirectly) }
     }
 
+    /// Whether copies a password manager marked concealed are kept (default false). They are held in memory
+    /// only, shown masked, and gone when Orbit quits or this is turned off.
+    @Published public var recordPasswords: Bool {
+        didSet { defaults.set(recordPasswords, forKey: Key.recordPasswords) }
+    }
+
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         func number(_ key: String, _ fallback: Int, _ range: ClosedRange<Int>) -> Int {
@@ -67,6 +74,7 @@ public final class ClipboardSettings: ObservableObject {
             .flatMap { $0.isUsableAsHotKey ? $0 : nil } ?? .clipboardDefault
         ignoredBundleIDs = defaults.stringArray(forKey: Key.ignoredBundleIDs) ?? []
         pasteDirectly = defaults.object(forKey: Key.pasteDirectly) as? Bool ?? true
+        recordPasswords = defaults.object(forKey: Key.recordPasswords) as? Bool ?? false
     }
 
     /// The limits these settings describe.

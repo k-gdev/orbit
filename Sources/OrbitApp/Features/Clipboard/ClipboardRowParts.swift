@@ -3,9 +3,10 @@ import OrbitCore
 import SwiftUI
 
 extension ClipboardItem {
-    /// The SF Symbol for the entry's kind.
+    /// The SF Symbol for the entry's kind (a lock for a copied password).
     var kindSymbol: String {
-        switch kind {
+        if concealed { return "lock.fill" }
+        return switch kind {
         case .text: "text.alignleft"
         case .richText: "textformat"
         case .image: "photo"
@@ -13,12 +14,15 @@ extension ClipboardItem {
         }
     }
 
-    /// "Safari · 2 min ago", with the size added for images and files.
-    func metaText(now: Date) -> String {
+    /// "Safari · 2 min ago", with "Password" after the app for a copied password, the size added for
+    /// images and `fileLabel` ("Missing") at the end for a files entry whose files are gone.
+    func metaText(now: Date, fileLabel: String? = nil) -> String {
         var parts: [String] = []
         if let sourceName, !sourceName.isEmpty { parts.append(sourceName) }
+        if concealed { parts.append("Password") }
         parts.append(Self.ageLabel(for: date, now: now))
-        if kind == .image { parts.append(ByteCountFormatter.string(fromByteCount: Int64(byteSize), countStyle: .file)) }
+        if kind == .image && !concealed { parts.append(ByteCountFormatter.string(fromByteCount: Int64(byteSize), countStyle: .file)) }
+        if let fileLabel { parts.append(fileLabel) }
         return parts.joined(separator: " · ")
     }
 }
@@ -56,9 +60,10 @@ struct ClipboardKindBadge: View {
     }
 }
 
-/// "[app icon] Safari · 2 min ago".
+/// "[app icon] Safari · 2 min ago" (and "Missing" when a files entry's files are gone).
 struct ClipboardMetaLine: View {
     let item: ClipboardItem
+    @ObservedObject var model: ClipboardModel
     let now: Date
 
     @Environment(\.colorScheme) private var colorScheme
@@ -68,7 +73,7 @@ struct ClipboardMetaLine: View {
             if let id = item.sourceBundleID, let icon = AppLookup.icon(forBundleID: id) {
                 Image(nsImage: icon).resizable().frame(width: 12, height: 12)
             }
-            Text(item.metaText(now: now))
+            Text(item.metaText(now: now, fileLabel: model.fileStatuses[item.id]?.metaLabel))
                 .font(.system(size: 10.5))
                 .foregroundStyle(PanelStyle.colors(for: colorScheme).secondaryInk)
                 .lineLimit(1)

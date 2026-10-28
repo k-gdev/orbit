@@ -4,13 +4,14 @@ import SwiftUI
 
 /// What the Clipboard tab can ask the feature to do beyond editing the history.
 struct ClipboardPanelActions {
-    /// Copy this entry back to the pasteboard (and close the panel).
-    var copy: (ClipboardItem) -> Void = { _ in }
+    /// Copy an entry back to the pasteboard, or open or reveal its files (and close the panel).
+    var perform: (ClipboardEntryAction, ClipboardItem) -> Void = { _, _ in }
 }
 
 /// The Clipboard tab of the menu bar panel: a search field and a Clear button pinned at the top, then
 /// the history as tiles (pinned entries first), each with its kind, preview, source app and age.
-/// Clicking a tile copies it; pin and delete appear on hover (and in the context menu). Scrolls itself
+/// Clicking a tile copies it; pin, delete and (for files) open appear on hover, and the context menu has
+/// the rest. A tile can also be dragged out into another app. Scrolls itself
 /// (`ClipboardFeature.managesOwnScrolling`), so the search field stays put.
 struct ClipboardPanelView: View {
     @ObservedObject var model: ClipboardModel
@@ -50,7 +51,9 @@ struct ClipboardPanelView: View {
             }
             if model.history.isEmpty {
                 emptyTile(symbol: "doc.on.clipboard", title: "Nothing copied yet",
-                          detail: "What you copy shows up here. Copies from password managers are never recorded.")
+                          detail: settings.recordPasswords
+                              ? "What you copy shows up here. Copies from password managers are kept only until Orbit quits."
+                              : "What you copy shows up here. Copies from password managers are never recorded.")
             } else if shown.isEmpty {
                 emptyTile(symbol: "magnifyingglass", title: "No matches", detail: "Nothing in the history matches “\(query)”.")
             } else {
@@ -94,7 +97,7 @@ struct ClipboardPanelView: View {
 
     @ViewBuilder private func rows(_ items: [ClipboardItem], now: Date) -> some View {
         ForEach(items) { item in
-            ClipboardPanelRow(item: item, model: model, now: now, onCopy: { actions.copy(item) })
+            ClipboardPanelRow(item: item, model: model, now: now, perform: { actions.perform($0, item) })
         }
     }
 
@@ -174,38 +177,50 @@ private struct ClipboardPanelRow: View {
     let item: ClipboardItem
     @ObservedObject var model: ClipboardModel
     let now: Date
-    let onCopy: () -> Void
+    /// Copy, open or reveal this entry (the feature does it).
+    let perform: (ClipboardEntryAction) -> Void
 
     @State private var hovering = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let style = PanelStyle.colors(for: colorScheme)
+        let filesUsable = model.fileStatuses[item.id]?.isUsable ?? true
         PanelTile(spacing: 0, padding: 8) {
             HStack(spacing: 8) {
-                Button(action: onCopy) {
-                    HStack(spacing: 9) {
-                        ClipboardKindBadge(item: item, model: model)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(item.preview.isEmpty ? "(empty)" : item.preview)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(.primary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            ClipboardMetaLine(item: item, now: now)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 9) {
+                    ClipboardKindBadge(item: item, model: model)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.preview.isEmpty ? "(empty)" : item.preview)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ClipboardMetaLine(item: item, model: model, now: now)
                     }
-                    .contentShape(Rectangle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.plain)
-                .help("Copy")
+                .contentShape(Rectangle())
+                .overlay {
+                    ClipboardRowSurface(label: item.preview, toolTip: "Copy",
+                                        onClick: { perform(.copy) },
+                                        dragContent: { model.dragContent(for: item) },
+                                        menu: { ClipboardEntryMenu.entries(for: item, files: model.checkFiles(of: item)) },
+                                        onMenuAction: handleMenuAction)
+                }
 
                 if hovering || item.pinned {
                     HStack(spacing: 4) {
-                        rowButton(item.pinned ? "pin.fill" : "pin", on: item.pinned, help: item.pinned ? "Unpin" : "Pin", style: style) {
-                            model.togglePin(item.id)
+                        if hovering && item.kind == .files {
+                            rowButton("arrow.up.forward.app", on: false, help: "Open", style: style) { perform(.open) }
+                                .disabled(!filesUsable)
+                                .opacity(filesUsable ? 1 : 0.4)
+                        }
+                        if !item.concealed {
+                            rowButton(item.pinned ? "pin.fill" : "pin", on: item.pinned, help: item.pinned ? "Unpin" : "Pin", style: style) {
+                                model.togglePin(item.id)
+                            }
                         }
                         if hovering {
                             rowButton("xmark", on: false, help: "Remove from the history", style: style) { model.remove(item.id) }
@@ -215,11 +230,15 @@ private struct ClipboardPanelRow: View {
             }
         }
         .onHover { hovering = $0 }
-        .contextMenu {
-            Button("Copy", action: onCopy)
-            Button(item.pinned ? "Unpin" : "Pin") { model.togglePin(item.id) }
-            Divider()
-            Button("Remove", role: .destructive) { model.remove(item.id) }
+        .task(id: item.id) { await model.refreshFileStatus(of: item) }
+    }
+
+    /// Pin and remove are the model's; everything else goes to the feature.
+    private func handleMenuAction(_ action: ClipboardEntryAction) {
+        switch action {
+        case .pin, .unpin: model.togglePin(item.id)
+        case .remove: model.remove(item.id)
+        case .copy, .open, .showInFinder, .openInPreview: perform(action)
         }
     }
 
