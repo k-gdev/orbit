@@ -279,13 +279,18 @@ final class MicMuteService: NSObject, ObservableObject {
         }
         state.commitRestore()
         saveRecord()
+        // With Sound and Controls off, the system listeners only existed for this record: drop them now.
+        updateSystemListening()
         return true
     }
 
     /// Finishes mutes still on record for devices that went away: once a device is back and still as Orbit
     /// left it, it is unmuted; if the user changed it meanwhile, the record is simply dropped.
     private func processPending() {
-        guard !state.pending.isEmpty else { return }
+        guard !state.pending.isEmpty else {
+            updateSystemListening()
+            return
+        }
         let work = state.pendingWork { uid in MicHAL.device(uid: uid).flatMap { MicHAL.reading(for: $0) } }
         for item in work where item.actions.isEmpty || perform(item.actions) {
             if !item.actions.isEmpty { Log.info("mic mute: \(item.deviceUID) is back; undid Orbit's mute") }
