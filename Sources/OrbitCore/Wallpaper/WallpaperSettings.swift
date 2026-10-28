@@ -10,7 +10,9 @@ public final class WallpaperSettings: ObservableObject {
         static let pauseOnBattery = "wallpaper.pauseOnBattery"
         static let pauseInLowPower = "wallpaper.pauseInLowPower"
         static let setStillFrame = "wallpaper.setStillFrame"
-        static let previousDesktopPictures = "wallpaper.previousDesktopPictures"
+        static let desktopPictures = "wallpaper.desktopPictures"
+        /// The first build's display key → URL string map, read once to migrate.
+        static let legacyPreviousDesktopPictures = "wallpaper.previousDesktopPictures"
     }
 
     /// Each display's wallpaper. Stored as JSON; unreadable data reads as none.
@@ -30,11 +32,13 @@ public final class WallpaperSettings: ObservableObject {
     /// Space switches match (default on).
     @Published public var setStillFrame: Bool { didSet { defaults.set(setStillFrame, forKey: Key.setStillFrame) } }
 
-    /// Display key → the desktop picture (URL string) it had before Orbit first set a still frame on it, put back
-    /// when its wallpaper is removed or Wallpaper is turned off. Maintained by `rememberDesktopPicture` and
-    /// `desktopPictureToRestore`.
-    @Published public var previousDesktopPictures: [String: String] {
-        didSet { defaults.set(previousDesktopPictures, forKey: Key.previousDesktopPictures) }
+    /// What Orbit changed about each display's desktop picture: the user's original (with its options), the stills
+    /// Orbit set, and which displays wait for their original to come back on the Spaces that still show a still. See
+    /// `DesktopPictureLedger`. Stored as JSON; unreadable data reads as empty.
+    @Published public var desktopPictures: DesktopPictureLedger {
+        didSet {
+            if let data = try? JSONEncoder().encode(desktopPictures) { defaults.set(data, forKey: Key.desktopPictures) }
+        }
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -44,23 +48,13 @@ public final class WallpaperSettings: ObservableObject {
         pauseOnBattery = defaults.object(forKey: Key.pauseOnBattery) as? Bool ?? false
         pauseInLowPower = defaults.object(forKey: Key.pauseInLowPower) as? Bool ?? true
         setStillFrame = defaults.object(forKey: Key.setStillFrame) as? Bool ?? true
-        previousDesktopPictures = defaults.dictionary(forKey: Key.previousDesktopPictures) as? [String: String] ?? [:]
-    }
-
-    /// Call just before Orbit sets a still frame on display `key`, with the picture it shows now. Remembers it only
-    /// the first time: a picture is already remembered, or `current` is one of Orbit's own stills, or there is none.
-    public func rememberDesktopPicture(_ current: URL?, for key: String, stillsFolder: URL) {
-        guard previousDesktopPictures[key] == nil, let current, !StillFrame.isStill(current, in: stillsFolder) else { return }
-        previousDesktopPictures[key] = current.absoluteString
-    }
-
-    /// Call when display `key` loses its wallpaper (or Wallpaper stops), with the picture it shows now. Returns the
-    /// remembered picture to put back, but only while the display still shows Orbit's still: if the user chose
-    /// another picture since, theirs stays. Forgets the remembered picture either way.
-    public func desktopPictureToRestore(for key: String, current: URL?, stillsFolder: URL) -> URL? {
-        guard let saved = previousDesktopPictures.removeValue(forKey: key) else { return nil }
-        guard let current, StillFrame.isStill(current, in: stillsFolder) else { return nil }
-        return URL(string: saved)
+        if let data = defaults.data(forKey: Key.desktopPictures) {
+            desktopPictures = (try? JSONDecoder().decode(DesktopPictureLedger.self, from: data)) ?? DesktopPictureLedger()
+        } else if let legacy = defaults.dictionary(forKey: Key.legacyPreviousDesktopPictures) as? [String: String] {
+            desktopPictures = DesktopPictureLedger(legacy: legacy)
+        } else {
+            desktopPictures = DesktopPictureLedger()
+        }
     }
 }
 
@@ -87,6 +81,12 @@ public enum StillFrame {
         let dir = folder.standardizedFileURL.path
         let base = dir.hasSuffix("/") ? dir : dir + "/"
         return url.standardizedFileURL.path.hasPrefix(base)
+    }
+
+    /// What cleanup may delete: Orbit's own stills that aren't in `keeping` (stills saved wallpapers use or a display
+    /// shows now) and that no display waiting for its original picture may still show on another Space.
+    public static func removable(_ files: [String], keeping: Set<String>, ledger: DesktopPictureLedger) -> [String] {
+        unused(files, keeping: keeping.union(ledger.protectedStills))
     }
 
     /// Of the file names in the stills folder, Orbit's own stills (`aerial-*.png`, `video-*.png`) not in `keeping`.

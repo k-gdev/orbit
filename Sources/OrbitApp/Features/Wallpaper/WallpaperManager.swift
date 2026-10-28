@@ -19,6 +19,8 @@ final class WallpaperManager {
     private var screens: [String: NSScreen] = [:]
     private var windows: [String: WallpaperWindow] = [:]
     private var shown: [String: WallpaperSource] = [:]
+    /// The file each window plays.
+    private var videos: [String: URL] = [:]
     private var players: [String: WallpaperPlayer] = [:]
     private var occlusionObservers: [String: NSObjectProtocol] = [:]
     private var observers: [NSObjectProtocol] = []
@@ -50,7 +52,7 @@ final class WallpaperManager {
         })
         workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
                                                                            object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.evaluate() }
+            MainActor.assumeIsolated { self?.activeSpaceChanged() }
         })
         // @Published fires before the value changes; hopping to the next run loop turn reads the new value.
         settings.$assignments.dropFirst().removeDuplicates().receive(on: RunLoop.main)
@@ -103,9 +105,9 @@ final class WallpaperManager {
 
         var assignments = settings.assignments
         for move in assignments.adopt(refs) {
-            if let picture = settings.previousDesktopPictures.removeValue(forKey: move.from) {
-                settings.previousDesktopPictures[move.to] = picture
-            }
+            var ledger = settings.desktopPictures
+            ledger.move(from: move.from, to: move.to)
+            if ledger != settings.desktopPictures { settings.desktopPictures = ledger }
             Log.info("wallpaper: \(move.to) took over the wallpaper saved for \(move.from)")
         }
         // A newly downloaded aerial isn't in the catalog yet: read the manifest again once.
@@ -154,7 +156,7 @@ final class WallpaperManager {
                     stills.apply(source, video: url, toDisplay: ref.key)
                 }
             } else {
-                stills.restore(display: ref.key)
+                stills.requestRestore(display: ref.key)
             }
         }
         stills.removeUnused(keepingSources: assignments.byDisplay.values.map(\.source))
@@ -196,13 +198,30 @@ final class WallpaperManager {
         }
         window.attach(player.player)
         shown[key] = source
+        videos[key] = url
         Log.info("wallpaper: \(screen.localizedName) shows \(source.identity)")
+    }
+
+    /// A Space switch: re-apply the pause policy, put originals back where this Space still shows a still for a
+    /// display that no longer wants one, and refresh stale stills on displays that have a wallpaper.
+    private func activeSpaceChanged() {
+        guard isRunning else { return }
+        evaluate()
+        stills.attemptPendingRestores()
+        if settings.setStillFrame {
+            var current: [String: (source: WallpaperSource, video: URL)] = [:]
+            for (key, source) in shown {
+                if let video = videos[key] { current[key] = (source, video) }
+            }
+            stills.replaceStaleStills(current)
+        }
     }
 
     private func closeWindow(_ key: String) {
         if let observer = occlusionObservers.removeValue(forKey: key) { NotificationCenter.default.removeObserver(observer) }
         windows.removeValue(forKey: key)?.tearDown()
         shown[key] = nil
+        videos[key] = nil
     }
 
     // MARK: Playback
