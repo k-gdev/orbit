@@ -196,6 +196,13 @@ import Testing
             .init(.service(external: true), path: "IOService:/a/c/DCPAVServiceProxy"),
         ]
         #expect(AVServicePairing.pair(anonymous) == [2: 1])
+        // Order never overrides a unit name: dispext4's service with only dispext0's framebuffer before it
+        // stays unpaired (its display falls back to software dimming rather than talking to the wrong one).
+        let mismatched: [AVServicePairing.Entry] = [
+            .init(.framebuffer, path: Self.framebuffer("dispext0@B0000000")),
+            .init(.service(external: true), path: "\(Self.root)/x/dispext4:dcpav-service-epic:0/DCPAVServiceProxy"),
+        ]
+        #expect(AVServicePairing.pair(mismatched).isEmpty)
         #expect(AVServicePairing.unitToken(in: Self.framebuffer("dispext12@B0000000")) == "dispext12")
         #expect(AVServicePairing.unitToken(in: "\(Self.root)/x/disp0:dcpav-service-epic:0/DCPAVServiceProxy") == "disp0")
         #expect(AVServicePairing.unitToken(in: "IOService:/a/b/AppleCLCD2") == nil)
