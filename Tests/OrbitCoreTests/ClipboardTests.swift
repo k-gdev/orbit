@@ -179,6 +179,89 @@ import Testing
             #expect(!movedMissing)
         }
 
+        // MARK: Limits
+
+        private static func limits(items: Int = 1_000, days: Int = 365, totalBytes: Int = Int.max, itemBytes: Int = Int.max) -> ClipboardLimits {
+            ClipboardLimits(maxItems: items, maxAge: TimeInterval(days) * 86_400, maxTotalBytes: totalBytes, maxItemBytes: itemBytes)
+        }
+
+        @Test func enforcesCountLimit() {
+            var history = ClipboardHistory()
+            for (index, name) in ["a", "b", "c", "d", "e"].enumerated() {
+                history.add(ClipboardTests.item(name, minutesAgo: Double(50 - index)))
+            }
+            #expect(history.items.map(\.preview) == ["e", "d", "c", "b", "a"])
+            let evicted = history.enforce(limits: Self.limits(items: 3), now: ClipboardTests.base)
+            #expect(evicted.map(\.preview) == ["a", "b"], "oldest go first")
+            #expect(history.items.map(\.preview) == ["e", "d", "c"])
+            // Already within the limit: nothing happens.
+            let again = history.enforce(limits: Self.limits(items: 3), now: ClipboardTests.base)
+            #expect(again.isEmpty)
+            #expect(history.count == 3)
+        }
+
+        @Test func enforcesAgeLimit() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("ancient", minutesAgo: 40 * 24 * 60))
+            history.add(ClipboardTests.item("old", minutesAgo: 31 * 24 * 60))
+            history.add(ClipboardTests.item("edge", minutesAgo: 30 * 24 * 60))
+            history.add(ClipboardTests.item("fresh", minutesAgo: 60))
+            // Newest first in the history; the helper added them oldest first, so the order is reversed.
+            let evicted = history.enforce(limits: Self.limits(days: 30), now: ClipboardTests.base)
+            #expect(Set(evicted.map(\.preview)) == ["ancient", "old"], "exactly 30 days old is still kept")
+            #expect(history.items.map(\.preview) == ["fresh", "edge"])
+        }
+
+        @Test func enforcesByteLimit() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("a", minutesAgo: 4, size: 400))
+            history.add(ClipboardTests.item("b", minutesAgo: 3, size: 400))
+            history.add(ClipboardTests.item("c", minutesAgo: 2, size: 400))
+            history.add(ClipboardTests.item("d", minutesAgo: 1, size: 400))
+            #expect(history.totalBytes == 1_600)
+            let evicted = history.enforce(limits: Self.limits(totalBytes: 1_000), now: ClipboardTests.base)
+            #expect(evicted.map(\.preview) == ["a", "b"], "oldest first, until the total fits")
+            #expect(history.totalBytes == 800)
+
+            // A huge entry (a 200 MB image) cannot stay: eviction runs oldest first until the total fits,
+            // so it takes the older ones with it. (The per-item limit keeps such a copy out in the first place.)
+            var big = ClipboardHistory()
+            big.add(ClipboardTests.item("small", minutesAgo: 5, size: 100))
+            big.add(ClipboardTests.item("huge", minutesAgo: 1, size: 200_000_000))
+            let gone = big.enforce(limits: Self.limits(totalBytes: 50_000_000), now: ClipboardTests.base)
+            #expect(gone.map(\.preview) == ["small", "huge"])
+            #expect(big.isEmpty)
+        }
+
+        @Test func pinnedNeverEvicted() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("pinned-old", minutesAgo: 90 * 24 * 60, pinned: true))
+            history.add(ClipboardTests.item("pinned-big", minutesAgo: 80 * 24 * 60, pinned: true, size: 900))
+            history.add(ClipboardTests.item("a", minutesAgo: 20, size: 500))
+            history.add(ClipboardTests.item("b", minutesAgo: 10, size: 500))
+            // Tight on every limit at once: only the unpinned entries can go.
+            let evicted = history.enforce(limits: Self.limits(items: 1, days: 30, totalBytes: 100), now: ClipboardTests.base)
+            #expect(Set(evicted.map(\.preview)) == ["a", "b"])
+            #expect(history.items.map(\.preview) == ["pinned-big", "pinned-old"])
+            #expect(history.items.allSatisfy { $0.pinned })
+        }
+
+        @Test func limitsFromSettingsUnits() {
+            let limits = ClipboardLimits(maxItems: 200, maxAgeDays: 30, maxMegabytes: 200, maxItemMegabytes: 20)
+            #expect(limits.maxItems == 200)
+            #expect(limits.maxAge == 30 * 86_400)
+            #expect(limits.maxTotalBytes == 200_000_000)
+            #expect(limits.maxItemBytes == 20_000_000)
+            #expect(limits.allowsItem(ofSize: 20_000_000))
+            #expect(!limits.allowsItem(ofSize: 20_000_001))
+            #expect(limits.allowsItem(ofSize: 0))
+            // One copy can never be allowed to be bigger than the whole history.
+            #expect(ClipboardLimits(maxItems: 200, maxAgeDays: 30, maxMegabytes: 10, maxItemMegabytes: 50).maxItemBytes == 10_000_000)
+            // Nonsense values never produce a limit that would drop everything.
+            let broken = ClipboardLimits(maxItems: 0, maxAgeDays: -3, maxMegabytes: 0, maxItemMegabytes: 0)
+            #expect(broken.maxItems >= 1 && broken.maxAge >= 86_400 && broken.maxTotalBytes >= 1_000_000 && broken.maxItemBytes >= 1_000_000)
+        }
+
         @Test func lookupsByIDAndHash() {
             var history = ClipboardHistory()
             let a = ClipboardTests.item("a")
