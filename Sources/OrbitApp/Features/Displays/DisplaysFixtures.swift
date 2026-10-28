@@ -23,7 +23,8 @@ enum DisplaysFixtures {
         let proposed = RawDisplayMode(id: 1, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080, refreshRate: 60)
         let pending = ResolutionConfirmation(displayID: 3, displayTitle: "Q27G4ZD", previous: previous, proposed: proposed,
                                              proposedLabel: "1920 × 1080", startedAt: Date().addingTimeInterval(-3))
-        return DisplaysModel(settings: settings, driver: nil, tiles: tiles, confirmation: pending)
+        return DisplaysModel(settings: settings, driver: nil, tiles: tiles, confirmation: pending,
+                             conflictHint: DisplayConflicts.hint(runningBundleIDs: ["pro.betterdisplay.BetterDisplay"]))
     }
 
     static let tiles: [DisplaysModel.Tile] = [

@@ -11,6 +11,9 @@ struct DisplaysPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             PanelSectionHeader("Displays", trailing: AnyView(linkButton))
+            if let hint = model.conflictHint {
+                ConflictHint(text: hint)
+            }
             if model.tiles.isEmpty {
                 PanelTile {
                     Text(model.hasScanned ? "No displays found." : "Looking for displays…")
@@ -30,6 +33,23 @@ struct DisplaysPanelView: View {
         }
         .help(linked ? "Brightness moves on every display together. Click to unlink."
                      : "Move every display's brightness together, proportionally.")
+    }
+}
+
+/// One quiet line under the header while another display app (BetterDisplay) also drives these monitors.
+private struct ConflictHint: View {
+    let text: String
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(PanelStyle.accent(for: colorScheme))
+            Text(text).font(.system(size: 11)).foregroundStyle(PanelStyle.colors(for: colorScheme).secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 4)
     }
 }
 

@@ -15,10 +15,8 @@ public enum DisplayConflicts {
         let running = Set(runningBundleIDs)
         let names = knownApps.filter { running.contains($0.bundleID) }.map(\.name)
         guard let last = names.last else { return nil }
-        if names.count == 1 {
-            return "\(last) is also running and controls these monitors. Quit it so the two don't undo each other."
-        }
+        if names.count == 1 { return "\(last) is running too and may undo changes made here." }
         let list = names.dropLast().joined(separator: ", ") + " and " + last
-        return "\(list) are also running and control these monitors. Quit them so they don't undo Orbit's changes."
+        return "\(list) are running too and may undo changes made here."
     }
 }

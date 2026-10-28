@@ -91,14 +91,18 @@ final class DisplaysModel: ObservableObject {
     /// feature is off. Fixture models leave it false and never look at the hardware.
     private let readsCatalogWhenIdle: Bool
 
-    /// `confirmation` is for fixtures (a pending "Keep this resolution?" in snapshots).
+    /// "BetterDisplay is also running…" while another app that drives these monitors runs (`DisplayConflicts`).
+    @Published private(set) var conflictHint: String?
+
+    /// `confirmation` and `conflictHint` are for fixtures (snapshots).
     init(settings: DisplaySettings, driver: DisplaysDriver?, tiles: [Tile] = [], readsCatalogWhenIdle: Bool = false,
-         confirmation: ResolutionConfirmation? = nil) {
+         confirmation: ResolutionConfirmation? = nil, conflictHint: String? = nil) {
         self.settings = settings
         self.driver = driver
         self.tiles = tiles
         self.readsCatalogWhenIdle = readsCatalogWhenIdle
         self.confirmation = confirmation
+        self.conflictHint = conflictHint
         self.hasScanned = !tiles.isEmpty || driver == nil
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         settings.$useGammaFallback.dropFirst().removeDuplicates().sink { [weak self] on in
@@ -159,6 +163,7 @@ final class DisplaysModel: ObservableObject {
         }
         tiles = next
         hasScanned = true
+        conflictHint = DisplayConflicts.hint(runningBundleIDs: NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         probe(toRead)
     }
 

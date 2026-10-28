@@ -27,9 +27,9 @@ import Testing
         #expect(DisplayConflicts.hint(runningBundleIDs: ["com.apple.finder"]) == nil)
         #expect(DisplayConflicts.hint(runningBundleIDs: []) == nil)
         #expect(DisplayConflicts.hint(runningBundleIDs: ["com.apple.finder", "pro.betterdisplay.BetterDisplay"])
-                == "BetterDisplay is also running and controls these monitors. Quit it so the two don't undo each other.")
+                == "BetterDisplay is running too and may undo changes made here.")
         #expect(DisplayConflicts.hint(runningBundleIDs: ["fyi.lunar.Lunar", "pro.betterdisplay.BetterDisplay", "fyi.lunar.Lunar"])
-                == "BetterDisplay and Lunar are also running and control these monitors. Quit them so they don't undo Orbit's changes.")
+                == "BetterDisplay and Lunar are running too and may undo changes made here.")
     }
 }
 
