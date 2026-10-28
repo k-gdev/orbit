@@ -71,6 +71,11 @@ public final class DisplaySettings: ObservableObject {
         learnedMaximums[key] = min(value, BrightnessRange.ceiling)
     }
 
+    /// Forgets the learned maximum for `key` (Settings → Reset learned range).
+    public func forgetLearnedMaximum(for key: String) {
+        if learnedMaximums[key] != nil { learnedMaximums[key] = nil }
+    }
+
     private static func integers(_ dictionary: [String: Any]?) -> [String: Int] {
         (dictionary ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }
     }

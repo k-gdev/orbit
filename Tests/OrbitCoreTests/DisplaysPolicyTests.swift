@@ -2,6 +2,51 @@ import Foundation
 import Testing
 @testable import OrbitCore
 
+/// Learning a boost range needs two validated readings in a row above the reported maximum (M3).
+@Suite struct BoostLearnerTests {
+    @Test func learnsOnlyAfterTwoReadingsInARow() {
+        var learner = BoostLearner()
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == nil)
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == 150)
+        // The lower of the two is learned.
+        var other = BoostLearner()
+        #expect(other.observe(VCPValue(current: 140, maximum: 100), for: "tv") == nil)
+        #expect(other.observe(VCPValue(current: 130, maximum: 100), for: "tv") == 130)
+        // Keys are independent.
+        var mixed = BoostLearner()
+        #expect(mixed.observe(VCPValue(current: 150, maximum: 100), for: "left") == nil)
+        #expect(mixed.observe(VCPValue(current: 150, maximum: 100), for: "right") == nil)
+        #expect(mixed.observe(VCPValue(current: 150, maximum: 100), for: "left") == 150)
+    }
+
+    @Test func aNormalReadingOrForgetBreaksTheRun() {
+        var learner = BoostLearner()
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == nil)
+        #expect(learner.observe(VCPValue(current: 80, maximum: 100), for: "tv") == nil)   // within range
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == nil)   // starts again
+        learner.forget("tv")
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == nil)
+        #expect(learner.observe(VCPValue(current: 150, maximum: 100), for: "tv") == 150)
+        // Readings at or below the maximum never teach anything.
+        var plain = BoostLearner()
+        #expect(plain.observe(VCPValue(current: 100, maximum: 100), for: "aoc") == nil)
+        #expect(plain.observe(VCPValue(current: 100, maximum: 100), for: "aoc") == nil)
+    }
+
+    @Test func settingsForgetTheLearnedRange() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let settings = DisplaySettings(defaults: defaults)
+        settings.learn(maximum: 150, reported: 100, for: "tv")
+        settings.learn(maximum: 150, reported: 100, for: "aoc")
+        settings.forgetLearnedMaximum(for: "tv")
+        #expect(settings.learnedMaximums == ["aoc": 150])
+        #expect(DisplaySettings(defaults: defaults).learnedMaximums == ["aoc": 150])
+        settings.forgetLearnedMaximum(for: "missing")   // harmless
+        #expect(settings.learnedMaximums == ["aoc": 150])
+    }
+}
+
 /// The tile-control decisions for displays that answer DDC, miss replies, sleep or never answer
 /// (Review Focus #2).
 @Suite struct DisplayControlPolicyTests {
