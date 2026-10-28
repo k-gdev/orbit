@@ -172,6 +172,40 @@ enum WallpaperFixtures {
         #expect(AerialCatalog.parse(entriesJSON: twice, localizedStrings: [:]).map(\.name) == ["One"])
     }
 
+    @Test func oneBadEntryDoesNotEmptyTheCatalog() {
+        // Real manifests change between macOS releases: an odd field on one asset must cost that asset at most.
+        let json = Data("""
+        {
+          "assets": [
+            42,
+            {"id": 7, "accessibilityLabel": "Numeric id"},
+            {"accessibilityLabel": "No id at all"},
+            {"id": "A", "accessibilityLabel": "Order as text", "preferredOrder": "first"},
+            {"id": "B", "accessibilityLabel": "Fractional order", "preferredOrder": 0.5},
+            {"id": "C", "accessibilityLabel": "Categories as text", "categories": "\(WallpaperFixtures.landscapes)"},
+            {"id": "D", "accessibilityLabel": null, "localizedNameKey": 12, "shotID": "SHOT_D"},
+            {"id": "E", "accessibilityLabel": "Fine", "categories": ["\(WallpaperFixtures.landscapes)"], "preferredOrder": 1}
+          ],
+          "categories": [
+            {"id": "\(WallpaperFixtures.landscapes)", "localizedNameKey": "AerialCategoryLandscapes", "preferredOrder": "zero"},
+            {"localizedNameKey": "NoID"},
+            "garbage"
+          ]
+        }
+        """.utf8)
+        let aerials = AerialCatalog.parse(entriesJSON: json, localizedStrings: WallpaperFixtures.strings)
+        #expect(Set(aerials.map(\.id)) == ["A", "B", "C", "D", "E"])
+        let byID = Dictionary(uniqueKeysWithValues: aerials.map { ($0.id, $0) })
+        #expect(byID["D"]?.name == "SHOT_D")
+        #expect(byID["E"]?.category == "Landscape")
+        #expect(byID["C"]?.category == nil)
+        // Landscape (the only category) first; within it E; then the uncategorised by order: B (0.5), then A, C, D.
+        #expect(aerials.map(\.id) == ["E", "B", "A", "C", "D"])
+        // A manifest without an assets list is empty, not an error that takes anything else down.
+        #expect(AerialCatalog.parse(entriesJSON: Data(#"{"categories": []}"#.utf8), localizedStrings: [:]).isEmpty)
+        #expect(AerialCatalog.parse(entriesJSON: Data(#"{"assets": "nope"}"#.utf8), localizedStrings: [:]).isEmpty)
+    }
+
     @Test func readsLocTablePreferringTheUsersLanguage() throws {
         let table = try WallpaperFixtures.locTable([
             "en": ["K": "Hello", "ONLY_EN": "English"],

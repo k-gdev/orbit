@@ -76,29 +76,78 @@ public enum AerialCatalog {
 
     // MARK: Parsing
 
+    // The manifest changes between macOS releases. Every level decodes leniently: an asset or category that isn't
+    // an object, or a field of an unexpected type, costs that field or that entry, never the whole catalog.
+
+    /// Decodes a `T`, or nil instead of throwing.
+    private struct Lenient<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+    }
+
+    private enum Key: String, CodingKey {
+        case assets, categories, id, accessibilityLabel, localizedNameKey, shotID, preferredOrder
+    }
+
     private struct Manifest: Decodable {
         let assets: [Asset]
-        let categories: [Category]?
+        let categories: [Category]
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Key.self)
+            assets = (try? c.decode([Lenient<Asset>].self, forKey: .assets))?.compactMap(\.value) ?? []
+            categories = (try? c.decode([Lenient<Category>].self, forKey: .categories))?.compactMap(\.value) ?? []
+        }
     }
 
     private struct Asset: Decodable {
-        let id: String
+        let id: String?
         let accessibilityLabel: String?
         let localizedNameKey: String?
-        let categories: [String]?
+        let categories: [String]
         let shotID: String?
-        let preferredOrder: Int?
+        let preferredOrder: Double?
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Key.self)
+            id = AerialCatalog.text(c, .id)
+            accessibilityLabel = AerialCatalog.text(c, .accessibilityLabel)
+            localizedNameKey = AerialCatalog.text(c, .localizedNameKey)
+            categories = (try? c.decode([Lenient<String>].self, forKey: .categories))?.compactMap(\.value) ?? []
+            shotID = AerialCatalog.text(c, .shotID)
+            preferredOrder = AerialCatalog.number(c, .preferredOrder)
+        }
     }
 
     private struct Category: Decodable {
-        let id: String
+        let id: String?
         let localizedNameKey: String?
-        let preferredOrder: Int?
+        let preferredOrder: Double?
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Key.self)
+            id = AerialCatalog.text(c, .id)
+            localizedNameKey = AerialCatalog.text(c, .localizedNameKey)
+            preferredOrder = AerialCatalog.number(c, .preferredOrder)
+        }
+    }
+
+    /// A string field, or nil when it is missing, null or not a string.
+    private static func text(_ c: KeyedDecodingContainer<Key>, _ key: Key) -> String? {
+        try? c.decode(String.self, forKey: key)
+    }
+
+    /// A number field given as an integer, a fraction or numeric text; nil otherwise.
+    private static func number(_ c: KeyedDecodingContainer<Key>, _ key: Key) -> Double? {
+        if let value = try? c.decode(Int.self, forKey: key) { return Double(value) }
+        if let value = try? c.decode(Double.self, forKey: key) { return value }
+        if let value = try? c.decode(String.self, forKey: key) { return Double(value) }
+        return nil
     }
 
     /// The aerials in `entries.json`, named from `localizedStrings` (the strings bundle for the user's language), in
-    /// category order then the manifest's own order. Unreadable data gives an empty list; assets without an id are
-    /// skipped and a repeated id is kept once.
+    /// category order then the manifest's own order. Unreadable data gives an empty list; assets without a string id
+    /// are skipped, a repeated id is kept once, and a field of the wrong type counts as missing.
     public static func parse(entriesJSON: Data, localizedStrings: [String: String]) -> [Aerial] {
         let manifest: Manifest
         do {
@@ -107,34 +156,35 @@ public enum AerialCatalog {
             Log.error("wallpaper: unreadable aerial manifest: \(error)")
             return []
         }
-        func text(_ key: String?) -> String? {
+        func localized(_ key: String?) -> String? {
             guard let key, let value = localizedStrings[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
             return value
         }
         var categoryName: [String: String] = [:]
-        var categoryOrder: [String: Int] = [:]
-        for (index, category) in (manifest.categories ?? []).enumerated() {
-            categoryOrder[category.id] = category.preferredOrder ?? index
-            if let name = text(category.localizedNameKey) {
-                categoryName[category.id] = name
+        var categoryOrder: [String: Double] = [:]
+        for (index, category) in manifest.categories.enumerated() {
+            guard let id = category.id, !id.isEmpty else { continue }
+            categoryOrder[id] = category.preferredOrder ?? Double(index)
+            if let name = localized(category.localizedNameKey) {
+                categoryName[id] = name
             } else if let key = category.localizedNameKey, !key.isEmpty {
                 let bare = key.hasPrefix("AerialCategory") ? String(key.dropFirst("AerialCategory".count)) : key
-                categoryName[category.id] = bare.isEmpty ? key : bare
+                categoryName[id] = bare.isEmpty ? key : bare
             }
         }
 
-        struct Entry { let aerial: Aerial; let categoryRank: Int; let order: Int; let index: Int }
+        struct Entry { let aerial: Aerial; let categoryRank: Double; let order: Double; let index: Int }
         var seen = Set<String>()
         var entries: [Entry] = []
         for (index, asset) in manifest.assets.enumerated() {
-            let id = asset.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let id = (asset.id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !id.isEmpty, seen.insert(id).inserted else { continue }
             let label = asset.accessibilityLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let name = text(asset.localizedNameKey) ?? (label?.isEmpty == false ? label : nil) ?? asset.shotID ?? id
-            let category = asset.categories?.first { categoryName[$0] != nil }
+            let name = localized(asset.localizedNameKey) ?? (label?.isEmpty == false ? label : nil) ?? asset.shotID ?? id
+            let category = asset.categories.first { categoryName[$0] != nil }
             entries.append(Entry(aerial: Aerial(id: id, name: name, category: category.flatMap { categoryName[$0] }),
-                                 categoryRank: category.flatMap { categoryOrder[$0] } ?? Int.max,
-                                 order: asset.preferredOrder ?? Int.max, index: index))
+                                 categoryRank: category.flatMap { categoryOrder[$0] } ?? .infinity,
+                                 order: asset.preferredOrder ?? .infinity, index: index))
         }
         return entries.sorted {
             ($0.categoryRank, $0.order, $0.index) < ($1.categoryRank, $1.order, $1.index)
