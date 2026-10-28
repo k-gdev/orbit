@@ -47,6 +47,7 @@ extension SliceAction {
             case .float: return "Floating"
             case .airDrop: return "Sharing with AirDrop"
             case .terminal: return "Opening Terminal"
+            case .shelf: return "Adding to Shelf"
             }
         }
     }

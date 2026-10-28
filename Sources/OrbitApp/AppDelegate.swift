@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.welcomeWindow = welcomeWindow
         let registry = makeSuite(settings: settings, coordinator: coordinator)
         self.registry = registry
+        // The Shelf action: SHELF appears in the Actions ring only while the Shelf feature is on.
+        wheel.shelfActionEnabled = { [weak registry] in registry?.isEnabled(.shelf) ?? false }
+        coordinator.openShelf = { [weak registry] urls, point in
+            (registry?.feature(.shelf) as? ShelfFeature)?.open(adding: urls, near: point)
+        }
         let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator, registry: registry,
                                                       showWelcome: { welcomeWindow.show() })
         self.settingsWindow = settingsWindow

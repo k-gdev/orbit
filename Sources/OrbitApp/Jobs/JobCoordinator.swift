@@ -21,6 +21,10 @@ final class JobCoordinator: ObservableObject {
     /// Set for headless runs; receives each job's outcome instead of any UI.
     var outcomeHandler: ((Outcome) -> Void)?
 
+    /// The Shelf action: put these files on the shelf and show it near the point. Set by `AppDelegate`
+    /// to the Shelf feature; nil while the app has no shelf.
+    var openShelf: (([URL], CGPoint) -> Void)?
+
     private let progressPanels = ProgressPanelController()
     /// The one toast stack, shared with the suite (`SuiteContext.toasts`) so toasts never overlap.
     let toasts = ToastCenter()
@@ -59,10 +63,10 @@ final class JobCoordinator: ObservableObject {
 
     static let needsUIMessage = "That action needs the Orbit app's interface."
 
-    /// Float, AirDrop and Terminal talk to the system and never reach `JobRunner`.
-    /// Returns false for every other action.
+    /// Float, AirDrop, Terminal and Shelf talk to the system or the app's own windows and never reach
+    /// `JobRunner`. Returns false for every other action.
     private func performSystemAction(_ id: ActionID, items: [DroppedItem], near point: CGPoint) -> Bool {
-        guard id == .float || id == .airDrop || id == .terminal else { return false }
+        guard id == .float || id == .airDrop || id == .terminal || id == .shelf else { return false }
         if outcomeHandler != nil {
             report(.failed(OrbitError.unsupported(Self.needsUIMessage)))
             return true
@@ -73,6 +77,8 @@ final class JobCoordinator: ObservableObject {
             FloatManager.shared.add(urls, near: point)
         case .airDrop:
             do { try SystemActions.airDrop(urls) } catch { report(.failed(error)) }
+        case .shelf:
+            if let openShelf { openShelf(urls, point) } else { report(.failed(OrbitError.unsupported("Shelf isn't available."))) }
         default:
             let bundleID = settings.terminalBundleID
             var seen = Set<String>()
