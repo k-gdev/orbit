@@ -53,8 +53,9 @@ public struct DockPreviewLayout: Sendable, Equatable {
     /// The title line (app name, or the hovered window's title).
     public static let headerHeight: CGFloat = 18
     public static let headerGap: CGFloat = 8
-    /// Between the Dock icon and the strip.
-    public static let iconGap: CGFloat = 8
+    /// Between the Dock icon and the strip: clears the Dock's own background (which reaches a few points
+    /// above its icons) with room to spare.
+    public static let iconGap: CGFloat = 16
     public static let screenMargin: CGFloat = 8
     /// The narrowest content area, so a single narrow window still leaves room for its title.
     public static let minContentWidth: CGFloat = 160
