@@ -31,9 +31,17 @@ public enum DisplayArrangement {
 
     /// Each item's tile title. macOS's " (1)" / " (2)" suffix is dropped; a name shared by several
     /// displays gets "· Left" / "· Right" (two side by side), "· Top" / "· Bottom" (two stacked), or
-    /// "· 1", "· 2", ... in tile order (three or more). An empty name becomes "Display".
-    public static func titles(_ items: [Item]) -> [String] {
-        let bases = items.map { baseName($0.name) }
+    /// "· 1", "· 2", ... in tile order (three or more). An empty name becomes "Display". The built-in
+    /// panel is called `builtInName` (the Mac's model, "MacBook Pro") when given, else loses its "Built-in "
+    /// prefix (its caption says so): "Liquid Retina XDR Display".
+    public static func titles(_ items: [Item], builtInName: String? = nil) -> [String] {
+        let bases = items.map { item in
+            if item.isBuiltIn, let builtInName { return builtInName }
+            let base = baseName(item.name)
+            let prefix = "Built-in "
+            guard item.isBuiltIn, base.hasPrefix(prefix), base.count > prefix.count else { return base }
+            return String(base.dropFirst(prefix.count))
+        }
         var titles = bases
         let rank = Dictionary(uniqueKeysWithValues: order(items).enumerated().map { ($1, $0) })
         for name in Set(bases) {
@@ -50,6 +58,15 @@ public enum DisplayArrangement {
             }
         }
         return titles
+    }
+
+    /// "MacBook Pro" from the device tree's product name "MacBook Pro (16-inch, M5 Max)" (the built-in
+    /// panel's tile is named after the Mac, as in the mockup). nil when nothing is left.
+    public static func macModelName(fromProductName name: String) -> String? {
+        var text = name.replacingOccurrences(of: "\0", with: "")
+        if let open = text.firstIndex(of: "(") { text = String(text[..<open]) }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// The name without macOS's duplicate counter (" (2)").

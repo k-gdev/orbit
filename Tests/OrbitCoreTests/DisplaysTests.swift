@@ -351,6 +351,24 @@ import Testing
         #expect(DisplayArrangement.titles([.init(name: "Studio Display (1)", frame: .zero), .init(name: " ", frame: .zero),
                                            .init(name: "Cinema (beta)", frame: .zero)])
                 == ["Studio Display", "Display", "Cinema (beta)"])
+        // The built-in panel's "Built-in " prefix is dropped (the tile's caption already says Built-in);
+        // an external monitor's name is left alone.
+        #expect(DisplayArrangement.titles([.init(name: "Built-in Liquid Retina XDR Display", frame: .zero, isBuiltIn: true),
+                                           .init(name: "Built-in Display", frame: .zero, isBuiltIn: false)])
+                == ["Liquid Retina XDR Display", "Built-in Display"])
+        #expect(DisplayArrangement.titles([.init(name: "Built-in", frame: .zero, isBuiltIn: true)]) == ["Built-in"])
+        // With the Mac's model name, the built-in panel is called after the Mac, like the mockup.
+        #expect(DisplayArrangement.titles([.init(name: "Built-in Liquid Retina XDR Display", frame: .zero, isBuiltIn: true),
+                                           .init(name: "K272HUL", frame: .zero)], builtInName: "MacBook Pro")
+                == ["MacBook Pro", "K272HUL"])
+    }
+
+    @Test func macModelNameDropsTheDetails() {
+        #expect(DisplayArrangement.macModelName(fromProductName: "MacBook Pro (16-inch, M5 Max)") == "MacBook Pro")
+        #expect(DisplayArrangement.macModelName(fromProductName: "MacBook Air (13-inch, M3, 2024)\0") == "MacBook Air")
+        #expect(DisplayArrangement.macModelName(fromProductName: "iMac") == "iMac")
+        #expect(DisplayArrangement.macModelName(fromProductName: " (16-inch)") == nil)
+        #expect(DisplayArrangement.macModelName(fromProductName: "") == nil)
     }
 }
 
