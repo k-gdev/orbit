@@ -15,9 +15,13 @@ final class SMCReader {
     /// This reader's keys (discovery is tried once per reader, even when it finds none).
     private var keys: [Key]?
 
-    /// The temperature keys found by the first discovery, shared by every reader in the process.
+    /// The temperature keys found by the first discovery, shared by every reader in the process. An empty
+    /// listing is cached too once a retry (a second reader) also found nothing, so a chip with no keys
+    /// `SensorGroups` knows doesn't re-walk thousands of keys every time the tab opens.
     private static let lock = NSLock()
     nonisolated(unsafe) private static var discovered: [Key]?
+    nonisolated(unsafe) private static var emptyDiscoveries = 0
+    private static let emptyDiscoveriesBeforeGivingUp = 2
 
     struct Key {
         let name: String
@@ -28,11 +32,21 @@ final class SMCReader {
 
     deinit { close() }
 
-    /// Every known temperature key's reading, or nil when the SMC can't be opened.
+    /// Every known temperature key's reading, or nil when the SMC can't be opened or has no temperature keys
+    /// (then the connection is closed and not reopened by this reader).
     func readTemperatures() -> [SensorReading]? {
+        if let keys, keys.isEmpty { return nil }
+        if let cached = Self.cachedKeys(), cached.isEmpty {
+            keys = []
+            return nil
+        }
         guard open() else { return nil }
         let keys = self.keys ?? Self.cachedKeys() ?? discoverKeys()
         self.keys = keys
+        guard !keys.isEmpty else {
+            close()
+            return nil
+        }
         return keys.compactMap { key in
             guard let bytes = read(key), let celsius = SMCCode.celsius(type: key.type, bytes: bytes) else { return nil }
             return SensorReading(name: key.name, celsius: celsius)
@@ -80,12 +94,16 @@ final class SMCReader {
                 keys.append(Key(name: name, code: code, size: info.dataSize, type: type))
             }
         }
-        // An empty result (the SMC refused the listing) is not cached, so a later reader tries again.
-        if !keys.isEmpty {
-            Self.lock.lock()
+        // A first empty result (the SMC may have refused the listing) is not cached, so the next reader retries
+        // once; after that, empty is the answer for the rest of the process.
+        Self.lock.lock()
+        if keys.isEmpty {
+            Self.emptyDiscoveries += 1
+            if Self.emptyDiscoveries >= Self.emptyDiscoveriesBeforeGivingUp { Self.discovered = [] }
+        } else {
             Self.discovered = keys
-            Self.lock.unlock()
         }
+        Self.lock.unlock()
         Log.info("system: \(keys.count) SMC temperature keys")
         return keys
     }
