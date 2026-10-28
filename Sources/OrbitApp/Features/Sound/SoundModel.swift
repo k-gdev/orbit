@@ -24,6 +24,8 @@ struct SoundAppItem: Identifiable {
     /// Where the app plays when set to Same as Output (its own device choice, else the system output);
     /// nil = the system output.
     var followedOutputUID: String?
+    /// Orbit couldn't take over this app's audio, so its volume and output are not applied.
+    var tapFailed = false
     var id: String { identity.bundleID }
     var bundleID: String { identity.bundleID }
     var name: String { identity.name }

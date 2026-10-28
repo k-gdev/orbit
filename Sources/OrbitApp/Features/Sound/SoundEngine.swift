@@ -72,6 +72,11 @@ final class SoundEngine {
     /// The apps that currently have a tap.
     var tappedBundleIDs: Set<String> { Set(taps.keys) }
 
+    /// The apps whose tap couldn't be built (or stopped working): their setting is not applied, and their row
+    /// says so. Cleared when the device list or the permission changes, when the app's destination or
+    /// processes change (a new attempt), or when it no longer needs a tap.
+    var failedBundleIDs: Set<String> { Set(failures.keys) }
+
     func start() {
         guard !isRunning else { return }
         isRunning = true
@@ -140,6 +145,12 @@ final class SoundEngine {
                 guard !processes.isEmpty else { continue }
                 wanted[bundleID] = (plan, TapKey(destination: destination, processes: processes))
             }
+        }
+
+        let staleFailures = failures.keys.filter { wanted[$0] == nil }
+        if !staleFailures.isEmpty {
+            staleFailures.forEach { failures[$0] = nil }
+            onAppsChanged?()
         }
 
         for (bundleID, tap) in taps where wanted[bundleID] == nil {

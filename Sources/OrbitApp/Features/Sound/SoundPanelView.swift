@@ -90,7 +90,7 @@ struct SoundPanelView: View {
 
     private var micCaption: String {
         let shortcut = micSettings.muteShortcut.display
-        if micMute.isMuted && !micMute.isMutedByOrbit { return "Muted outside Orbit · \(shortcut) to unmute" }
+        if micMute.isMuted && !micMute.isMutedByOrbit { return "Muted outside Orbit" }
         if micMute.isMuted { return "Muted · \(shortcut) to unmute" }
         if !micMute.isAvailable { return model.inputs.isEmpty ? "No microphone" : "This microphone can't be muted" }
         return "On · \(shortcut) to mute"
@@ -189,7 +189,9 @@ struct SoundAppRow: View {
                        label: AnyView(label(muted: preference.muted, pinned: pinned)),
                        valueText: { preference.muted ? "Muted" : "\(Int($0.rounded()))%" },
                        onLeadingTap: { model.toggleMute(app.bundleID) })
-                .help(preference.muted ? "Click the icon to unmute \(app.name)" : "Click the icon to mute \(app.name)")
+                .help(app.tapFailed
+                      ? "Orbit couldn't take over \(app.name)'s audio, so this volume and output aren't applied (it plays as usual). See Orbit's log for why."
+                      : (preference.muted ? "Click the icon to unmute \(app.name)" : "Click the icon to mute \(app.name)"))
             PanelRoundMenu(systemImage: routed?.symbol ?? (routeMissing ? "exclamationmark.triangle" : followed?.symbol ?? "hifispeaker"),
                            isHighlighted: preference.outputUID != nil, size: 34) {
                 Text("Play \(app.name) on")
@@ -220,6 +222,10 @@ struct SoundAppRow: View {
     private func label(muted: Bool, pinned: Bool) -> some View {
         HStack(spacing: 6) {
             Text(app.name)
+            if app.tapFailed {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
             if app.isPlaying {
                 LevelBars(active: !muted)
             } else if pinned {
