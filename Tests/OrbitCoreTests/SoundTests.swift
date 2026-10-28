@@ -227,6 +227,19 @@ import Testing
         #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: "", availableUIDs: available, keep: true))
     }
 
+    /// At most one switch per throttle window; a change that arrives inside it is retried when the window ends
+    /// (not dropped, or a second quick switch by macOS would stick).
+    @Test func preferredMicThrottleRetriesInsteadOfDropping() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 500)
+        typealias P = PreferredMicPolicy
+        #expect(P.retryDelay(lastSwitch: .distantPast, now: t0) == nil)            // never switched: go now
+        #expect(P.retryDelay(lastSwitch: t0, now: t0.addingTimeInterval(P.throttle + 0.01)) == nil)
+        let delay = P.retryDelay(lastSwitch: t0, now: t0.addingTimeInterval(0.5))
+        #expect(delay != nil)
+        #expect(abs((delay ?? 0) - (P.throttle - 0.5)) < 0.001)                   // look again when it ends
+        #expect(P.retryDelay(lastSwitch: t0, now: t0) == P.throttle)
+    }
+
     /// Kevo's Mac has two monitors both called "P27u-20": the menus must tell them apart.
     @Test func duplicateDeviceNamesAreNumbered() {
         let devices = [

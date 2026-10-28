@@ -107,4 +107,14 @@ public enum PreferredMicPolicy {
         guard keep, let preferredUID, !preferredUID.isEmpty else { return false }
         return currentUID != preferredUID && availableUIDs.contains(preferredUID)
     }
+
+    /// At most one switch per this many seconds, so a device that refuses can't start a tug of war.
+    public static let throttle: TimeInterval = 2
+
+    /// Nil when a switch may happen now; otherwise how long until the throttle window after `lastSwitch` ends,
+    /// when the check should run again (a change inside the window is retried, not dropped).
+    public static func retryDelay(lastSwitch: Date, now: Date) -> TimeInterval? {
+        let elapsed = now.timeIntervalSince(lastSwitch)
+        return elapsed > throttle ? nil : throttle - max(elapsed, 0)
+    }
 }

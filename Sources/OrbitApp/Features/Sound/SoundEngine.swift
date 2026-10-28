@@ -281,6 +281,7 @@ final class PreferredMicWatcher {
     private var subscriptions: Set<AnyCancellable> = []
     private var lastSwitch = Date.distantPast
     private var checkScheduled = false
+    private var retryScheduled = false
 
     init(settings: SoundSettings, hardware: AudioHardware) {
         self.settings = settings
@@ -311,8 +312,17 @@ final class PreferredMicWatcher {
         let available = Set(hardware.inputDevices.map(\.uid))
         guard PreferredMicPolicy.shouldSwitchBack(currentUID: hardware.defaultInputUID, preferredUID: preferred,
                                                   availableUIDs: available, keep: settings.keepPreferredMic) else { return }
-        // One switch per two seconds at most, so a device that refuses can't start a tug of war.
-        guard Date().timeIntervalSince(lastSwitch) > 2 else { return }
+        // One switch per throttle window at most, so a device that refuses can't start a tug of war. A change
+        // inside the window is looked at again when it ends instead of being dropped.
+        if let delay = PreferredMicPolicy.retryDelay(lastSwitch: lastSwitch, now: Date()) {
+            guard !retryScheduled else { return }
+            retryScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.05) { [weak self] in
+                self?.retryScheduled = false
+                self?.scheduleCheck()
+            }
+            return
+        }
         lastSwitch = Date()
         Log.info("sound: input moved to \(hardware.defaultInputUID ?? "none"); switching back to the preferred microphone")
         hardware.setDefaultInput(uid: preferred)

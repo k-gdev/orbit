@@ -32,6 +32,9 @@ final class AudioHardware: ObservableObject {
     private var systemListeners: [SoundHALListener] = []
     private var outputListeners: [SoundHALListener] = []
     private var inputListeners: [SoundHALListener] = []
+    /// The device objects the volume listeners are on (re-attached when the object changes).
+    private var watchedOutput = AudioObjectID(kAudioObjectUnknown)
+    private var watchedInput = AudioObjectID(kAudioObjectUnknown)
     private(set) var isRunning = false
 
     var outputDevices: [AudioDevice] { devices.filter(\.summary.hasOutput) }
@@ -64,6 +67,8 @@ final class AudioHardware: ObservableObject {
         systemListeners = []
         outputListeners = []
         inputListeners = []
+        watchedOutput = kAudioObjectUnknown
+        watchedInput = kAudioObjectUnknown
     }
 
     // MARK: Reading
@@ -79,11 +84,13 @@ final class AudioHardware: ObservableObject {
         let input = SoundHAL.defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         let alerts = SoundHAL.defaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice)
         let outputUID = SoundHAL.uid(of: output), inputUID = SoundHAL.uid(of: input), alertsUID = SoundHAL.uid(of: alerts)
-        if outputUID != defaultOutputUID { defaultOutputUID = outputUID; watchOutput(output) }
-        else if outputListeners.isEmpty && isRunning { watchOutput(output) }
-        if inputUID != defaultInputUID { defaultInputUID = inputUID; watchInput(input) }
-        else if inputListeners.isEmpty && isRunning { watchInput(input) }
+        if outputUID != defaultOutputUID { defaultOutputUID = outputUID }
+        if inputUID != defaultInputUID { defaultInputUID = inputUID }
         if alertsUID != systemOutputUID { systemOutputUID = alertsUID }
+        // Listeners follow the object, not the UID: a device that re-enumerates (sleep, a USB reset) keeps its
+        // UID under a new object ID, and the old object's listeners would never fire again.
+        if isRunning && output != watchedOutput { watchOutput(output) }
+        if isRunning && input != watchedInput { watchInput(input) }
         refreshVolumes()
     }
 
@@ -101,6 +108,7 @@ final class AudioHardware: ObservableObject {
     private func watchOutput(_ device: AudioObjectID) {
         outputListeners.forEach { $0.remove() }
         outputListeners = []
+        watchedOutput = device
         guard isRunning, device != kAudioObjectUnknown else { return }
         outputListeners = [
             SoundHALListener(object: device, SoundHAL.address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeOutput)) { [weak self] in self?.refreshVolumes() },
@@ -111,6 +119,7 @@ final class AudioHardware: ObservableObject {
     private func watchInput(_ device: AudioObjectID) {
         inputListeners.forEach { $0.remove() }
         inputListeners = []
+        watchedInput = device
         guard isRunning, device != kAudioObjectUnknown else { return }
         inputListeners = [
             SoundHALListener(object: device, SoundHAL.address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeInput)) { [weak self] in self?.refreshVolumes() },
