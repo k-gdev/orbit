@@ -34,6 +34,9 @@ enum ShelfCheck {
     @MainActor
     private static func run(_ check: (String, Bool) -> Void) throws {
         let dir = SnapshotFixtures.directory()
+        // Throwaway defaults (a plist in a temp folder), never the real ones.
+        let (defaults, cleanup) = SnapshotFixtures.scopedDefaults()
+        defer { cleanup() }
         let fm = FileManager.default
         func file(_ name: String) throws -> URL {
             let url = dir.appending(path: name, directoryHint: .notDirectory)
@@ -102,6 +105,36 @@ enum ShelfCheck {
         check("the panel is not on screen", !panel.isVisible)
         panel.close()
 
+        // The wheel: SHELF is in the Actions ring only while the app says the feature is on (the panel is never shown).
+        let wheelSettings = SettingsStore(defaults: defaults)
+        let wheel = WheelController(settings: wheelSettings)
+        wheel.capabilities = { Capabilities() }
+        let actionItems = [DroppedItem(url: one)]
+        func ring(_ kind: WheelKind = .actions) -> [String] { wheel.content(for: kind, items: actionItems).slices.map(\.title) }
+        let original = ["FLOAT", "AIRDROP", "COPY PATH", "TERMINAL", "COPY TO", "MOVE TO", "ARCHIVE"]
+        check("the wheel's Actions ring is unchanged by default", ring() == original)
+        wheel.shelfActionEnabled = { false }
+        check("and with the Shelf off", ring() == original)
+        wheel.shelfActionEnabled = { true }
+        check("with the Shelf on, SHELF sits after FLOAT", ring() == ["FLOAT", "SHELF"] + original.dropFirst())
+        let convertOn = ring(.convert)
+        wheel.shelfActionEnabled = { false }
+        check("the Convert wheel does not change", ring(.convert) == convertOn)
+        check("the wheel is not on screen", !wheel.isVisible)
+
+        // The job coordinator hands the Shelf action to the app, and refuses it headless.
+        let coordinator = JobCoordinator(settings: wheelSettings)
+        let shelfSlice = Slice(id: "actions.shelf", title: "SHELF", symbol: "tray", action: .action(.shelf, nil))
+        var opened: (urls: [URL], point: CGPoint)?
+        coordinator.openShelf = { urls, point in opened = (urls, point) }
+        coordinator.perform(shelfSlice, items: actionItems, near: CGPoint(x: 10, y: 20))
+        check("choosing SHELF opens the shelf with the files at the pointer", opened?.urls == [one] && opened?.point == CGPoint(x: 10, y: 20))
+        opened = nil
+        var headlessFailure = false
+        coordinator.outcomeHandler = { outcome in if case .failed = outcome { headlessFailure = true } }
+        coordinator.perform(shelfSlice, items: actionItems, near: .zero)
+        check("a headless run reports it needs the app instead of opening anything", headlessFailure && opened == nil)
+
         // The shake watcher's monitor and the feature's lifecycle.
         let watcher = ShakeWatcher()
         check("the shake watcher starts off", !watcher.isRunning)
@@ -112,8 +145,6 @@ enum ShelfCheck {
         watcher.stop()
         check("stop removes it (idempotent)", !watcher.isRunning)
 
-        let (defaults, cleanup) = SnapshotFixtures.scopedDefaults()
-        defer { cleanup() }
         let context = SuiteContext(settings: SettingsStore(defaults: defaults), suite: SuiteSettings(defaults: defaults), defaults: defaults,
                                    hotKeys: HotKeyCenter(), permissions: PermissionCenter(live: false, fixed: [:]),
                                    micMute: MicMuteService.fixture(), toasts: ToastCenter(),

@@ -117,7 +117,8 @@ final class WheelController {
         CGVector(dx: screenPoint.x - center.x, dy: screenPoint.y - center.y)
     }
 
-    private func content(for kind: WheelKind, items: [DroppedItem]) -> WheelContent {
+    /// The slices the wheel shows for `items` (internal so `--check-shelf` can look at the Actions ring).
+    func content(for kind: WheelKind, items: [DroppedItem]) -> WheelContent {
         var catalog = settings.catalogSettings
         catalog.showShelfAction = shelfActionEnabled()
         return SliceCatalog.content(for: items, wheel: kind, capabilities: capabilities(), settings: catalog)
