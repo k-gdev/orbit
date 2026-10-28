@@ -34,14 +34,28 @@ public struct ClipboardExportFolder: Sendable {
         return url
     }
 
-    /// Removes the entry folders (only folders named by a UUID) last changed more than `maxAge` ago.
-    func prune(now: Date) {
+    /// Removes the export folders of entries that left the history (removed, cleared or evicted).
+    public func remove(_ ids: [UUID]) {
+        for id in ids { try? FileManager.default.removeItem(at: directory.appending(path: id.uuidString, directoryHint: .isDirectory)) }
+    }
+
+    /// Removes the entry folders whose entry is no longer in the history, and those older than `maxAge` (at load,
+    /// so exports left by an entry that went while Orbit wasn't running don't stay on disk).
+    public func sweep(keeping ids: Set<UUID>, now: Date = Date()) {
+        prune(now: now) { !ids.contains($0) }
+    }
+
+    /// Removes the entry folders (only folders named by a UUID) last changed more than `maxAge` ago, or for
+    /// which `alsoRemove` says yes.
+    func prune(now: Date, alsoRemove: (UUID) -> Bool = { _ in false }) {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
-        for name in names where UUID(uuidString: name) != nil {
+        for name in names {
+            guard let id = UUID(uuidString: name) else { continue }
             let folder = directory.appending(path: name, directoryHint: .isDirectory)
-            guard let changed = (try? fm.attributesOfItem(atPath: folder.path))?[.modificationDate] as? Date,
-                  now.timeIntervalSince(changed) > Self.maxAge else { continue }
+            let changed = (try? fm.attributesOfItem(atPath: folder.path))?[.modificationDate] as? Date
+            let aged = changed.map { now.timeIntervalSince($0) > Self.maxAge } ?? false
+            guard aged || alsoRemove(id) else { continue }
             try? fm.removeItem(at: folder)
         }
     }

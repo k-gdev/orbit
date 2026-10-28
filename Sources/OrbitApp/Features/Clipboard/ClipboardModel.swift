@@ -92,6 +92,8 @@ final class ClipboardModel: ObservableObject {
         }
         // Orphaned blobs are swept only after a clean read (never after an unreadable or partly read index).
         store.sweepOrphans(after: result, keeping: Set(usable.compactMap(\.payloadFile)))
+        // Exported images (drag-outs, Open in Preview) whose entry is gone, or that are over a day old.
+        if !result.indexWasUnreadable { ClipboardExportFolder.standard.sweep(keeping: Set(usable.map(\.id))) }
         if usable.count != result.items.count || result.droppedCount > 0 { save() }
         enforceLimits()
     }
@@ -179,9 +181,10 @@ final class ClipboardModel: ObservableObject {
         if evicted.contains(where: { !$0.concealed }) { save() }
     }
 
-    /// Releases what removed entries held: blob files, and the memory of copied passwords.
+    /// Releases what removed entries held: blob files, exported images, and the memory of copied passwords.
     private func forget(_ items: [ClipboardItem]) {
         store?.deletePayloads(items.compactMap(\.payloadFile))
+        if store != nil { ClipboardExportFolder.standard.remove(items.filter { $0.kind == .image }.map(\.id)) }
         for item in items where item.concealed { concealedPayloads[item.id] = nil }
         for item in items { fileStatuses[item.id] = nil }
     }

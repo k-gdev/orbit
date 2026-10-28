@@ -1213,5 +1213,38 @@ import Testing
             #expect(FileManager.default.fileExists(atPath: freshURL.path))
             #expect(FileManager.default.fileExists(atPath: stranger.path))
         }
+
+        @Test func imageExportOfARemovedEntryGoesWithIt() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let folder = ClipboardExportFolder(directory: root.appending(path: "Clipboard", directoryHint: .isDirectory))
+            let gone = UUID(), kept = UUID()
+            let goneURL = try folder.writeImage(Data([1]), for: gone, now: ClipboardTests.base)
+            let keptURL = try folder.writeImage(Data([2]), for: kept, now: ClipboardTests.base)
+            folder.remove([gone, UUID()]) // an entry that never exported anything is fine too
+            #expect(!FileManager.default.fileExists(atPath: goneURL.deletingLastPathComponent().path))
+            #expect(FileManager.default.fileExists(atPath: keptURL.path))
+        }
+
+        @Test func imageExportSweepKeepsOnlyEntriesStillInTheHistory() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let directory = root.appending(path: "Clipboard", directoryHint: .isDirectory)
+            let folder = ClipboardExportFolder(directory: directory)
+            let orphan = UUID(), kept = UUID()
+            let orphanURL = try folder.writeImage(Data([1]), for: orphan, now: ClipboardTests.base)
+            let keptURL = try folder.writeImage(Data([2]), for: kept, now: ClipboardTests.base)
+            let stranger = directory.appending(path: "keep-me", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: stranger, withIntermediateDirectories: true)
+            folder.sweep(keeping: [kept], now: ClipboardTests.base)
+            #expect(!FileManager.default.fileExists(atPath: orphanURL.deletingLastPathComponent().path), "its entry left the history")
+            #expect(FileManager.default.fileExists(atPath: keptURL.path))
+            #expect(FileManager.default.fileExists(atPath: stranger.path))
+            // A kept entry's export still ages out.
+            try FileManager.default.setAttributes([.modificationDate: ClipboardTests.base.addingTimeInterval(-3 * 86_400)],
+                                                  ofItemAtPath: keptURL.deletingLastPathComponent().path)
+            folder.sweep(keeping: [kept], now: ClipboardTests.base)
+            #expect(!FileManager.default.fileExists(atPath: keptURL.path))
+        }
     }
 }
