@@ -693,7 +693,6 @@ extension SoundTests {
             #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
             #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
         }
-
         /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
         /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
         @Test func tapPausesAfterIdleDelay() {
@@ -716,12 +715,21 @@ extension SoundTests {
             #expect(activity.update(isPlaying: false, now: at(100)) == nil)
             #expect(activity.nextCheck() == at(100 + TapActivity.idleDelay))
             #expect(activity.update(isPlaying: false, now: at(100 + TapActivity.idleDelay)) == .pause)
-            // A tap built while its app is quiet starts counting at once.
+            // N2: a tap built while its app is quiet is already waiting for audio (its own TapAutoStart start), so
+            // it counts as paused: no pause gets queued behind that start to fire on the first sound.
             var quiet = TapActivity(now: t0, isPlaying: false)
-            #expect(quiet.nextCheck() == at(TapActivity.idleDelay))
-            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == .pause)
+            #expect(quiet.isPaused)
+            #expect(quiet.nextCheck() == nil)
+            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == nil)
+            #expect(quiet.update(isPlaying: false, now: at(60)) == nil)
+            // Once it has played, the usual quiet spell applies.
+            #expect(quiet.update(isPlaying: true, now: at(61)) == nil)
+            #expect(!quiet.isPaused)
+            #expect(quiet.update(isPlaying: false, now: at(70)) == nil)
+            #expect(quiet.update(isPlaying: false, now: at(70 + TapActivity.idleDelay)) == .pause)
             #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
         }
+
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {

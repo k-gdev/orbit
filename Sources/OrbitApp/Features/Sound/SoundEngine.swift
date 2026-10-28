@@ -193,7 +193,9 @@ final class SoundEngine {
         for (bundleID, tap) in taps {
             let playing = apps[bundleID]?.isPlaying ?? false
             var state = activity[bundleID] ?? TapActivity(now: now, isPlaying: playing)
-            if state.update(isPlaying: playing, now: now) == .pause { tap.pauseUntilNextAudio() }
+            // Only a tap whose first start has returned is paused; before that its own start is already waiting
+            // for the app's audio (and a tap built while quiet counts as paused from the start).
+            if state.update(isPlaying: playing, now: now) == .pause, tap.hasStarted { tap.pauseUntilNextAudio() }
             activity[bundleID] = state
             if let check = state.nextCheck() { next = min(next ?? check, check) }
         }

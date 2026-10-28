@@ -72,8 +72,11 @@ public struct TapActivity: Equatable, Sendable {
     /// When the app went quiet; nil while it plays.
     private var quietSince: Date?
 
+    /// A tap built while its app is quiet counts as paused from the start: its first start already waits for
+    /// the app's audio (TapAutoStart), so a pause queued behind it would only fire on the first sound.
     public init(now: Date, isPlaying: Bool) {
         quietSince = isPlaying ? nil : now
+        isPaused = !isPlaying
     }
 
     /// Feeds whether the app is playing now (`kAudioProcessPropertyIsRunningOutput`). Returns `.pause` once per

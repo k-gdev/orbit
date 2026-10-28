@@ -40,6 +40,14 @@ final class AppAudioTap: @unchecked Sendable {
     /// TapAutoStart may only return with the app's next audio. Read from the main thread.
     private let waitingLock = NSLock()
     private var waitingForAudioFlag = false
+    private var startedFlag = false
+
+    /// The tap's first start has returned (its IO has run at least once). Only then may it be paused for
+    /// idleness: before that, its own TapAutoStart start is already waiting for the app's audio.
+    var hasStarted: Bool {
+        waitingLock.lock(); defer { waitingLock.unlock() }
+        return startedFlag
+    }
 
     /// The aggregate's IO is stopped and re-armed for the app's next audio; the app is not muted meanwhile
     /// (`.mutedWhenTapped`), so `SoundEngine.stop()` need not wait for this tap's queue.
@@ -66,6 +74,7 @@ final class AppAudioTap: @unchecked Sendable {
             guard !invalidated else { return }
             do {
                 try create()
+                waitingLock.lock(); startedFlag = true; waitingLock.unlock()
                 Log.info("sound: tapped \(bundleID) (\(processes.count) processes) → \(destinationUID)")
                 DispatchQueue.main.async { onStarted() }
             } catch {
@@ -88,6 +97,9 @@ final class AppAudioTap: @unchecked Sendable {
     func pauseUntilNextAudio() {
         queue.async { [self] in
             guard !invalidated, aggregateID != kAudioObjectUnknown, let procID = ioProcID else { return }
+            // The decision was made on the main thread a moment ago: if the app has started playing since, stopping
+            // now would cut it off (and let it through unattenuated until the IO is back). Leave it running.
+            guard !processesArePlaying() else { return }
             AudioDeviceStop(aggregateID, procID)
             Log.info("sound: \(bundleID) is quiet; its output waits for the next sound")
             setWaitingForAudio(true)
@@ -98,6 +110,13 @@ final class AppAudioTap: @unchecked Sendable {
             Log.error("sound: re-arming \(bundleID) failed (\(status))")
             let report = onFailure
             DispatchQueue.main.async { report("restarting its output failed (\(status))") }
+        }
+    }
+
+    /// Whether any of the tapped processes is playing right now (a plain HAL read, safe off the main thread).
+    private func processesArePlaying() -> Bool {
+        processes.contains { process in
+            (SoundHAL.read(process, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), zero: UInt32(0)) ?? 0) != 0
         }
     }
 
