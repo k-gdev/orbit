@@ -89,7 +89,7 @@ private struct ShelfListRow: View {
                             onHover: { hovering = $0 },
                             onOpen: { NSWorkspace.shared.open(url) },
                             onRemove: { model.remove(url) },
-                            onMovedOut: { model.removeMoved($0) },
+                            onMovedOut: { model.verifyMoved($0) },
                             menu: { ShelfMenus.entries(for: url, remove: { model.remove(url) }) })
         }
         .frame(height: 40)

@@ -74,12 +74,21 @@ final class ShelfModel: ObservableObject {
         }
     }
 
-    /// A drag that started on the shelf ended with the destination moving or deleting these files
-    /// (`ShelfDragOutcome`): they are no longer where the shelf has them, so they leave the shelf.
-    func removeMoved(_ moved: [URL]) {
-        guard !moved.isEmpty else { return }
-        for url in moved { items.remove(url) }
-        commit()
+    /// A drag that started on the shelf ended with a move or delete result (`ShelfDragOutcome`). The result
+    /// comes at the drop, before Finder has done anything (a cancelled Replace dialog or a failed move leaves
+    /// the file where it was), so wait a moment, look again off the main thread, and drop only the files that
+    /// are really gone. A file that can't be checked stays.
+    func verifyMoved(_ dragged: [URL]) {
+        guard store != nil, !dragged.isEmpty else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(ShelfDragOutcome.recheckDelay))
+            let gone = await Task.detached(priority: .utility) {
+                dragged.filter { ShelfAvailability.status(of: $0, probe: ShelfAvailability.probe) == .missing }
+            }.value
+            guard let self, !gone.isEmpty else { return }
+            for url in gone { self.items.remove(url) }
+            self.commit()
+        }
     }
 
     private func commit() {

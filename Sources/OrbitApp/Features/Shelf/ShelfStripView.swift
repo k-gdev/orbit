@@ -64,7 +64,7 @@ struct ShelfStripView: View {
             .padding(.horizontal, 9).padding(.vertical, 4)
             .background(Capsule().fill(style.controlFill))
             ShelfDragSource(urls: model.urls, toolTip: "Drag every file on the shelf at once",
-                            onMovedOut: { model.removeMoved($0) })
+                            onMovedOut: { model.verifyMoved($0) })
         }
         .fixedSize()
     }
@@ -186,7 +186,7 @@ struct ShelfTile: View {
                             onHover: { hovering = $0 },
                             onOpen: { NSWorkspace.shared.open(url) },
                             onRemove: { model.remove(url) },
-                            onMovedOut: { model.removeMoved($0) },
+                            onMovedOut: { model.verifyMoved($0) },
                             menu: { ShelfMenus.entries(for: url, remove: { model.remove(url) }) },
                             simulatesHover: previewHover == url)
         }

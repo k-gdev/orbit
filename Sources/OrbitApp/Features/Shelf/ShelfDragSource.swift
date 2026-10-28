@@ -37,7 +37,7 @@ struct ShelfDragSource: NSViewRepresentable {
     var onHover: (Bool) -> Void = { _ in }
     var onOpen: () -> Void = {}
     var onRemove: () -> Void = {}
-    /// Called when a drag from here ended with a destination that moved or deleted the files.
+    /// Called when a drag from here ended with a move or delete result: the files may have left, to be re-checked shortly.
     var onMovedOut: ([URL]) -> Void = { _ in }
     var menu: () -> [ShelfMenuEntry] = { [] }
     /// Show the hover state without a pointer (snapshots).
@@ -230,7 +230,7 @@ final class ShelfDragSourceView: NSView, NSDraggingSource {
         mouseDownEvent = nil
         let dragged = draggingURLs
         draggingURLs = []
-        if ShelfDragOutcome.removesFromShelf(operationRawValue: operation.rawValue) { onMovedOut(dragged) }
+        if ShelfDragOutcome.mayHaveMovedFiles(operationRawValue: operation.rawValue) { onMovedOut(dragged) }
     }
 }
 
