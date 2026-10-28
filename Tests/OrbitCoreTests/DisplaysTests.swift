@@ -270,3 +270,63 @@ import Testing
         #expect(BrightnessControl.software.hasPill)
     }
 }
+
+/// `DisplaySettings` persistence (throwaway defaults suites only).
+@Suite struct DisplaySettingsTests {
+    @Test func settingsRoundTrip() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+
+        let fresh = DisplaySettings(defaults: defaults)
+        #expect(fresh.linkBrightness == false)
+        #expect(fresh.maxOverrides.isEmpty)
+        #expect(fresh.useGammaFallback == true)
+        #expect(fresh.lastSoftwareDim.isEmpty)
+        #expect(fresh.learnedMaximums.isEmpty)
+
+        fresh.linkBrightness = true
+        fresh.useGammaFallback = false
+        fresh.setMaxOverride(150, for: "TV-LEFT")
+        fresh.setMaxOverride(200, for: "AOC")
+        fresh.setMaxOverride(nil, for: "AOC")
+        fresh.lastSoftwareDim = ["ACER": 42.5]
+        fresh.learn(maximum: 150, reported: 100, for: "TV-RIGHT")
+
+        let reloaded = DisplaySettings(defaults: defaults)
+        #expect(reloaded.linkBrightness == true)
+        #expect(reloaded.useGammaFallback == false)
+        #expect(reloaded.maxOverrides == ["TV-LEFT": 150])
+        #expect(reloaded.maxOverride(for: "TV-LEFT") == 150)
+        #expect(reloaded.maxOverride(for: "AOC") == nil)
+        #expect(reloaded.lastSoftwareDim == ["ACER": 42.5])
+        #expect(reloaded.learnedMaximums == ["TV-RIGHT": 150])
+        // Every key is prefixed with the feature id.
+        let keys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("displays.") }
+        #expect(Set(keys) == ["displays.linkBrightness", "displays.useGammaFallback", "displays.maxOverrides",
+                              "displays.lastSoftwareDim", "displays.learnedMaximums"])
+    }
+
+    @Test func settingsLearnKeepsTheHighestAndIgnoresJunk() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let settings = DisplaySettings(defaults: defaults)
+        settings.learn(maximum: 80, reported: 100, for: "A")       // not above the reported max
+        #expect(settings.learnedMaximums.isEmpty)
+        settings.learn(maximum: 150, reported: 100, for: "A")
+        settings.learn(maximum: 120, reported: 100, for: "A")      // lower than what we saw
+        #expect(settings.learnedMaximums == ["A": 150])
+        // Overrides outside 1...65535 are refused (cleared).
+        settings.setMaxOverride(150, for: "B")
+        settings.setMaxOverride(0, for: "B")
+        #expect(settings.maxOverride(for: "B") == nil)
+
+        // Values of the wrong type in the defaults fall back instead of crashing.
+        defaults.set("yes", forKey: "displays.maxOverrides")
+        defaults.set(["X": "loud"], forKey: "displays.lastSoftwareDim")
+        defaults.set(["A": 150, "B": "x"], forKey: "displays.learnedMaximums")
+        let reloaded = DisplaySettings(defaults: defaults)
+        #expect(reloaded.maxOverrides.isEmpty)
+        #expect(reloaded.lastSoftwareDim.isEmpty)
+        #expect(reloaded.learnedMaximums == ["A": 150])
+    }
+}
