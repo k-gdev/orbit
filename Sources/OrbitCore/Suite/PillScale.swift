@@ -59,6 +59,16 @@ public struct PillScale: Sendable, Equatable {
         return min(max(rounded, 0), max(settableMaximum, 0))
     }
 
+    /// `value(forFraction:step:)` for a click or drag on a pill showing `value`. A value already past the limit (a
+    /// boost the monitor set itself) is kept while the pointer stays past the limit too: only going below the limit
+    /// changes it, so a click in the striped zone can't drop a boost to the limit. Scroll and keys use `moved` /
+    /// `nudged`, where a step down from the boost does come to the limit.
+    public func value(forFraction fraction: Double, step: Double = 1, from value: Double) -> Double {
+        let target = self.value(forFraction: fraction, step: step)
+        if value > settableMaximum, min(max(fraction, 0), 1) * maximum > settableMaximum { return clamped(value) }
+        return target
+    }
+
     /// How far one scroll-wheel notch moves the value: a fiftieth of the range, at least one `step`, and a
     /// whole number of steps.
     public func wheelStep(step: Double = 1) -> Double {

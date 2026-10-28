@@ -171,7 +171,7 @@ struct PillSlider: View {
     private func dragGesture(_ track: PillTrack) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { drag in
-                set(scale.value(forFraction: track.fraction(atX: Double(drag.location.x)), step: step))
+                set(scale.value(forFraction: track.fraction(atX: Double(drag.location.x)), step: step, from: value))
             }
             .onEnded { _ in onEditingEnded?() }
     }

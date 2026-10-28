@@ -164,6 +164,13 @@ import Testing
         #expect(scale.value(forFraction: 100.0 / 150.0) == 100)
         #expect(scale.value(forFraction: 0.9) == 100)
         #expect(scale.value(forFraction: 1) == 100)
+        // A click or drag into the striped zone while the monitor sits past the limit (its own menu boosted it)
+        // leaves the boost alone instead of dropping it to the limit; one below the limit sets that value.
+        #expect(scale.value(forFraction: 130.0 / 150.0, from: 150) == 150)
+        #expect(scale.value(forFraction: 1, from: 150) == 150)
+        #expect(scale.value(forFraction: 0.5, from: 150) == 75)
+        #expect(scale.value(forFraction: 0.9, from: 80) == 100)
+        #expect(scale.value(forFraction: 0.5, from: 80) == 75)
         // So do wheel notches, keys and accessibility increments.
         #expect(scale.nudged(98, by: 5) == 100)
         #expect(scale.wheelNudged(99, notches: 3, step: 1) == 100)
