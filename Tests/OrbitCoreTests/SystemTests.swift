@@ -93,11 +93,22 @@ import Testing
         #expect(big.values.count == 60)
         #expect(big.values.first == 90)
         #expect(big.values.last == 149)
+        #expect(SampleHistory<Int>(capacity: 2) == SampleHistory<Int>(capacity: 2))
         // A capacity below one still keeps the latest sample.
         var tiny = SampleHistory<Int>(capacity: 0)
         tiny.append(1)
         tiny.append(2)
         #expect(tiny.values == [2])
+    }
+
+    @Test func sparklineCeiling() {
+        // A quiet machine still shows a shape: the top is at least 50 %, with headroom over the peak.
+        #expect(SparklineScale.ceiling(for: []) == 0.5)
+        #expect(SparklineScale.ceiling(for: [0.1, 0.2]) == 0.5)
+        #expect(abs(SparklineScale.ceiling(for: [0.2, 0.6]) - 0.75) < 1e-9)
+        #expect(SparklineScale.ceiling(for: [0.9]) == 1)
+        #expect(SparklineScale.ceiling(for: [1.4]) == 1)
+        #expect(SparklineScale.ceiling(for: [.nan, 0.1]) == 0.5)
     }
 
     // MARK: Memory

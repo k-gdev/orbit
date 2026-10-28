@@ -48,3 +48,12 @@ extension SampleHistory: Equatable where T: Equatable {
 }
 
 extension SampleHistory: Sendable where T: Sendable {}
+
+/// The vertical scale of a 0...1 sparkline: a quarter of headroom over the peak, never below 50 % (so a
+/// quiet machine still shows a shape rather than a flat line on the floor) and never above 100 %.
+public enum SparklineScale {
+    public static func ceiling(for values: [Double]) -> Double {
+        let peak = values.filter(\.isFinite).max() ?? 0
+        return min(max(peak * 1.25, 0.5), 1)
+    }
+}
