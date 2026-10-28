@@ -162,7 +162,8 @@ final class DockPreviewPanel: NSPanel {
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         contentView = container
         level = .popUpMenu
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle, .transient]
+        // `.transient` like `MenuBarPanel` (not also `.stationary`: the two are exclusive).
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
