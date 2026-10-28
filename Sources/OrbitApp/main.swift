@@ -14,6 +14,7 @@ MainActor.assumeIsolated {
     GlyphSnapshot.runIfRequested(CommandLine.arguments)
     EditorSnapshot.runIfRequested(CommandLine.arguments)
     EditorCheck.runIfRequested(CommandLine.arguments)
+    WindowsSnapshot.runIfRequested(CommandLine.arguments)
 }
 
 let app = NSApplication.shared
