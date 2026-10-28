@@ -278,3 +278,137 @@ None. I only touched `Sources/OrbitCore/Displays/`, `Sources/OrbitApp/Features/D
 - **New, app:** `Sources/OrbitApp/Features/Displays/{BuiltInBrightness,DDCService,GammaDimmer,DisplayModeService,DisplayCatalog,DisplaysModel,DisplaysPanelView,DisplaysSettingsView,DisplaysFixtures}.swift`
 - **Replaced:** `Sources/OrbitApp/Features/Displays/DisplaysFeature.swift` (same class name and `init(context:)`).
 - **Tests:** `Tests/OrbitCoreTests/DisplaysTests.swift`, `Tests/OrbitCoreTests/DisplaysMatchingTests.swift`.
+
+## Fix round 1
+These commits sit on top of `ce52493` on `suite/displays`. No rebase and no push.
+
+On this Mac I still made no DDC writes, mode changes, gamma changes or brightness writes. The read-only harness was re-run (Get VCP only). The new confirm window and the gamma paths were only built and snapshotted.
+
+| SHA | Subject | Items |
+|---|---|---|
+| b3ec1ef | feat(displays): pure DDC tile-control policy with retry/backoff before demoting | M7, M1 (pure) |
+| 889e7d6 | feat(displays): learn a boost range only after two readings in a row; forget on request | M3 (pure) |
+| d9bf3cf | fix(displays): gamma dimming restores only Orbit's displays, from trusted originals | M4 |
+| c353f2c | feat(displays): models for the resolution-confirm countdown and the other-display-app hint | M2, M6 (pure) |
+| 9ef01ef | fix(displays): re-match DDC after wake, report failed writes, retry before demoting | I1, M1, M7, M9 (root release, merged invalidate) |
+| 7b27eab | fix(displays): learn the boost range after two readings in a row; Reset learned range | M3 |
+| 450ed3e | fix(displays): resolution changes ask Keep this resolution? and revert after 15 s | M2 |
+| dd8d238 | fix(displays): one-line hint in the Displays tab while BetterDisplay also runs | M6 |
+| 66f894b | fix(displays): the mode menu's last item says it opens macOS Display Settings | M9 |
+
+### What changed
+- **I1: wake and failed I/O.**
+  - `DisplaysFeature` observes `NSWorkspace.screensDidWakeNotification` and `NSWorkspace.didWakeNotification`. The two usually arrive together, so they are coalesced and handled 1.5 s later. That calls `DisplaysModel.systemWoke`, which:
+    - drops all DDC endpoints and queued writes (`ddc.invalidate()`) and forces a registry re-scan;
+    - re-applies gamma;
+    - resets the miss counts of silent displays;
+    - refreshes the tiles if the tab is visible.
+  - `DDCService`:
+    - A failed read on a matched service is logged ("no valid DDC reply from display N after 3 attempts; will re-scan its service") and sets `needsScan`.
+    - A write whose two attempts both return an error is logged with both IOReturn codes. It drops that endpoint, sets `needsScan` and calls `onWriteFailure`. The model then schedules a re-probe of the display (1 s, re-scanning first).
+  - A display that answered DDC before and misses a reply now stays "DDC" with its last value. It is re-scanned and asked again (policy below), with a log line per miss.
+- **M1 + M7: the policy.** The rules now live in `DisplayControlPolicy` in OrbitCore, a pure function with tests. `DisplaysModel.refresh`/`received` just apply its outcomes.
+  - `start(state:ddcSupported:asleep:gammaFallback:)` gives the starting control and whether to probe:
+    - never answered → probing
+    - answered → DDC, ask again
+    - Intel, or gave up → fallback
+    - asleep → DDC if it answered, else fallback; not asked
+  - `outcome(of:state:gammaFallback:)`:
+    - A valid reply → DDC: adopt the value, clear software dimming, reset misses.
+    - No reply → miss + 1; retry after 1 s, then 3 s (re-walking the registry); after 3 misses in a row → software dimming, or no control with the fallback off. A display that answered shows DDC while it retries; one that never answered shows "Checking DDC…".
+  - `afterWake` re-asks displays that gave up.
+  - `persistsSoftwareDim` is false for any display that has answered DDC. `DisplaySettings.answeredDDC` (`displays.answeredDDC`) remembers those across runs:
+    - `rememberAnsweredDDC` drops any saved software level for that display;
+    - `endEditing` never saves one;
+    - `applySavedSoftwareDims` never re-applies one.
+- **M2: Keep this resolution?**
+  - `DisplayModeService.apply(_:to:permanently:)`.
+  - `select` applies the new mode `.forSession`. It then shows a floating card (`ResolutionConfirmWindow`: a borderless, non-activating, key-capable panel one level above the status bar, on all Spaces). The card is centred on the changed display and re-centred on every screen-parameter change.
+  - That display's tile also shows a row. Both read "Keep … ? Reverting in N s" with Revert (Esc) and Keep (Return).
+  - **Keep** re-applies the mode `.permanently`.
+  - **Revert**, or 15 s without an answer, applies the previous mode `.forSession`. If that fails it calls `CGRestorePermanentDisplayConfiguration()`.
+  - Starting a second change reverts a pending one first. `stop()` and quit revert a pending change.
+  - The countdown model is `ResolutionConfirmation` (OrbitCore, tested).
+- **M3: learned boost.**
+  - `BoostLearner` (OrbitCore) returns a maximum to remember only on the second validated reading in a row above the reported maximum (the lower of the two). A normal reading in between breaks the run.
+  - The current session still uses the latest reading's value for the pill's range.
+  - Settings shows "· learned 150" in the monitor's detail line and a **Reset learned range** link next to the override (`DisplaySettings.forgetLearnedMaximum` plus the learner's `forget`).
+- **M4: gamma.**
+  - `GammaDimmer` no longer calls `CGDisplayRestoreColorSyncSettings` anywhere.
+  - Originals are captured once per display identity per run, before Orbit's first dim. `GammaRamp.trustedOriginal()` (OrbitCore, tested): a table whose peak is below 0.98 is suspect and is lifted to full keeping the channels' balance (logged); a nearly black one (< 0.05) becomes a straight ramp.
+  - `restore`, `restoreAll` (stop/quit) and `reapply` (display change, wake) only re-apply those originals, scaled or not, to the displays Orbit dimmed.
+- **M6: other display apps.** `DisplayConflicts.hint(runningBundleIDs:)` (OrbitCore, tested) knows BetterDisplay, MonitorControl and Lunar. `refresh()` checks `NSWorkspace.runningApplications`, and the tab shows one line under the header: "BetterDisplay is running too and may undo changes made here."
+- **M9:**
+  - The `IORegistryGetRootEntry` handle is released.
+  - `disconnect()` is merged into `invalidate()`.
+  - The mode menu item is now "Open macOS Display Settings…".
+
+### Tests and commands
+New pure units were written test-first against stubs.
+
+**`swift test --filter DisplayControlPolicyTests`**
+- RED, 6 tests failing, e.g.:
+  - `start(state: new, …) → (control: .probing, probe: false)) == (.probing, true)`
+  - `outcomes.map(\.control) → [.probing, .probing, .probing]) == [.probing, .probing, .software]`
+- GREEN: `✔ Test run with 6 tests in 1 suite passed`.
+- Tests: `startDecisions`, `successBecomesDDCAndClearsSoftwareDim`, `missedReplyKeepsDDCForADisplayThatAnswered`, `silentDisplayRetriesWithBackoffThenFallsBack`, `softwareDimIsOnlyRememberedForDisplaysThatNeverAnswered`, `wakeAsksDisplaysThatGaveUpAgain`.
+
+**`swift test --filter BoostLearnerTests`**
+- RED: `learner.observe(… 150 of 100 …) → nil) == 150`, and `settings.learnedMaximums → ["tv": 150, "aoc": 150]) == ["aoc": 150]`.
+- GREEN: 3 passed (`learnsOnlyAfterTwoReadingsInARow`, `aNormalReadingOrForgetBreaksTheRun`, `settingsForgetTheLearnedRange`).
+- `settingsRememberDisplaysThatAnsweredDDC` was added in the I1 commit. RED: `reloaded.answeredDDC → []`. GREEN: passed.
+
+**`swift test --filter GammaRampTests`**
+- RED: `normal.peak → 0.0) == 1`, `suspect` false, `ramp → GammaRamp(red: [], …)`.
+- GREEN: 3 passed (`trustsANormalTable`, `liftsAnAlreadyDimmedTable`, `scalesEveryChannel`).
+
+**`swift test --filter ResolutionConfirmationTests`**
+- RED: `secondsLeft(at: start) → 0) == 15`, `hint(...) → nil`.
+- GREEN: 2 passed (`countsDownFifteenSecondsThenExpires`, `hintNamesTheOtherDisplayApps`).
+- When I shortened the hint to one line, I changed the test first. RED: the old sentence ≠ "BetterDisplay is running too and may undo changes made here." Then GREEN.
+
+**Totals:**
+- `swift test --filter Displays` → `✔ Test run with 46 tests in 12 suites passed` (31 before plus 15 new). The filter matches the `Displays*Tests.swift` file names.
+- Full suite, once, at `66f894b` → `✔ Test run with 608 tests in 37 suites passed after 80.034 seconds`.
+- `swift build -c release --arch arm64 --arch x86_64` → "Build succeeded". `lipo -archs` gives `x86_64 arm64`.
+
+**Read-only harness re-run against the new `DDCService`** (Get VCP only, log redirected; output in `harness/run2.txt`):
+- K272HUL: no valid reply.
+- Q27G4ZD: 100/100.
+- Both P27u-20: 150/100.
+- On the second pass the registry was re-scanned after the Acer's failed read. That is the new `needsScan` path; `harness/harness.log` shows the line "no valid DDC reply from display 5 after 3 attempts; will re-scan its service".
+- `~/Library/Logs/Orbit/orbit.log` still has 0 "displays:" lines.
+
+### Snapshots (scratchpad `displays/shots/`)
+- `fix1-panel-light.png`, `fix1-panel-dark.png`: the default tab, unchanged look.
+- `fix1-busy-light.png`, `fix1-busy-dark.png`: the confirm and hint check. Run with `ORBIT_DISPLAYS_SNAPSHOT=busy Orbit --snapshot-panel displays …`; it shows:
+  - the BetterDisplay hint line under the header;
+  - the inline "Keep 1920 × 1080? Reverting in 12 s [Revert] [Keep]" row in the AOC tile;
+  - the floating "Keep this resolution?" card drawn under the tiles. Live, it is centred on the changed display.
+- `fix1-settings-light.png`, `fix1-settings-dark.png`: "DDC reports 150 of 100 · learned 150" with **Reset learned range** beside "Auto (150)" on P27u-20 · Left.
+
+### Builder's calls (fix round)
+1. **Retries.** Three probes per display (1 s, then 3 s apart), each re-walking the IORegistry. After three misses in a row the display falls back until wake or a display change. A display that answered before keeps showing DDC with its last value while it retries.
+2. **`displays.answeredDDC`** is persisted so the "never save a software-dim level" rule holds across launches. Remembering a display also clears any level saved for it earlier.
+3. **Wake handling** runs 1.5 s after the last wake notification, so the DCP has rebuilt its services. It probes only if the tab is visible; otherwise the next open re-scans.
+4. **A failed write** schedules one re-probe of that display. The probe's outcome decides what happens next.
+5. **Confirm UI.** I chose both a floating card on the changed display and an inline row in its tile. The card is the one that survives the panel closing or moving.
+   - Revert = previous mode `.forSession`, falling back to `CGRestorePermanentDisplayConfiguration()`.
+   - Keep = the same mode re-applied `.permanently`.
+   - Keep and Revert are custom capsule buttons (accent / control fill), so they look the same live and offscreen.
+6. **Learned boost.** The value learned is the lower of the two readings in a row. A single reading still sets this session's range, but is not remembered.
+7. **Suspect gamma tables.** The threshold is a peak below 0.98. Such a table is lifted to a peak of 1 with its channels' balance kept; below 0.05 it is replaced by a straight ramp. Originals are kept per display identity for the run, so a ColorSync profile change mid-run isn't picked up until Orbit restarts.
+8. **The hint also covers MonitorControl and Lunar.** It is checked whenever the tab refreshes, not watched live.
+9. **Busy snapshot variant.** `ORBIT_DISPLAYS_SNAPSHOT=busy` is read only by `DisplaysFixtures` and `snapshotViews()`. It renders the confirm and hint state without a shell change to the snapshot CLI.
+
+### Still needs hardware verification (additions)
+- The confirm flow live:
+  - that `.forSession`, then `.permanently` on the same mode, persists across logout;
+  - that the floating card is clickable, keyboard included, and stays centred while the display changes size;
+  - that the timeout really reverts.
+- The wake path on real sleep and wake: whether 1.5 s is enough for the DCP to rebuild its `DCPAVServiceProxy` entries.
+- Whether `IOAVServiceWriteI2C` actually returns errors for a stale service, which is what lets write failures be detected.
+- Gamma restore without ColorSync reset on the Acer, together with Night Shift and True Tone.
+
+### Shell changes
+None.
