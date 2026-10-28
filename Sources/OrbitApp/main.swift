@@ -10,6 +10,7 @@ MainActor.assumeIsolated {
     SuiteSnapshot.runIfRequested(CommandLine.arguments)
     ShelfSnapshot.runIfRequested(CommandLine.arguments)
     ShelfCheck.runIfRequested(CommandLine.arguments)
+    ClipboardDebug.runIfRequested(CommandLine.arguments)
     GlyphSnapshot.runIfRequested(CommandLine.arguments)
     EditorSnapshot.runIfRequested(CommandLine.arguments)
     EditorCheck.runIfRequested(CommandLine.arguments)
