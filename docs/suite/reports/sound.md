@@ -477,3 +477,221 @@ primitives above. Their tests were rewritten, and they are no longer used anywhe
   comes back unmuted.
 - **Hog mode, if available** (an app taking exclusive access): unmute fails, the badge stays, and the record is
   kept.
+
+## Fix round 2
+
+Seven commits on `suite/sound` on top of f194ceb. Not pushed. No taps were created and no device, volume or mute
+was changed (only tests and headless snapshots ran).
+
+| Commit | Subject | Item |
+|---|---|---|
+| 77411fb | fix(sound): never queue an idle pause behind a tap's first start | N2 |
+| bcc5363 | fix(sound): release a tap at once even while its start waits for audio | N3 |
+| dbc2844 | fix(sound): idle followers of the system output follow its switch | N4 |
+| d446a43 | fix(suite): don't mistake Orbit's own mute write for an outside unmute | N1 |
+| 79208bf | fix(suite): drop the mic mute's system listeners once nothing is left to undo | N5 |
+| c48d389 | fix(suite): keep Orbit's mic mute record clearable off the current input | N6 |
+| 6b036d7 | fix(suite): watch the input device by object, without retrying each refresh | Nit |
+
+To keep every commit compiling on its own, I wrote all the new Core tests first and saw them RED together. I then
+parked the N1, N3 and N4 blocks and re-added each with its own fix, re-running RED each time.
+
+### What changed
+
+**N1: Orbit's own write is no longer mistaken for an outside unmute.**
+- New `MicWriteConfirmation` (Core). After `wrote(at:)`, `mayConclude(from:state:now:)` ignores readings until one
+  shows Orbit's mute (`MicMuteState.reflects(_:)`: mute control on, or volume at 0, on Orbit's device), or until
+  `timeout` (2 s) has passed (the write evidently didn't take). Readings of another device are ignored while
+  waiting.
+- `MicMuteService.muteInput()` calls `wrote(at:)` after a successful non-empty write; this covers `followInput()`
+  too.
+- `refreshLiveState()` only feeds a reading to `state.deviceChanged` when `mayConclude` allows it. Meanwhile the UI
+  already shows `.mutedByOrbit`, because `presentation` prefers Orbit's record for its device.
+
+**N2: no idle pause is queued behind a tap's first start.**
+- `TapActivity(now:isPlaying: false)` starts paused: its own TapAutoStart start already waits. It pauses only after
+  it has played and gone quiet again. This updates the test at the old lines 719–722.
+- `SoundEngine` pauses only taps with `hasStarted` (set when create()'s start has returned).
+- `pauseUntilNextAudio()` re-checks on the tap's queue that none of its processes reports `IsRunningOutput` before
+  stopping; if one does, it leaves the IO running.
+
+**N3: release is immediate in every state.**
+- New `TapLifecycle` (Core):
+  - `beginWaitingStart()` returns false once the tap is released.
+  - `endWaitingStart()` returns false when the tap was released meanwhile.
+  - `invalidate()` returns `.onQueue`, `.fromOutside` or `.alreadyDone`.
+  - `claimTeardown()` is true exactly once.
+- `AppAudioTap` keeps that state and the HAL object IDs behind one lock.
+- `invalidate()` while the queue sits in a waiting start (create()'s initial start or a re-arm) tears down at once
+  on a global queue, outside the tap's own queue: AudioDeviceStop, destroy IOProc, destroy aggregate, destroy tap.
+  When the start later returns, `endWaitingStart()` is false and the queue stops. It reports neither `onStarted`
+  nor a failure.
+- A release during creation stops it at the next step (`ensureAlive()`) without a failure report.
+- `waitUntilReleased(deadline:)` waits for the teardown itself (a semaphore signalled once).
+  `SoundEngine.stop()` waits for every tap's release, and the old "skip waiting taps" rule is gone.
+- Safety against the queue returning later: the queue checks the lifecycle flag under the lock right after every
+  waiting start. The teardown's HAL objects are taken and cleared under the same lock, so each object is destroyed
+  once, by one party.
+
+**N4:**
+- `AppOutputMemory.systemOutputChanged(from:)` drops remembered entries made only of the old system output, so idle
+  followers follow the switch. Apps on their own device keep their memory.
+- `SoundEngine.noteSystemOutput()` runs at each pass and in `followedOutput(for:)`.
+
+**N5:**
+- `restoreOrbitMute()` calls `updateSystemListening()` after a successful undo.
+- `processPending()` does the same on its early return, so the listeners go away once nothing is left to undo with
+  both features off.
+
+**N6:**
+- `badgeClicked()` undoes Orbit's own mute whenever one is on record.
+- `setMuted(false)` gets through while one is on record, even when that mute sits on a mic that is no longer the
+  input (it then doesn't show in `isMuted`).
+- `setActive(true)` retries the undo of a leftover Orbit mute on a mic that isn't the current input. I chose retry
+  over follow because nobody asked to mute at that moment; the record only exists because an earlier undo failed.
+
+**Nit:** `watchInput` re-attaches only when the device object changes. `watchedInput` is set even when no listener
+could be installed, so it isn't retried on every refresh (mirrors M9).
+
+### Covering tests (TDD)
+
+| Test | RED | GREEN |
+|---|---|---|
+| `MicMuteStateTests/ownWriteIsNotMistakenForOutsideUnmute` (N1) | `cannot find 'MicWriteConfirmation' in scope` ×6, `no member 'reflects'` ×4 | 11 tests in 2 suites |
+| `TapPlanTests/tapPausesAfterIdleDelay`, updated (N2) | 3 failures, e.g. `quiet.update(isPlaying: false, now: at(idleDelay)) → .pause) == nil` | 9 tests in 2 suites |
+| `TapPlanTests/tapReleaseNeverWaitsForABlockedStart` (N3) | `cannot find 'TapLifecycle' in scope` ×8 | 10 tests in 2 suites |
+| `TapPlanTests/systemOutputChangeDropsFollowers` (N4) | `no member 'systemOutputChanged'` ×4 | 11 tests in 2 suites |
+
+N5, N6 and the nit are app-only (listener and badge flow in `MicMuteService`). They are covered by the existing
+`MicMuteState` primitives and listed for hardware checks below.
+
+### Commands and output (final)
+- `swift test --filter Sound` → `✔ Test run with 49 tests in 6 suites passed`.
+- `swift test --filter MicMuteState` → `✔ Test run with 11 tests in 2 suites passed`.
+- Full `swift test` (once) → `✔ Test run with 607 tests in 29 suites passed after 80.114 seconds` (604 + 3 new).
+- `swift build` after every commit: no errors and no warnings.
+- `swift build -c release --arch arm64 --arch x86_64` → `Build complete!`.
+- Snapshots: `fix2-panel.png` and `fix2-panel-dark.png` in the scratchpad `snap/` folder, unchanged from round 1
+  (this round changed no UI).
+
+### Hardware checks added
+- **Arctis mute race (N1):** press ⌃⌥M on the SteelSeries Arctis Nova 5 several times in a row.
+  - Each press must leave the Sound tab saying "Muted · ⌃⌥M to unmute", never "Muted outside Orbit".
+  - Orbit's log must not show "was unmuted outside Orbit" after its own presses.
+  - Turning Sound off must then unmute the mic.
+- **Silent app (N2):** set a silent app (Slack, not playing) to muted. Its first notification must stay silent:
+  no dropout and no full-level leak. The log shows no "is quiet" pause line until it has played and then gone
+  quiet for 5 s.
+- **Paused tap released at once (N3):** with an app's tap paused (quiet over 5 s), turn Sound off, reset the app to
+  100 %, or reroute it. The log shows "released <app>" at once, not only at the app's next sound. Quitting takes no
+  2 s pause.
+- **System-output switch (N4):** with Chrome idle at 50 % and Same as Output, switch the system output. Chrome's
+  next sound plays on the new output.
+- **Badge and listeners (N5, N6):** mute, then switch the input to another mic. Clicking the badge or pressing
+  unmute clears Orbit's mute on the old mic. With Sound and Controls off, after a retried undo succeeds, no default-
+  input or device-list listener remains (by design; there's no direct observation).
+
+## Fix round 3
+
+Five commits on `suite/sound` on top of 6b036d7. Not pushed. No taps were created and no device, volume or mute
+was changed (only tests ran).
+
+| Commit | Subject | Item |
+|---|---|---|
+| 6d85515 | style(sound): fix blank-line spacing between tests | R5 |
+| 84633fb | fix(sound): releasing an app releases the taps it replaced | R1 |
+| 15c4920 | fix(suite): confirm Orbit's unmute writes too, not only its mutes | R3 |
+| 6ab02ca | fix(suite): look at the mic again when a write's confirmation window ends | R2 |
+| 76d5a46 | chore(sound): log waiting starts and outside teardowns for hardware checks | R4 |
+
+### What changed
+
+**R1: replaced taps can no longer be stranded.**
+- New pure `TapRoster<ID>` (Core) keeps each app's current tap and the replaced ("retiring") ones still alive,
+  oldest first.
+  - `install` makes a new tap current; the previous current one retires.
+  - `started(tap)` releases every tap of the app built before it. If a newer tap is already current, only the older
+    ones go.
+  - `failed(tap)` releases it and every older tap.
+  - `release(app)` releases the current tap and all predecessors.
+  - `releaseAll()` empties everything.
+  - Late reports from taps already released return nothing.
+- `SoundEngine` now uses the roster plus a map of live taps keyed by never-reused serial numbers.
+  - The old `taps` and `retiring` dictionaries and the per-build `retire` closure are gone.
+  - I used serials rather than `ObjectIdentifier`, so a late callback from a released, deallocated tap can't match
+    a newer tap that reused its address.
+  - `onStarted` releases what `roster.started` returns. `onFailure` releases what `roster.failed` returns, and marks
+    the app failed only if that tap was current.
+  - `release(_:)` releases everything `roster.release` returns, so a successor released before it got going (which
+    reports nothing) takes its predecessors with it.
+  - `stop()` releases all.
+- Scenario 1 (paused A replaced by a waiting B, then reset to 100 %) and scenario 2 (release during B's creation)
+  both release A with B. Scenario 3 (A → B → C, where C starts first) releases A and B on C's start.
+
+**R3: Orbit's unmute writes are confirmed too.**
+- `MicWriteConfirmation` now records the actions Orbit wrote: `wrote(_ actions:at:)`.
+- `review(_:now:)` returns the reading to show and whether it can be trusted. While a write to that device hasn't
+  shown up yet (and 2 s haven't passed), it projects the reading to what the write will leave (mute flag or volume)
+  and marks it untrusted. A confirming or expired reading ends the wait. Readings of other devices pass through.
+- The service records Orbit's mute, its unmute (restore) and a direct unmute of an outside mute.
+  `refreshLiveState()` presents the reviewed reading, and only feeds trusted readings to `deviceChanged`.
+- So, right after Orbit's unmute, the tab doesn't flash "Muted outside Orbit", and a quick second ⌃⌥M mutes.
+
+**R2: the timeout is checked on its own.** `noteWrite` schedules one `DispatchQueue.main.asyncAfter(timeout + 0.1 s)`
+that refreshes the live state. Each write replaces the previous check, and quitting cancels it.
+
+**R4: logs for the hardware checks.**
+- First start: "first start returned after X s", or "…returned after its release (blocked X s, status N)".
+- Re-armed start: "is playing again (its start waited X s)", or "…returned after its release (blocked X s,
+  status N)".
+- Outside teardown: "releasing … from outside its waiting start", then "outside teardown of … finished in X s".
+
+**R5:** blank-line spacing fixed around `systemOutputChangeDropsFollowers` and before
+`tapReleaseNeverWaitsForABlockedStart` (I scanned the whole file for others; none left).
+
+### Covering tests (TDD)
+
+| Test | RED | GREEN |
+|---|---|---|
+| `TapPlanTests/releasingAnAppReleasesItsReplacedTaps` (scenario 1), `releasingDuringCreationReleasesThePredecessor` (scenario 2), `aStartReleasesEveryOlderTap` (scenario 3 and its "B starts after C was built" variant), `aFailureReleasesItAndOlderTaps` | `cannot find 'TapRoster' in scope` ×10 | 15 tests in 2 suites |
+| `MicMuteStateTests/ownWriteIsNotMistakenForOutsideUnmute` (moved to `review`/`wrote(_:at:)`, plus other-device and empty-write cases), new `ownUnmuteDoesNotFlashOutsideMute` | `no member 'review'` ×28, `extra argument in call` ×18 | 12 tests in 2 suites |
+
+R2 (timer) and R4 (logs) are app-only.
+
+### Commands and output (final)
+- `swift test --filter Sound` → `✔ Test run with 54 tests in 6 suites passed`.
+- `swift test --filter MicMuteState` → `✔ Test run with 12 tests in 2 suites passed`.
+- Full `swift test` (once) → `✔ Test run with 612 tests in 29 suites passed after 81.985 seconds` (607 + 5 new).
+- `swift build` after every commit: no errors and no warnings.
+- `swift build -c release --arch arm64 --arch x86_64` → `Build complete!`.
+- No UI changed this round, so I took no new snapshots.
+
+### Hardware checklist additions (R4)
+- **(a) Release is immediate with a paused tap.** With an app's tap paused (quiet over 5 s), turn Sound off, reset
+  the app to 100 %, or reroute it.
+  - The log shows "releasing … from outside its waiting start" and "outside teardown … finished in X s" at once.
+  - Quitting has no 2 s pause.
+- **(b) The blocked start returns after its aggregate is destroyed.** Right after (a), the log should show "…'s
+  re-armed start returned after its release (blocked X s)". If that line only appears at the app's next sound, the
+  HAL kept the start blocked past the aggregate's destruction; the release itself still happened.
+- **(c) A never-playing app doesn't keep coreaudiod busy.** Give a tapped app a remembered setting and never let it
+  play. Watch `coreaudiod` CPU in Activity Monitor and `pmset -g assertions`: no steady CPU and no sleep assertion
+  from it.
+- **Stranding check for R1.** Chrome quiet at 50 % on the headset, then route it to the speakers, then reset it to
+  100 % before it plays. At Chrome's next sound it must play at 100 % on its usual output, and the log shows every
+  "released com.google.Chrome" line.
+
+## Fix round 4 (fresh implementer; branch suite/sound-r4 on 76d5a46)
+
+Commits (oldest first): afdf7e4 F1 · 052ee8f F4 · a82d70f F3 · da188ea F2. No taps created, no device/volume/mute changed.
+
+- **F1 — a quick second ⌃⌥M after Orbit's unmute is no longer lost.** `MicMuteState.mute(_:confirming:now:)` builds the mute from the reviewed (projected) reading, not the raw one; `observe(_:confirming:now:)` holds refreshLiveState's review and the "unmuted outside Orbit" decision so the whole trace is testable in Core. An empty write no longer clears a pending confirmation or cancels its deferred check.
+- **F4 — every Orbit mic write is confirmed, per device and control.** `MicWriteConfirmation` keeps one wait per device/control (a later write to the same control replaces it; expired waits are dropped). `noteWrite` is now also called from processPending, followInput's restore of the old mic, and muteInput's rollback. Deviation: recorded for every device (not only the current input) — per-device waits remove the cross-device displacement risk and fix an input flip-back variant of F1.
+- **F3 — a failed retiring tap releases only itself** (a failed current tap still takes all older taps).
+- **F2 — replaced taps that never started are released at install**; at most one replaced tap (the newest that started) is kept per app. Before installing, `noteStarts(of:)` reports taps whose start already returned but whose onStarted is still queued, so a tap that just began playing isn't taken for a never-started one. Three round-3 roster tests updated to give the kept predecessor its start.
+
+Tests (RED then GREEN): `quickMuteAfterOwnUnmuteIsNotLost`, `writesToSeveralDevicesWaitApart`, `aFailedRetiringTapReleasesOnlyItself`, `rebuildsOfAQuietAppDoNotPileUp` (incl. a 500-step random mix). `swift test --filter Sound` 58 passed; `--filter MicMuteState` 14 passed; full suite 616 passed; `swift build -c release --arch arm64 --arch x86_64` complete, no warnings.
+
+Hardware checklist additions: quick double press on the Arctis (ends muted, no "was unmuted outside Orbit"; also on a volume-fallback mic); reconnect the headset while muted (no "Muted outside Orbit" flash); input flip-back while muted (headset ends muted, later unmute works); output flapping AirPods ↔ speakers with quiet Slack at 50 % (one "released" per rebuild, coreaudiod thread count steady, Slack plays once at 50 % on the current output).
+
+Known (pre-existing, rare): if Orbit's mute record sits on a mic that is no longer the input and the undo failed twice, setMuted(true) on the current mic writes nothing until the record clears.
