@@ -279,3 +279,131 @@ following has been seen live:
   report was written to
   `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/windows/windows-report.md`
   and copied (uncommitted) to `docs/suite/reports/windows.md` in the suite worktree.
+
+---
+
+## Fix round 1 (task review)
+
+Branch `suite/windows`, 10 new commits on top of `7326f94`, not pushed. Each commit passed `swift build` and
+`swift test --skip "VideoToolTests|VideoConversionTests"` before it was made. Nothing was ever run against
+Kevo's real apps.
+
+| Commit | Subject | Item |
+|---|---|---|
+| 2bc6f64 | fix(windows): short Accessibility timeout on every element; actions off main | I1 |
+| 9c3005a | fix(windows): cooperative activation when bringing windows and apps forward | R1 |
+| a7997bf | feat(windows): Dock preview window list across Spaces | M1 (core, TDD) |
+| 94d208b | fix(windows): Dock preview shows windows on other Spaces | M1 (app) |
+| a546224 | fix(windows): place the strip from the icon's current frame | M2 |
+| 715a993 | fix(windows): a click during the hover delay cancels the preview | M3 |
+| f1a959d | fix(windows): purge expired thumbnails when the strip hides | M6 (core, TDD) |
+| 8ad0bf9 | fix(windows): Dock preview panel is transient only | M8 |
+| 5b81636 | fix(windows): readiness accounts for the Windows feature being off | M11 (core, TDD) |
+| 1fdea4a | fix(windows): reset cleanly when the hovered app is gone at show time | follow-on to M3 |
+
+### What changed
+- **I1: Accessibility timeouts and the main thread.** The reviewer is right: my original report said
+  "every element gets a 0.25 s messaging timeout", and that was **false**. A timeout set on one element
+  doesn't carry over to elements copied from it. The close button, the Dock's `AXList` and every hovered Dock
+  item used the ~6 s default, and `close` pressed the button on the main thread.
+  - `AX` now hands out elements only through `AX.application(pid)`, `AX.element(_:_:)` and
+    `AX.elements(_:_:)`, and each of them sets `AX.timeout` (0.25 s) on every element it returns. Plain values
+    go through `AX.value` (renamed from `copy`, so it is never used for elements).
+  - `grep -n "AXUIElementCopyAttributeValue|AXUIElementCreateApplication|AX.copy"` over the Windows folder
+    now finds only the four calls inside those helpers.
+  - The Dock watcher uses them for the Dock, its list and each selected item. It used 0.5 s before, on the
+    app element only.
+  - `bringForward`, `setMinimised` and `close` send their Accessibility messages on a serial
+    `AXWindowService.actionQueue`. An app answering with an app-modal alert, or not answering, can no longer
+    freeze the wheel, the panel or the Dock preview. Reads were already on background queues.
+- **R1: cooperative activation.** New `AppActivation.activate(_:allWindows:)`: unhide, then
+  `NSApp.yieldActivation(to: app)`, then `app.activate(from: .current, options:)`, falling back to
+  `activate(options:)` if refused. These are macOS 14 APIs, which is the deployment target, so no
+  `#available` is needed.
+  - Bring forward activates cooperatively, raises the AX window on the action queue, and raises it again
+    0.25 s later, once activation has landed.
+  - App Focus uses the same activation with all windows, then a Launch Services reopen, so an app with no
+    windows opens one (Dock-click behaviour).
+  - Choosing an "Other Space" window activates its app the same way.
+- **M1: other Spaces.** New in OrbitCore, `PreviewWindowList.merge(accessibility:capture:showMinimised:)`, with
+  `AccessibilityWindowInfo`, `CaptureWindowInfo` and `PreviewWindowEntry`.
+  - Listed Accessibility windows come first (`WindowListing` order), each paired with its capture window via
+    `WindowMatcher`.
+  - Then come ScreenCaptureKit windows that are unmatched, off screen, layer 0, titled and at least 40×40 pt:
+    windows on other Spaces or in full screen.
+  - Matching runs against **all** Accessibility windows, so a skipped palette, or a minimised window hidden by
+    "Show minimised windows", never comes back as an "elsewhere" window.
+  - The controller reads AX windows (background) and, only when `CGPreflightScreenCaptureAccess()` is true,
+    the app's `SCWindow`s, merges them, and lays out the strip from the merged frames. Elsewhere windows get an
+    **"Other Space"** badge and a thumbnail when capture works (otherwise a title card). Clicking one activates
+    the app, and macOS switches Space.
+  - The **Windows tab** stays on the current Space plus minimised windows and now says so in a caption under
+    the list: "Window lists show this Space and minimised windows. With Screen Recording, the Dock preview also
+    shows other Spaces." It appears only when Accessibility is granted.
+- **M2: stale icon frame.** `DockHover` keeps the Dock item (`item: AXUIElement`, with the timeout).
+  `DockWatcher.currentIconFrame(of:)` re-reads its position and size. The controller calls it when the delay
+  fires and when switching apps, before laying out the strip.
+- **M3: click during the delay.** The global mouse-down monitor is installed when the hover delay starts
+  (`.schedule`), not only once the strip is visible. A click cancels the pending show (`dismiss()`). The
+  monitor is removed on `.cancelSchedule` (when no strip is up) and on hide. Follow-on fix (1fdea4a): if the
+  delay fires for an app that is no longer hovered, the controller now dismisses (which removes the monitor)
+  instead of returning silently.
+- **M6: thumbnail purge.** `TimedCache.removeExpired(now:)` is new and used by `insert`.
+  `WindowThumbnailer.purgeExpired()` runs from `hideStrip()`, and once more 3.1 s later (one cancellable work
+  item, cancelled on `stop()`), so a one-off hover keeps no images.
+- **M8:** `DockPreviewPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]`
+  (`.stationary` removed).
+- **M11:** `DockPreviewReadiness` gains `.featureOff`, which takes precedence and never watches the Dock (new
+  `featureOn:` parameter, default true).
+  - `WindowsSettingsView` now takes `suite: SuiteSettings` and shows "Not running: turn on Windows above to use
+    the Dock preview." while Windows is off. It no longer says "Ready".
+  - `WindowsFeature.updateDockPreview` uses the same readiness with `featureOn: isRunning`.
+  - The settings snapshot fixture leaves Windows off, matching the shell-rendered header.
+
+### Tests (TDD for the three core changes)
+- M1, RED: `swift test --filter WindowsTests` → `cannot find 'PreviewWindowList' in scope` ×10,
+  `cannot find type 'AccessibilityWindowInfo' / 'CaptureWindowInfo' / 'PreviewWindowEntry' in scope`.
+  GREEN: `✔ Test run with 23 tests in 1 suite passed`. The new tests are
+  `previewListAddsWindowsOnOtherSpaces` (helpers, tiny, on-screen, layer-3 and matched-palette windows are
+  excluded), `previewListHidesMinimisedEverywhere` (also without AX window numbers) and
+  `previewListWithoutScreenRecording`.
+- M6, RED: `value of type 'TimedCache<Int, String>' has no member 'removeExpired'` ×4. GREEN: 24 tests pass.
+  New test: `thumbnailCachePurgesExpired`.
+- M11, RED: `extra argument 'featureOn' in call` ×6, `type 'DockPreviewReadiness' has no member 'featureOff'` ×6.
+  GREEN: `dockPreviewReadiness` passes (it has new `.featureOff` expectations). The app's exhaustive
+  `switch` in the settings view then failed to compile until the new case was handled.
+- I1, R1, M2, M3, M8 are OS glue (Accessibility, activation, AXObserver, NSEvent monitors, NSPanel behaviour)
+  and can't be unit-tested here. They are covered by build plus review, the grep above for I1, and they need
+  the hardware checks below.
+- Final runs:
+  - `swift test --filter Windows` → `✔ Test run with 24 tests in 1 suite passed`.
+  - Full `swift test` once → `✔ Test run with 585 tests in 26 suites passed` (no video flakes this time).
+  - `swift build -c release --arch arm64 --arch x86_64` → `Build complete!`, 0 warnings; `lipo -archs` →
+    `x86_64 arm64`.
+
+### Snapshots re-checked
+All 12 in `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/windows/shots/`
+were re-rendered with `shots.sh`.
+- `preview-light/dark.png` now shows 4 windows: two thumbnails, a minimised card, and a full-screen window from
+  another Space with the "Other Space" badge. The scene is 1000 pt wide.
+- `preview-titles-*` (no Screen Recording) shows the 3 Accessibility windows only, as it should.
+- `panel-light/dark.png` show the new caption under the list.
+- `settings-light/dark.png` show the "Not running" readiness row.
+
+### New or changed [builder's call]s
+- Elsewhere windows must be **titled**, off screen, layer 0 and at least 40×40 pt. Untitled off-screen windows
+  are almost always helpers, so a real untitled window on another Space is missed.
+- They come after the Accessibility windows, in ScreenCaptureKit's order, with the badge "Other Space". In
+  full screen it is also another Space, so the same badge is used.
+- The preview waits for ScreenCaptureKit's window list (when Screen Recording is granted) before showing, so
+  the layout doesn't jump. Thumbnails still fill in afterwards.
+- Thumbnails are purged on hide and 3.1 s after.
+- The Focus action is now cooperative activation plus a Launch Services reopen (it was reopen alone).
+
+### Still needs hardware verification (in addition to the list above)
+- Whether `SCScreenshotManager` captures windows on other Spaces, or full-screen windows, as thumbnails; if
+  not, they show as title cards.
+- Whether `yieldActivation` + `activate(from:)` activates the target from Orbit's non-activating panels on
+  macOS 26.
+- That the delayed re-raise picks the right window.
+- That an auto-hiding Dock places the strip correctly after the delay (M2).
