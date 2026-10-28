@@ -31,6 +31,13 @@ public struct ClipboardLimits: Equatable, Sendable {
                   maxItemBytes: min(max(maxItemMegabytes, 1) * Self.megabyte, total))
     }
 
+    /// The most bytes of a not-yet-converted image (TIFF, usually) worth reading and converting: ten
+    /// times the stored limit. An image is judged by the PNG that would be stored, and an uncompressed
+    /// TIFF is far bigger than its PNG; this only keeps absurd sizes from being converted at all.
+    public var maxRawImageBytes: Int {
+        maxItemBytes > Int.max / 10 ? Int.max : maxItemBytes * 10
+    }
+
     /// Whether a copy of `byteSize` bytes may be recorded.
     public func allowsItem(ofSize byteSize: Int) -> Bool {
         byteSize <= maxItemBytes

@@ -125,15 +125,26 @@ public struct ClipboardCapture: Sendable {
     public var sourceBundleID: String?
     public var sourceName: String?
     public var date: Date
+    /// `ClipboardHash` of kind + payload when already computed (see `hashed()`); nil otherwise.
+    public var contentHash: String?
 
     public init(kind: ClipboardKind, payload: Data, preview: String, sourceBundleID: String?,
-                sourceName: String?, date: Date) {
+                sourceName: String?, date: Date, contentHash: String? = nil) {
         self.kind = kind
         self.payload = payload
         self.preview = preview
         self.sourceBundleID = sourceBundleID
         self.sourceName = sourceName
         self.date = date
+        self.contentHash = contentHash
+    }
+
+    /// This capture with its content hash computed now. Hashing a large payload takes a while, so the
+    /// app does it on a background queue, before the capture reaches the history on the main thread.
+    public func hashed() -> ClipboardCapture {
+        var copy = self
+        copy.contentHash = ClipboardHash.make(kind: kind, payload: payload)
+        return copy
     }
 
     public static func text(_ string: String, sourceBundleID: String?, sourceName: String?, date: Date) -> ClipboardCapture {
@@ -162,7 +173,7 @@ public struct ClipboardCapture: Sendable {
     /// The history entry for this capture. `payloadFile` is the blob the content was (or will be) written to.
     public func makeItem(payloadFile: String?) -> ClipboardItem {
         ClipboardItem(kind: kind, preview: preview, sourceBundleID: sourceBundleID, sourceName: sourceName,
-                      date: date, pinned: false, contentHash: ClipboardHash.make(kind: kind, payload: payload),
+                      date: date, pinned: false, contentHash: contentHash ?? ClipboardHash.make(kind: kind, payload: payload),
                       byteSize: payload.count, payloadFile: payloadFile)
     }
 }

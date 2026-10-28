@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import OrbitCore
@@ -582,6 +583,106 @@ import Testing
             #expect(try mode(folder) == 0o700)
             #expect(try mode(folder.appending(path: name)) == 0o600)
             #expect(try mode(store.indexURL) == 0o600)
+        }
+    }
+
+    // MARK: Raw copies (decoded off the main thread)
+
+    @Suite struct RawPasteboardCopyTests {
+        private static let date = Date(timeIntervalSince1970: 3_000)
+
+        private static func copy(_ content: RawPasteboardCopy.Content) -> RawPasteboardCopy {
+            RawPasteboardCopy(content: content, sourceBundleID: "com.example.app", sourceName: "App", date: date)
+        }
+
+        private static func capture(_ content: RawPasteboardCopy.Content, max: Int = 1_000_000) -> ClipboardCapture? {
+            if case .capture(let c) = copy(content).makeCapture(maxItemBytes: max) { return c }
+            return nil
+        }
+
+        private static func skipReason(_ content: RawPasteboardCopy.Content, max: Int = 1_000_000) -> String? {
+            if case .skipped(let reason) = copy(content).makeCapture(maxItemBytes: max) { return reason }
+            return nil
+        }
+
+        /// A bitmap of `side` × `side` pixels: flat colour, or noise that PNG cannot compress.
+        private static func bitmap(side: Int, noisy: Bool) -> NSBitmapImageRep {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+                                       hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            if let pixels = rep.bitmapData {
+                var generator = SystemRandomNumberGenerator()
+                for i in 0..<(rep.bytesPerRow * side) { pixels[i] = noisy ? UInt8.random(in: 0...255, using: &generator) : 200 }
+            }
+            return rep
+        }
+
+        @Test func textIsDecodedPreviewedAndHashed() throws {
+            let c = try #require(Self.capture(.text(Data("Hello  there\nworld".utf8))))
+            #expect(c.kind == .text)
+            #expect(c.preview == "Hello there world")
+            #expect(c.sourceName == "App" && c.date == Self.date)
+            // The hash is computed here (off the main thread), not later when the entry is made.
+            #expect(c.contentHash == ClipboardHash.make(kind: .text, payload: c.payload))
+            #expect(c.makeItem(payloadFile: nil).contentHash == c.contentHash)
+        }
+
+        @Test func oversizeAndWhitespaceAreSkippedBeforeAnyDecoding() {
+            #expect(Self.skipReason(.text(Data(repeating: 0x61, count: 101)), max: 100) != nil)
+            #expect(Self.capture(.text(Data(repeating: 0x61, count: 100)), max: 100) != nil)
+            #expect(Self.skipReason(.text(Data("  \n\t ".utf8))) != nil)
+            #expect(Self.skipReason(.richText(rtf: Data(repeating: 0x20, count: 101), plain: Data("x".utf8)), max: 100) != nil)
+        }
+
+        @Test func richTextTakesItsPreviewFromThePlainText() throws {
+            let attributed = NSAttributedString(string: "Bold words", attributes: [.font: NSFont.boldSystemFont(ofSize: 14)])
+            let rtf = try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length), documentAttributes: [:]))
+            let withPlain = try #require(Self.capture(.richText(rtf: rtf, plain: Data("Given plain".utf8))))
+            #expect(withPlain.kind == .richText && withPlain.preview == "Given plain" && withPlain.payload == rtf)
+            // No plain text offered: it comes from the RTF itself.
+            let derived = try #require(Self.capture(.richText(rtf: rtf, plain: nil)))
+            #expect(derived.preview == "Bold words")
+            #expect(derived.contentHash != nil)
+        }
+
+        @Test func tiffIsConvertedAndTheLimitAppliesToTheStoredPNG() throws {
+            let flat = Self.bitmap(side: 300, noisy: false)
+            let tiff = try #require(flat.representation(using: .tiff, properties: [:]))
+            #expect(tiff.count > 100_000, "the uncompressed TIFF is bigger than the per-copy limit used below")
+            // The stored PNG is tiny, so this copy is fine even though its TIFF is not.
+            let c = try #require(Self.capture(.image(tiff), max: 100_000))
+            #expect(c.kind == .image && c.preview == "Image 300 × 300")
+            #expect(c.payload.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]), "stored as PNG")
+            #expect(c.payload.count <= 100_000)
+            #expect(c.contentHash != nil)
+
+            // Noise does not compress: the PNG is over the limit, so it is refused.
+            let noise = Self.bitmap(side: 300, noisy: true)
+            let noisyTIFF = try #require(noise.representation(using: .tiff, properties: [:]))
+            #expect(Self.skipReason(.image(noisyTIFF), max: 100_000) != nil)
+            // ... but is accepted when the limit allows it.
+            #expect(Self.capture(.image(noisyTIFF), max: 5_000_000) != nil)
+        }
+
+        @Test func pngPassesThroughUnchangedAndGarbageIsRefused() throws {
+            let png = try #require(Self.bitmap(side: 40, noisy: false).representation(using: .png, properties: [:]))
+            let c = try #require(Self.capture(.image(png)))
+            #expect(c.payload == png)
+            #expect(c.preview == "Image 40 × 40")
+            #expect(Self.skipReason(.image(Data("definitely not an image".utf8))) != nil)
+            // A PNG over the limit is refused as it is.
+            #expect(Self.skipReason(.image(png), max: png.count - 1) != nil)
+        }
+
+        @Test func filesKeepTheirPaths() throws {
+            let c = try #require(Self.capture(.files(["/a/report.pdf", "/a/notes.txt"])))
+            #expect(c.kind == .files && c.preview == "report.pdf, notes.txt")
+            #expect(ClipboardPayload.filePaths(from: c.payload) == ["/a/report.pdf", "/a/notes.txt"])
+        }
+
+        @Test func rawImageReadLimitIsTenTimesTheStoredLimit() {
+            let limits = ClipboardLimits(maxItems: 10, maxAgeDays: 1, maxMegabytes: 200, maxItemMegabytes: 20)
+            #expect(limits.maxRawImageBytes == 200_000_000)
+            #expect(ClipboardLimits(maxItems: 1, maxAge: 1, maxTotalBytes: .max, maxItemBytes: .max).maxRawImageBytes == .max)
         }
     }
 
