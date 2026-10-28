@@ -180,4 +180,21 @@ import Testing
         let r = CGRect(x: -2560, y: 252, width: 2560, height: 1440)
         #expect(ScreenSpace.flip(ScreenSpace.flip(r, primaryHeight: primaryHeight), primaryHeight: primaryHeight) == r)
     }
+
+    // MARK: Running apps
+
+    private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
+        RunningAppInfo(pid: pid, bundleID: "com.example.\(pid)", name: name, isRegular: regular, isActive: active, isHidden: false)
+    }
+
+    /// Regular (Dock) apps only, the frontmost first, then by name as Finder sorts them.
+    @Test func appListOrder() {
+        let apps = [app(1, "safari"), app(2, "Xcode", active: true), app(3, "Finder"),
+                    app(4, "Orbit", regular: false), app(5, "Spotlight", regular: false),
+                    app(6, "App 10"), app(7, "App 9"), app(20, "Notes"), app(10, "Notes")]
+        #expect(RunningAppList.sort(apps).map(\.pid) == [2, 7, 6, 3, 10, 20, 1])
+        #expect(RunningAppList.sort([]).isEmpty)
+        // Nothing frontmost (Orbit's own panel has focus): plain name order.
+        #expect(RunningAppList.sort([app(1, "b"), app(2, "a")]).map(\.name) == ["a", "b"])
+    }
 }
