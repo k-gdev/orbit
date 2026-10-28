@@ -120,7 +120,7 @@ private struct DisplayModeMenu: View {
             if !hiDPI.isEmpty, !standard.isEmpty { Divider() }
             ForEach(standard) { group in item(group) }
             Divider()
-            Button("Displays Settings…") {
+            Button("Open macOS Display Settings…") {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") { NSWorkspace.shared.open(url) }
             }
         }
