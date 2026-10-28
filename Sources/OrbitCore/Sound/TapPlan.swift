@@ -50,3 +50,34 @@ public struct TapPlan: Equatable, Sendable {
         return systemOutputUID
     }
 }
+
+/// The output devices each app last played on. Core Audio reports no devices for a process that is idle,
+/// so without this "Same as Output" would flip an idle app to the system output and back on every sound.
+/// An app's devices are kept while it has audio processes and forgotten when they are gone.
+public struct AppOutputMemory: Equatable, Sendable {
+    private var remembered: [String: [String]] = [:]
+
+    public init() {}
+
+    /// Records what an app's processes report right now and returns the devices to plan with: what they
+    /// report while playing somewhere, the last such devices while the app is idle, nothing once its
+    /// processes are gone (the memory is dropped then).
+    public mutating func observe(app: String, deviceUIDs: [String], hasProcesses: Bool) -> [String] {
+        guard hasProcesses else {
+            remembered[app] = nil
+            return []
+        }
+        if !deviceUIDs.isEmpty { remembered[app] = deviceUIDs }
+        return remembered[app] ?? []
+    }
+
+    /// The remembered devices of an app (empty when none).
+    public func devices(for app: String) -> [String] {
+        remembered[app] ?? []
+    }
+
+    /// Forgets every app not in `apps` (apps whose processes went away).
+    public mutating func forgetApps(notIn apps: Set<String>) {
+        remembered = remembered.filter { apps.contains($0.key) }
+    }
+}

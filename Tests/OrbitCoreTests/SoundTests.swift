@@ -505,7 +505,8 @@ extension SoundTests {
             let available: Set<String> = ["Headset", "Speakers", "Display"]
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
-            // Not playing (no device yet), playing on several, or on something not in the list: the system output.
+            // Nothing reported yet (the app never played this run), playing on several, or on something not in the
+            // list: the system output. (While an app is merely idle, `AppOutputMemory` keeps its last device.)
             #expect(TapPlan.followedOutput(appDeviceUIDs: [], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Display"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
             #expect(TapPlan.followedOutput(appDeviceUIDs: ["com.kevo.orbit.tap.1"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
@@ -516,6 +517,37 @@ extension SoundTests {
             let quieter = TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: own, availableOutputUIDs: available)
             #expect(quieter.destinationUID == "Headset")
             #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: own, availableOutputUIDs: available).needsTap)
+        }
+
+        /// Core Audio reports no devices for an idle process. Discord on the headset going quiet between pings
+        /// must stay planned on the headset, not flip to the speakers and back on every ping.
+        @Test func sameAsOutputSurvivesIdle() {
+            let available: Set<String> = ["Headset", "Speakers"]
+            var memory = AppOutputMemory()
+            func plan(_ devices: [String], running: Bool = true) -> TapPlan {
+                let seen = memory.observe(app: "com.hnc.Discord", deviceUIDs: devices, hasProcesses: running)
+                let own = TapPlan.followedOutput(appDeviceUIDs: seen, systemOutputUID: "Speakers", availableOutputUIDs: available)
+                return TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: own, availableOutputUIDs: available)
+            }
+            #expect(plan(["Headset"]).destinationUID == "Headset")     // playing
+            #expect(plan([]).destinationUID == "Headset")              // idle: still the headset
+            #expect(plan(["Headset"]).destinationUID == "Headset")     // playing again: no change
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Headset"])
+            // Routed to its own device while idle: still no tap.
+            let seen = memory.observe(app: "com.hnc.Discord", deviceUIDs: [], hasProcesses: true)
+            let own = TapPlan.followedOutput(appDeviceUIDs: seen, systemOutputUID: "Speakers", availableOutputUIDs: available)
+            #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: own, availableOutputUIDs: available).needsTap)
+            // The app switches device in its own settings: follow it.
+            #expect(plan(["Speakers"]).destinationUID == "Speakers")
+            #expect(plan([]).destinationUID == "Speakers")
+            // Its processes are gone: forgotten, back to the system output next time.
+            #expect(plan([], running: false).destinationUID == "Speakers")
+            #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
+            _ = memory.observe(app: "com.hnc.Discord", deviceUIDs: ["Headset"], hasProcesses: true)
+            _ = memory.observe(app: "com.google.Chrome", deviceUIDs: ["Speakers"], hasProcesses: true)
+            memory.forgetApps(notIn: ["com.google.Chrome"])
+            #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
+            #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
         }
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).

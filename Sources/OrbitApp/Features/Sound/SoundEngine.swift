@@ -35,6 +35,8 @@ final class SoundEngine {
     private var retiring: [ObjectIdentifier: AppAudioTap] = [:]
     private var failures: [String: TapKey] = [:]
     private var releases: [String: DispatchWorkItem] = [:]
+    /// The device each app last played on, kept while it is idle (`AppOutputMemory`).
+    private var outputMemory = AppOutputMemory()
     private var subscriptions: Set<AnyCancellable> = []
     private var reconcileScheduled = false
     private(set) var isRunning = false
@@ -90,6 +92,7 @@ final class SoundEngine {
         releases.values.forEach { $0.cancel() }
         releases = [:]
         failures = [:]
+        outputMemory = AppOutputMemory()
         let all = Array(taps.values) + Array(retiring.values)
         taps = [:]
         retiring = [:]
@@ -113,6 +116,9 @@ final class SoundEngine {
         guard isRunning else { return }
         if !monitor.isListening { monitor.refresh() }
         let available = Set(hardware.outputDevices.map(\.uid))
+        let running = monitor.apps()
+        for app in running.keys { _ = outputMemory.observe(app: app, deviceUIDs: monitor.outputDeviceUIDs(forApp: app), hasProcesses: true) }
+        outputMemory.forgetApps(notIn: Set(running.keys))
 
         var wanted: [String: (plan: TapPlan, key: TapKey)] = [:]
         if permissionGranted {
@@ -152,10 +158,13 @@ final class SoundEngine {
     }
 
     /// Where "Same as Output" keeps this app: the device it plays to on its own (an app that chose one in its
-    /// own settings), otherwise the system output (`TapPlan.followedOutput`).
+    /// own settings), otherwise the system output (`TapPlan.followedOutput`). While the app is idle Core
+    /// Audio reports no device, so the last one it played on is used until its processes go away.
     func followedOutput(for bundleID: String) -> String? {
-        TapPlan.followedOutput(appDeviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID), systemOutputUID: hardware.defaultOutputUID,
-                               availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
+        let devices = outputMemory.observe(app: bundleID, deviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID),
+                                           hasProcesses: !monitor.processObjects(forApp: bundleID).isEmpty)
+        return TapPlan.followedOutput(appDeviceUIDs: devices, systemOutputUID: hardware.defaultOutputUID,
+                                      availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
     }
 
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
