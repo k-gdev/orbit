@@ -136,4 +136,70 @@ import Testing
         #expect(!gate.isFileDrag(changeCount: 6, hasFiles: true))
         #expect(gate.isFileDrag(changeCount: 7, hasFiles: true))
     }
+
+    // MARK: Items
+
+    private static let a = URL(fileURLWithPath: "/tmp/shelf/a.txt")
+    private static let b = URL(fileURLWithPath: "/tmp/shelf/b.png")
+    private static let c = URL(fileURLWithPath: "/tmp/shelf/c folder", isDirectory: true)
+
+    @Test func itemsUniqueAndOrdered() {
+        var items = ShelfItems()
+        #expect(items.isEmpty)
+        // Adding returns what was new; a repeated file keeps its first place.
+        let first = items.add([Self.a, Self.b, Self.a])
+        #expect(first == [Self.a, Self.b])
+        #expect(items.urls == [Self.a, Self.b])
+        let again = items.add(Self.a)
+        #expect(!again)
+        let addedC = items.add(Self.c)
+        #expect(addedC)
+        #expect(items.urls == [Self.a, Self.b, Self.c])
+        #expect(items.count == 3)
+        #expect(items.contains(Self.b))
+        // The same file spelled another way is the same item (".." segments, folder slash).
+        let dotted = items.add(URL(fileURLWithPath: "/tmp/shelf/x/../a.txt"))
+        #expect(!dotted)
+        let slashless = items.add(URL(fileURLWithPath: "/tmp/shelf/c folder"))
+        #expect(!slashless)
+        #expect(items.contains(URL(fileURLWithPath: "/tmp/shelf/c folder/")))
+        #expect(items.count == 3)
+        // Only files: a web URL is not a shelf item.
+        let web = items.add(URL(string: "https://example.com/a.txt")!)
+        #expect(!web)
+        // Removing keeps the order of the rest, and a removed file can come back (at the end).
+        items.remove(Self.b)
+        #expect(items.urls == [Self.a, Self.c])
+        items.remove(Self.b)
+        #expect(items.urls == [Self.a, Self.c])
+        let readded = items.add(Self.b)
+        #expect(readded)
+        #expect(items.urls == [Self.a, Self.c, Self.b])
+        items.removeAll()
+        #expect(items.isEmpty)
+    }
+
+    @Test func removeMissing() {
+        var items = ShelfItems([Self.a, Self.b, Self.c])
+        let present: Set<URL> = [Self.a, Self.c]
+        let removed = items.removeMissing(fileExists: { present.contains($0) })
+        #expect(removed == [Self.b])
+        #expect(items.urls == [Self.a, Self.c])
+        // Nothing missing: nothing removed.
+        let none = items.removeMissing(fileExists: { _ in true })
+        #expect(none.isEmpty)
+        #expect(items.urls == [Self.a, Self.c])
+    }
+
+    @Test func removeMissingChecksTheRealFilesystem() throws {
+        let dir = Fixtures.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let kept = Fixtures.file("kept.txt", "hello", in: dir)
+        let gone = Fixtures.file("gone.txt", "bye", in: dir)
+        var items = ShelfItems([kept, gone])
+        try FileManager.default.removeItem(at: gone)
+        let removed = items.removeMissing()
+        #expect(removed == [gone])
+        #expect(items.urls == [kept])
+    }
 }
