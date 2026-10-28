@@ -110,7 +110,8 @@ final class SystemMonitor: ObservableObject {
 /// that queue. `stop()` cancels the timer and closes the sensor client and SMC connection.
 final class SamplingEngine: @unchecked Sendable {
     let layout: ClusterLayout
-    private let queue = DispatchQueue(label: "com.kevo.orbit.system.sampling", qos: .utility)
+    /// `.workItem` drains the autorelease pool after every tick (the CF/IOKit copies are bridged objects).
+    private let queue = DispatchQueue(label: "com.kevo.orbit.system.sampling", qos: .utility, autoreleaseFrequency: .workItem)
     private let deliver: @Sendable (SystemSample, Date, TimeInterval) -> Void
 
     // Queue-confined state.
