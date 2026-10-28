@@ -53,25 +53,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         servicesProvider = provider
         NSApp.servicesProvider = provider
         NSUpdateDynamicServices()
-        statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
-                                                    windowController: windowController,
-                                                    showSettings: { settingsWindow.show() })
-        startSuite(settings: settings, coordinator: coordinator)
+        let registry = makeSuite(settings: settings, coordinator: coordinator)
+        self.registry = registry
+        let statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
+                                                        windowController: windowController, registry: registry,
+                                                        showSettings: { _ in settingsWindow.show() })
+        self.statusItemController = statusItemController
+        registry.context.openSettings = { [weak statusItemController] _ in
+            statusItemController?.closePanel()
+            settingsWindow.show()
+        }
+        registry.context.closePanel = { [weak statusItemController] in statusItemController?.closePanel() }
+        registry.startEnabled()
         // Offer Full Disk Access once, on the first launch where it isn't already granted.
         if welcomeWindow.shouldShowOnLaunch { welcomeWindow.show() }
     }
 
-    /// Builds the suite's shared context and feature registry and starts the features that are on.
+    /// Builds the suite's shared context and feature registry (nothing starts yet).
     @MainActor
-    private func startSuite(settings: SettingsStore, coordinator: JobCoordinator) {
+    private func makeSuite(settings: SettingsStore, coordinator: JobCoordinator) -> FeatureRegistry {
         let hotKeys = HotKeyCenter()
         let context = SuiteContext(settings: settings, suite: SuiteSettings(), defaults: .standard, hotKeys: hotKeys,
                                    permissions: PermissionCenter(),
                                    micMute: MicMuteService(hotKeys: hotKeys, settings: MicMuteSettings()),
                                    toasts: coordinator.toasts, supportDirectory: SuiteContext.defaultSupportDirectory)
-        let registry = FeatureRegistry.standard(context: context)
-        self.registry = registry
-        registry.startEnabled()
+        return FeatureRegistry.standard(context: context)
     }
 
     /// Every feature releases what it holds (audio taps, power assertions, hot keys, windows) and the mic
