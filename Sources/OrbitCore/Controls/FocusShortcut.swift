@@ -15,4 +15,28 @@ public enum FocusShortcut {
 
     /// Arguments that run one Shortcut by name (no shell involved).
     public static func runArguments(_ name: String) -> [String] { ["run", name] }
+
+    /// How long a Shortcut run may take before Orbit gives up on it (and terminates `shortcuts`), so the
+    /// Do Not Disturb button can't sit on "Working…" forever.
+    public static let timeout: TimeInterval = 15
+
+    public struct TimedOut: Error, LocalizedError {
+        public var errorDescription: String? { "It took longer than \(Int(FocusShortcut.timeout)) seconds." }
+    }
+
+    /// Runs `operation`, cancelling it and throwing `TimedOut` when it takes longer than `seconds`.
+    /// Cancellation reaches `ProcessRunner`, which terminates the child process.
+    public static func withTimeout<T: Sendable>(_ seconds: TimeInterval,
+                                                _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                throw TimedOut()
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw TimedOut() }
+            return first
+        }
+    }
 }

@@ -30,7 +30,26 @@ public struct VolumeInfo: Equatable, Hashable, Sendable, Identifiable {
 /// Which volumes "Eject Drives" may eject: external or removable drives and mounted disk images that
 /// Finder shows under /Volumes. Never the boot volume, system volumes, internal partitions, network
 /// shares, or hidden images such as the Simulator runtimes under /Library/Developer.
+/// One row of the kernel's mount table (`getfsstat` with `MNT_NOWAIT`: cached, never blocks on a dead
+/// network server).
+public struct MountEntry: Equatable, Sendable {
+    public var path: String
+    /// `MNT_LOCAL`: false for SMB, NFS, AFP, WebDAV and other network file systems.
+    public var isLocal: Bool
+
+    public init(path: String, isLocal: Bool) {
+        self.path = path
+        self.isLocal = isLocal
+    }
+}
+
 public enum EjectableVolumeFilter {
+    /// The mounts worth asking `FileManager` about: local ones under /Volumes. Network mounts are
+    /// dropped here, before any resource value is read, so a stale share can't stall the listing.
+    public static func worthInspecting(_ mounts: [MountEntry]) -> [String] {
+        mounts.filter { $0.isLocal && $0.path.hasPrefix("/Volumes/") }.map(\.path)
+    }
+
     public static func ejectable(_ volumes: [VolumeInfo]) -> [VolumeInfo] {
         volumes.filter { v in
             guard v.path.hasPrefix("/Volumes/"), v.isLocal, v.isBrowsable, !v.isRootFileSystem else { return false }

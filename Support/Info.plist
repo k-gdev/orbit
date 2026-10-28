@@ -28,6 +28,8 @@
 	<string>Orbit asks Pages, Keynote and Numbers to convert files for you.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Orbit adjusts each app's volume and output when you use the Sound mixer.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Orbit checks your Downloads folder for unfinished downloads while Keep Awake is set to “While downloading”.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSServices</key>

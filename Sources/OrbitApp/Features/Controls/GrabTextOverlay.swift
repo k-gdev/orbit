@@ -8,20 +8,28 @@ struct GrabTextSelection {
     let rect: CGRect
 }
 
-/// Grab Text's crosshair (spec §8.4): one borderless, slightly dimmed window per display. Drag a
-/// rectangle on any of them; releasing the mouse finishes, Esc (or a click without a drag, or switching
-/// away from Orbit) cancels. The windows close before `completion` runs.
+/// Grab Text's crosshair (spec §8.4): one borderless, slightly dimmed panel per display. Drag a
+/// rectangle on any of them; releasing the mouse finishes; Esc, a click without a drag, a right-click,
+/// or another app coming forward cancels. The panels close before `completion` runs.
+///
+/// Focus: the panels are non-activating, so they take the keyboard (Esc) without making Orbit the
+/// active app, and the user's app keeps focus throughout: the next ⌘V lands where they were. Should
+/// Orbit become active anyway, `finish` hands focus back to the app that was in front
+/// (`GrabTextFocus`), or hides Orbit when that app is gone.
 @MainActor
 final class GrabTextOverlay {
     private var windows: [GrabTextOverlayWindow] = []
     private var completion: ((GrabTextSelection?) -> Void)?
-    private var resignObserver: NSObjectProtocol?
+    private var previousApp: NSRunningApplication?
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var keyMonitor: Any?
 
     var isShowing: Bool { !windows.isEmpty }
 
     func show(completion: @escaping (GrabTextSelection?) -> Void) {
         guard windows.isEmpty else { return }
         self.completion = completion
+        previousApp = NSWorkspace.shared.frontmostApplication
         let mouse = NSEvent.mouseLocation
         for screen in NSScreen.screens {
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
@@ -30,42 +38,87 @@ final class GrabTextOverlay {
             }
             windows.append(window)
         }
-        guard !windows.isEmpty else { completion(nil); self.completion = nil; return }
-        NSApp.activate(ignoringOtherApps: true)
+        guard !windows.isEmpty else {
+            self.completion = nil
+            previousApp = nil
+            completion(nil)
+            return
+        }
         for window in windows { window.orderFrontRegardless() }
         let underMouse = windows.first { NSMouseInRect(mouse, $0.frame, false) } ?? windows[0]
-        underMouse.makeKey()
+        underMouse.makeKeyAndOrderFront(nil)
         NSCursor.crosshair.set()
-        resignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil,
-                                                                queue: .main) { [weak self] _ in
+
+        // Esc while a panel is key. A local monitor needs no permission (a global one would need
+        // Accessibility); the panels' own keyDown is the second line.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }
             MainActor.assumeIsolated { self?.finish(nil) }
+            return nil
         }
+        // Another app coming forward (⌘-Tab, Mission Control) cancels; so does Orbit losing focus when it
+        // was in front to begin with.
+        let me = NSRunningApplication.current.processIdentifier
+        let previous = previousApp?.processIdentifier
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append((workspace, workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil,
+                                                           queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let pid = app?.processIdentifier, pid != me, pid != previous else { return }
+            MainActor.assumeIsolated { self?.finish(nil) }
+        }))
+        let local = NotificationCenter.default
+        observers.append((local, local.addObserver(forName: NSApplication.didResignActiveNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finish(nil) }
+        }))
     }
 
-    /// Closes the overlay without a selection (the feature stopping, or Esc).
+    /// Closes the overlay without a selection (the feature stopping).
     func cancel() { finish(nil) }
 
     private func finish(_ selection: GrabTextSelection?) {
         guard let completion else { return }
         self.completion = nil
-        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
-        resignObserver = nil
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        for (center, observer) in observers { center.removeObserver(observer) }
+        observers.removeAll()
         for window in windows { window.orderOut(nil); window.close() }
         windows.removeAll()
         NSCursor.arrow.set()
+        restoreFocus()
         completion(selection)
+    }
+
+    private func restoreFocus() {
+        let previous = previousApp
+        previousApp = nil
+        let action = GrabTextFocus.afterOverlay(
+            previousWasOrbit: previous?.processIdentifier == NSRunningApplication.current.processIdentifier,
+            orbitIsActive: NSApp.isActive,
+            previousAvailable: previous.map { !$0.isTerminated } ?? false)
+        switch action {
+        case .none: break
+        case .activatePrevious: previous?.activate(options: [])
+        case .hideOrbit: NSApp.hide(nil)
+        }
     }
 }
 
-/// One display's overlay window. Esc reaches it whichever view is first responder.
-final class GrabTextOverlayWindow: NSWindow {
+/// One display's overlay: a borderless, non-activating panel that can still become key, so Esc reaches
+/// it while the user's app stays active.
+final class GrabTextOverlayWindow: NSPanel {
     private let onFinish: (GrabTextSelection?) -> Void
 
     init(screen: NSScreen, displayID: CGDirectDisplayID, onFinish: @escaping (GrabTextSelection?) -> Void) {
         self.onFinish = onFinish
-        super.init(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        super.init(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         setFrame(screen.frame, display: false)
         isReleasedWhenClosed = false
+        isFloatingPanel = true
+        becomesKeyOnlyIfNeeded = false
+        hidesOnDeactivate = false
         level = .screenSaver
         backgroundColor = .clear
         isOpaque = false
@@ -133,6 +186,9 @@ private final class GrabTextSelectionView: NSView {
         return CGRect(x: min(origin.x, current.x), y: min(origin.y, current.y),
                       width: abs(current.x - origin.x), height: abs(current.y - origin.y)).intersection(bounds)
     }
+
+    /// A right-click cancels, like Esc.
+    override func rightMouseDown(with event: NSEvent) { onFinish(nil) }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeKey()

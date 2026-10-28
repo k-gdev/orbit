@@ -93,10 +93,14 @@ public enum PreferenceValue: Codable, Equatable, Hashable, Sendable {
 public struct QuickToggleRestore: Codable, Equatable, Sendable {
     public var prior: PreferenceValue
     public var applied: PreferenceValue
+    /// Dark Mode only: whether the appearance was on Auto before Orbit turned it on (nil when not
+    /// recorded, including records saved before this existed).
+    public var priorAutomatic: Bool?
 
-    public init(prior: PreferenceValue, applied: PreferenceValue) {
+    public init(prior: PreferenceValue, applied: PreferenceValue, priorAutomatic: Bool? = nil) {
         self.prior = prior
         self.applied = applied
+        self.priorAutomatic = priorAutomatic
     }
 
     /// The value to put back, or nil when the setting no longer holds what Orbit set (something else
@@ -114,24 +118,63 @@ public struct QuickToggleRestoreBook: Codable, Equatable, Sendable {
 
     public init() {}
 
-    /// Orbit is turning `id` on: returns the value to write, and remembers what was there unless it was
-    /// already on (then nothing is recorded and nothing changes) or Orbit already turned it on.
-    public mutating func turnOn(_ id: QuickToggleID, current: PreferenceValue) -> PreferenceValue {
-        if let record = records[id], record.applied == current { return current }
-        guard !id.isOn(current) else {
-            records[id] = nil
-            return current
+    /// Plans turning `id` on or off without changing the book: what to write, whether to change Dark
+    /// Mode's Auto setting, and the record to keep afterwards. The app writes, then `commit`s the change
+    /// to the book as it is *then*, so two toggles in flight never overwrite each other's record.
+    ///
+    /// - On: remembers what was there (and, for Dark Mode, whether it was on Auto, which is turned off
+    ///   so the choice sticks). Already on, or already turned on by Orbit: nothing to write.
+    /// - Off: already off: nothing to write, and any leftover record is dropped. Otherwise exactly what
+    ///   was there before Orbit turned it on (Auto included) when the setting still holds Orbit's value,
+    ///   else the toggle's plain off value.
+    public func change(_ id: QuickToggleID, on: Bool, current: PreferenceValue, automatic: Bool? = nil) -> QuickToggleChange {
+        let record = records[id]
+        if on {
+            if let record, record.applied == current { return QuickToggleChange(write: current, record: record) }
+            guard !id.isOn(current) else { return QuickToggleChange(write: current, record: nil) }
+            let wasAuto = id == .darkMode ? automatic : nil
+            return QuickToggleChange(write: id.onValue, automatic: wasAuto == true ? false : nil,
+                                     record: QuickToggleRestore(prior: current, applied: id.onValue, priorAutomatic: wasAuto))
         }
-        records[id] = QuickToggleRestore(prior: current, applied: id.onValue)
-        return id.onValue
+        guard id.isOn(current) else { return QuickToggleChange(write: current, record: nil) }
+        if let record, let prior = record.restoreValue(current: current), !id.isOn(prior) {
+            return QuickToggleChange(write: prior, automatic: record.priorAutomatic == true ? true : nil, record: nil)
+        }
+        return QuickToggleChange(write: id.plainOffValue, record: nil)
     }
 
-    /// Orbit is turning `id` off: returns exactly what was there before Orbit turned it on when the
-    /// setting still holds Orbit's value, otherwise the toggle's plain off value. Drops the record.
+    /// Stores (or drops) the record a finished change leaves behind.
+    public mutating func commit(_ id: QuickToggleID, _ change: QuickToggleChange) {
+        records[id] = change.record
+    }
+
+    /// `change` + `commit` for turning on; returns the value to write.
+    public mutating func turnOn(_ id: QuickToggleID, current: PreferenceValue) -> PreferenceValue {
+        let planned = change(id, on: true, current: current)
+        commit(id, planned)
+        return planned.write
+    }
+
+    /// `change` + `commit` for turning off; returns the value to write.
     public mutating func turnOff(_ id: QuickToggleID, current: PreferenceValue) -> PreferenceValue {
-        if let record = records.removeValue(forKey: id), let prior = record.restoreValue(current: current), !id.isOn(prior) {
-            return prior
-        }
-        return id.plainOffValue
+        let planned = change(id, on: false, current: current)
+        commit(id, planned)
+        return planned.write
+    }
+}
+
+/// One planned toggle change (see `QuickToggleRestoreBook.change`).
+public struct QuickToggleChange: Equatable, Sendable {
+    /// The value to write (equal to the current value when nothing needs writing).
+    public var write: PreferenceValue
+    /// Dark Mode only: set the appearance's Auto setting to this (nil: leave it alone).
+    public var automatic: Bool?
+    /// The record to keep for the toggle once the write succeeded (nil: none).
+    public var record: QuickToggleRestore?
+
+    public init(write: PreferenceValue, automatic: Bool? = nil, record: QuickToggleRestore?) {
+        self.write = write
+        self.automatic = automatic
+        self.record = record
     }
 }

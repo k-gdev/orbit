@@ -17,7 +17,8 @@ struct ControlsPanelView: View {
                     EjectConfirmation(model: model)
                 }
                 if model.settings.visibleToggles.contains(where: \.restartsFinder) {
-                    PanelFootnote(text: "Hide Desktop and Hidden Files restart Finder.", systemImage: "arrow.clockwise")
+                    PanelFootnote(text: "Hide Desktop and Hidden Files restart Finder, which stops any Finder copy in progress.",
+                                  systemImage: "arrow.clockwise")
                 }
             }
 
@@ -93,9 +94,7 @@ private struct KeepAwakeTile: View {
     }
 
     private func statusLine(now: Date) -> String {
-        guard let session = keepAwake.session else { return "Off · your Mac sleeps as usual" }
-        let label = session.label(now: now)
-        return session.keepDisplayAwake ? label + " · display stays on" : label
+        KeepAwakeFormat.status(keepAwake.session, now: now, displayHeld: keepAwake.displayHeld)
     }
 
     /// The running mode, or what the switch would start.
@@ -132,6 +131,7 @@ private struct KeepAwakeTile: View {
             }
         }
         Button { keepAwake.start(.whileDownloading) } label: { check("While Downloading", current == .whileDownloading) }
+        Text("macOS may ask to let Orbit see your Downloads folder")
         if keepAwake.isActive {
             Divider()
             Button("Turn Off") { keepAwake.stop() }
@@ -341,6 +341,7 @@ private struct PanelFootnote: View {
         Label(text, systemImage: systemImage)
             .font(.system(size: 11))
             .foregroundStyle(PanelStyle.colors(for: colorScheme).secondaryInk)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 4)
     }
 }

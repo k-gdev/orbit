@@ -74,7 +74,7 @@ struct ControlsSettingsView: View {
             }
 
             SettingsSection("Quick Toggles",
-                            footnote: "Turning a toggle off puts the setting back exactly as it was before Orbit changed it. Toggles stay as you set them when Orbit quits; none of them needs a permission.") {
+                            footnote: "Turning a toggle off puts the setting back exactly as it was before Orbit changed it (Dark Mode includes Auto). Toggles stay as you set them when Orbit quits; none of them needs a permission. Hide Desktop and Hidden Files restart Finder, which stops any Finder copy in progress.") {
                 Text("Show in the Controls tab:").font(.caption).foregroundStyle(.secondary)
                 ForEach(QuickToggleID.allCases, id: \.self) { id in
                     Toggle(isOn: Binding(get: { settings.visibleToggles.contains(id) },
