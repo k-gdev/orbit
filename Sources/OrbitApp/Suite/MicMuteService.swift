@@ -38,8 +38,10 @@ final class MicMuteService: NSObject, ObservableObject {
     private var shortcutSubscription: AnyCancellable?
     /// What Orbit's mute changed, and mutes still to undo on devices that went away (`MicMuteState`).
     private var state = MicMuteState()
-    /// Keeps a reading taken before Orbit's own write has landed from being read as an outside unmute.
+    /// Keeps a reading taken before Orbit's own write has landed from being misread.
     private var confirmation = MicWriteConfirmation()
+    /// The one look at the device scheduled for when the confirmation window ends.
+    private var confirmationCheck: DispatchWorkItem?
     /// Where that record survives a crash or a failed quit (nil for the fixture).
     private let restoreDefaults: UserDefaults?
     private var didRecover = false
@@ -142,6 +144,8 @@ final class MicMuteService: NSObject, ObservableObject {
         if state.isMuted { _ = restoreOrbitMute() }
         processPending()
         saveRecord()
+        confirmationCheck?.cancel()
+        confirmationCheck = nil
         hotKeys?.unregister(id: Self.hotKeyID)
         removeBadge()
         unwatchInput()
@@ -253,9 +257,20 @@ final class MicMuteService: NSObject, ObservableObject {
         return true
     }
 
-    /// Orbit just wrote `actions` to the input device: readings are reviewed against them until they show.
+    /// Orbit just wrote `actions` to the input device: readings are reviewed against them until they show. One
+    /// look is scheduled for just after the confirmation window, so a write the driver silently ignored is
+    /// noticed even if no listener fires.
     private func noteWrite(_ actions: [MicMuteAction]) {
         confirmation.wrote(actions, at: Date())
+        confirmationCheck?.cancel()
+        confirmationCheck = nil
+        guard !actions.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.confirmationCheck = nil
+            self?.refreshLiveState()
+        }
+        confirmationCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + MicWriteConfirmation.timeout + 0.1, execute: work)
     }
 
     /// Undoes Orbit's mute, or switches off a mute made elsewhere (the user asked). True when the mic is no
