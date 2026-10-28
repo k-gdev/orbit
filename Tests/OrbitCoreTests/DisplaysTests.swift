@@ -296,6 +296,46 @@ import Testing
     }
 }
 
+/// Tile order and titles. Frames are Kevo's CGDisplayBounds on 2026-10-28.
+@Suite struct DisplayArrangementTests {
+    static let kevo = [
+        DisplayArrangement.Item(name: "P27u-20 (1)", frame: CGRect(x: 0, y: 0, width: 3008, height: 1692)),
+        DisplayArrangement.Item(name: "Q27G4ZD", frame: CGRect(x: 18, y: -1440, width: 2560, height: 1440)),
+        DisplayArrangement.Item(name: "P27u-20 (2)", frame: CGRect(x: 3008, y: 0, width: 3008, height: 1692)),
+        DisplayArrangement.Item(name: "K272HUL", frame: CGRect(x: -2560, y: 0, width: 2560, height: 1440)),
+    ]
+
+    @Test func ordersBuiltInThenLeftToRight() {
+        // Acer (left), AOC (above the main ThinkVision), ThinkVision, ThinkVision.
+        #expect(DisplayArrangement.order(Self.kevo) == [3, 1, 0, 2])
+        let withLaptop = Self.kevo + [DisplayArrangement.Item(name: "Built-in Retina Display",
+                                                              frame: CGRect(x: 6016, y: 400, width: 1728, height: 1117), isBuiltIn: true)]
+        #expect(DisplayArrangement.order(withLaptop) == [4, 3, 1, 0, 2])
+        // Same centre: top first.
+        let stacked = [DisplayArrangement.Item(name: "B", frame: CGRect(x: 0, y: 0, width: 100, height: 100)),
+                       DisplayArrangement.Item(name: "A", frame: CGRect(x: 0, y: -100, width: 100, height: 100))]
+        #expect(DisplayArrangement.order(stacked) == [1, 0])
+        #expect(DisplayArrangement.order([]).isEmpty)
+    }
+
+    @Test func titlesDisambiguateIdenticalMonitors() {
+        #expect(DisplayArrangement.titles(Self.kevo) == ["P27u-20 · Left", "Q27G4ZD", "P27u-20 · Right", "K272HUL"])
+        // Two stacked.
+        let stacked = [DisplayArrangement.Item(name: "LG (2)", frame: CGRect(x: 0, y: 0, width: 100, height: 100)),
+                       DisplayArrangement.Item(name: "LG (1)", frame: CGRect(x: 10, y: -100, width: 100, height: 100))]
+        #expect(DisplayArrangement.titles(stacked) == ["LG · Bottom", "LG · Top"])
+        // Three in a row are numbered left to right.
+        let three = (0..<3).map { i in
+            DisplayArrangement.Item(name: "Dell (\(i + 1))", frame: CGRect(x: Double(2 - i) * 100, y: 0, width: 100, height: 100))
+        }
+        #expect(DisplayArrangement.titles(three) == ["Dell · 3", "Dell · 2", "Dell · 1"])
+        // A lone numbered name loses its suffix; an empty one gets a name; "(beta)" isn't a macOS suffix.
+        #expect(DisplayArrangement.titles([.init(name: "Studio Display (1)", frame: .zero), .init(name: " ", frame: .zero),
+                                           .init(name: "Cinema (beta)", frame: .zero)])
+                == ["Studio Display", "Display", "Cinema (beta)"])
+    }
+}
+
 /// `DisplaySettings` persistence (throwaway defaults suites only).
 @Suite struct DisplaySettingsTests {
     @Test func settingsRoundTrip() {
