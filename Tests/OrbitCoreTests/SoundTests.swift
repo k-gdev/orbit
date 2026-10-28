@@ -63,6 +63,80 @@ import Testing
         #expect(SoundSettings(defaults: d).appStates.isEmpty)
     }
 
+    // MARK: Volume curve
+
+    @Test func gainEndpoints() {
+        #expect(VolumeCurve.gain(forPercent: 0) == 0)
+        #expect(VolumeCurve.gain(forPercent: 100) == 1)
+        #expect(VolumeCurve.gain(forPercent: 150) == 1.5)
+        // Out of range clamps; NaN is silence rather than garbage.
+        #expect(VolumeCurve.gain(forPercent: -20) == 0)
+        #expect(VolumeCurve.gain(forPercent: 400) == 1.5)
+        #expect(VolumeCurve.gain(forPercent: .nan) == 0)
+        // Perceptual below 100: half the slider is well under half the amplitude.
+        #expect(VolumeCurve.gain(forPercent: 50) < 0.5)
+        #expect(VolumeCurve.gain(forPercent: 50) > 0)
+    }
+
+    @Test func gainMonotonic() {
+        var previous: Float = -1
+        for tenth in 0...1500 {
+            let g = VolumeCurve.gain(forPercent: Double(tenth) / 10)
+            #expect(g > previous || (tenth == 0 && g == 0))
+            previous = g
+        }
+    }
+
+    @Test func softClipBounded() {
+        // Untouched below the knee, and the knee itself is continuous.
+        #expect(SoftClip.apply(0) == 0)
+        #expect(SoftClip.apply(0.5) == 0.5)
+        #expect(SoftClip.apply(-0.85) == -0.85)
+        #expect(abs(SoftClip.apply(SoftClip.knee) - SoftClip.knee) < 1e-6)
+        // Never past full scale, whatever goes in, and symmetric.
+        for x in stride(from: Float(-40), through: 40, by: 0.01) {
+            let y = SoftClip.apply(x)
+            #expect(abs(y) <= 1.0)
+            #expect(SoftClip.apply(-x) == -y)
+        }
+        #expect(SoftClip.apply(.infinity) == 1)
+        #expect(SoftClip.apply(-.infinity) == -1)
+        #expect(SoftClip.apply(.nan) == 0)
+        // Monotonic through the knee: louder in is never quieter out.
+        var last: Float = -2
+        for x in stride(from: Float(0), through: 3, by: 0.001) {
+            let y = SoftClip.apply(x)
+            #expect(y >= last)
+            last = y
+        }
+    }
+
+    /// Volume changes ramp instead of jumping (no clicks) and land exactly on the target.
+    @Test func gainRampConverges() {
+        var ramp = GainRamp(gain: 0, rampFrames: 100)
+        ramp.target = 1
+        var values: [Float] = []
+        for _ in 0..<150 { values.append(ramp.next()) }
+        #expect(values[0] > 0 && values[0] < 0.05)
+        #expect(zip(values, values.dropFirst()).allSatisfy { $0 <= $1 })
+        #expect(values[99] == 1)
+        #expect(values.last == 1)
+        #expect(values.allSatisfy { $0 <= 1 })
+        // Down to silence: never undershoots.
+        ramp.target = 0
+        for _ in 0..<150 { values.append(ramp.next()) }
+        #expect(ramp.current == 0)
+        #expect(values.allSatisfy { $0 >= 0 })
+        // A jump to the boost range takes as many frames per unit of gain.
+        ramp.target = 1.5
+        var frames = 0
+        while ramp.current < 1.5 { _ = ramp.next(); frames += 1 }
+        #expect(frames == 150)
+        // A non-finite target is ignored.
+        ramp.target = .nan
+        #expect(ramp.next() == 1.5)
+    }
+
     @Test func settingsRejectBadData() throws {
         let (d, cleanup) = Fixtures.defaults()
         defer { cleanup() }
