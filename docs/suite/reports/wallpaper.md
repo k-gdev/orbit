@@ -222,3 +222,107 @@ During development I never launched Orbit, never opened a wallpaper window and n
 - Tests use `Fixtures.defaults()` and temp folders; snapshots use `SnapshotFixtures.defaults()`.
 - In the **shared** scratchpad I left a read-only display probe at `probe/displays.swift` and `probe/displays`, which I created before switching to my own `wallpaper-13/` folder. Delete them whenever you like.
 - My isolation hook blocked writing this report into the suite worktree, so this copy lives in my scratchpad. If the copy step failed, it is only at `scratchpad/wallpaper-13/wallpaper.md`.
+
+## Fix round 1
+
+Four commits on top of `ea77dd0` (branch `suite/wallpaper`, not rebased, not pushed):
+
+| SHA | Fix | Subject |
+|---|---|---|
+| `585a07d` | M4 | fix(wallpaper): one bad manifest entry no longer empties the aerial catalog |
+| `59444d4` | I1 + M3 | fix(wallpaper): never lose the user's desktop picture across Spaces; restore its options |
+| `dcc75fe` | M1 | fix(wallpaper): a window macOS never reports visible pauses after a grace period |
+| `ea6d5a0` | M7 | fix(wallpaper): no black flash before the first video frame |
+
+As before, I never opened a wallpaper window and never set a desktop picture. Only tests and snapshots ran.
+
+### I1: a desktop picture lost across Spaces, and stills deleted while still in use
+- **Root cause.** `NSWorkspace` reads and sets a display's desktop picture for the current Space only. The old `desktopPictureToRestore` forgot the saved picture before checking, and it judged "Orbit's still is showing" from the current Space alone. So quitting, turning Wallpaper off, or picking None while on a Space without the still dropped the saved picture for good. Cleanup also kept only the stills the current Space showed.
+- **New decision logic.** It lives in OrbitCore, `Sources/OrbitCore/Wallpaper/DesktopPictureLedger.swift`. `WallpaperSettings.desktopPictures` (stored as JSON under `wallpaper.desktopPictures`) replaces `previousDesktopPictures`.
+  - **What each display's entry holds:** the user's `original` picture with its options, the still names Orbit set on it (the last 8), and a `restorePending` flag.
+  - **`willSetStill`:**
+    - Remembers the current picture as the original when there is none yet.
+    - Also remembers it when the display was waiting for a restore. It had no wallpaper then, so a picture of the user's own is their latest choice.
+    - Never remembers one of Orbit's stills.
+    - Clears `restorePending`.
+    - It runs synchronously, before the still is generated, so a Space change during the write can't restore the original on a display that has a wallpaper.
+  - **`requestRestore` / `requestRestoreAll`** mark displays as waiting. They are used for None and for still frames turned off (on every rebuild), and `requestRestoreAll` when Wallpaper stops, which includes quit.
+  - **`restoreAction(for:current:)`** returns `.restore(original)` only when the display is waiting **and** the current Space shows one of Orbit's stills. Otherwise it returns `.leave`, and it **never forgets the entry**, because other Spaces may still show a still.
+  - **`protectedStills`** is every still of a waiting display. Cleanup now uses `StillFrame.removable(files, keeping:, ledger:)`, so those stills are never deleted.
+  - **`shouldReplaceStill`:** on a Space change, a display with a wallpaper gets its current still only where the Space shows an older still of Orbit's.
+  - **`move`** follows a display-key change.
+  - **Migration:** the first build's `wallpaper.previousDesktopPictures` is read once, when the new key is absent.
+- **App wiring.**
+  - `StillFrameWriter` uses the ledger: `apply`, `requestRestore`, `attemptPendingRestores`, `restoreAll`, `replaceStaleStills`, and `removeUnused` via `removable`.
+  - `WallpaperManager.activeSpaceChanged()` runs on every Space switch while Wallpaper is on. It re-evaluates playback, retries pending restores, and replaces stale stills.
+  - The next start retries too, through the rebuild's `requestRestore` / `apply`.
+  - The Settings footnote now says other Spaces get their picture back when you next visit them while Wallpaper is on.
+- **Tests** (`WallpaperSettingsTests`):
+  - `restoreAttemptedWhileAnotherSpaceIsCurrent`, the ruling's scenario: the still is set on Space 1, the restore is requested while Space 2 shows Kevo's photo, nothing is forgotten, the stills stay protected, and back on Space 1 the original returns with its options.
+  - `stillWaitingForRestoreIsNeverDeleted`
+  - `remembersTheUsersPictureBeforeTheFirstStill`
+  - `aNewWallpaperAfterARestoreRemembersTheCurrentPicture`
+  - `stopMarksEveryDisplayAndKeysCanMove`
+  - `replacesOnlyStaleStillsOnSpaceChange`
+  - `migratesTheFirstBuildsPictureList`
+  - `settingsRoundTrip`, updated for the new key and a ledger round trip with options.
+  - The two old tests built on the buggy semantics are gone: `remembersOnlyTheFirstDesktopPicture` and `restoresOnlyWhileOrbitsStillShows`.
+- **RED:** `swift build --build-tests` printed `error: cannot find 'DesktopPicture' in scope`, `error: cannot find 'DesktopPictureLedger' in scope`, `error: cannot find 'DesktopPictureOptions' in scope`, `error: type 'StillFrame' has no member 'removable'` and `error: value of type 'WallpaperSettings' has no member 'desktopPictures'`.
+- **GREEN:** `swift test --filter WallpaperSettingsTests` reports "Test run with 10 tests in 1 suite passed".
+
+### M3: restore the user's original options
+- `DesktopPictureOptions` (OrbitCore) stores the `NSImageScaling` raw value, `allowClipping`, and the fill colour as sRGB `[r, g, b, a]`. It is saved with the original picture.
+- In the app, `DesktopPictureOptions(workspace:)` / `.workspaceOptions` convert to and from `NSWorkspace.desktopImageOptions(for:)`.
+- A restore sets exactly the saved options. Entries migrated from the first build have none, so `[:]` is passed (system defaults).
+- Tests: `restoreAttemptedWhileAnotherSpaceIsCurrent` asserts the restored picture carries "Fit to Screen" (scaling 3), no clipping, and the dark fill colour; `settingsRoundTrip` round-trips them through defaults.
+
+### M4: one bad manifest entry emptied the catalog
+- Assets and categories now decode one at a time (a `Lenient<T>` wrapper), and each field decodes on its own:
+  - An entry that isn't an object is skipped.
+  - A missing, null or non-string `id` skips only that asset.
+  - `preferredOrder` accepts an integer, a fraction or numeric text; anything else counts as missing.
+  - A `categories` field that isn't an array is ignored; non-string items are dropped.
+  - A missing or malformed `assets` list gives `[]`.
+- Test: `AerialCatalogTests.oneBadEntryDoesNotEmptyTheCatalog`.
+- **RED:** `Expectation failed: (Set(aerials.map(\.id)) → []) == (["A", "B", "C", "D", "E"] …)`, i.e. the whole catalog came back empty.
+- **GREEN:** `swift test --filter AerialCatalogTests` reports "9 tests in 1 suite passed".
+- Re-checked against Kevo's real manifest, read-only, with the scratch driver: the same 4 aerials, 156 assets, 25 ms.
+
+### M1: the visibility safeguard could decode 4K forever
+- `WallpaperVisibility.isCovered(visibleNow:everVisible:secondsSinceShown:)` (OrbitCore):
+  - Visible now: not covered.
+  - Seen before and hidden now: covered.
+  - Never reported visible: plays for `grace` = 4 s, then counts as covered.
+- The window records when it was shown (`present()`) and logs once: "macOS never reported the window … visible within 4 s; pausing it as covered".
+- The manager re-evaluates 4.25 s after opening a window, since no notification may ever come.
+- Test: `WallpaperPausePolicyTests.unseenWindowCountsAsCoveredAfterTheGracePeriod`.
+- **RED:** `error: cannot find 'WallpaperVisibility' in scope`.
+- **GREEN:** part of the 36 below.
+
+### M7: black flash before the first frame
+- `WallpaperWindow` starts fully transparent: not opaque, with a clear window, layer and player-layer background. The desktop picture underneath shows through, and that is normally Orbit's still of the same video.
+- It turns opaque black only when KVO on `AVPlayerLayer.isReadyForDisplay` reports a frame. `attach()` goes transparent again while a new player gets ready.
+- This covers start, display reconnect after wake, hot-plug, and switching a display to another wallpaper.
+- No unit test: this is AppKit/AVFoundation behaviour with no pure logic to extract. It was checked by building, and needs a look on hardware.
+
+### Verification
+- `swift test --filter Wallpaper`: "Test run with 36 tests in 4 suites passed".
+- Full suite, once: "Test run with 598 tests in 29 suites passed after 80.182 seconds", with no failures this time.
+- `swift build` is clean, with no warnings in Wallpaper files.
+- `swift build -c release --arch arm64 --arch x86_64`: "Build complete!", exit 0, no errors. The log is at `scratchpad/wallpaper-13/fix1-release-build.txt`.
+- Snapshots look unchanged: `scratchpad/wallpaper-13/fix1-panel-light.png` and `fix1-settings-dark.png`.
+
+### Updates to the first report
+- **Builder's call 6** is replaced by M1: a window never reported visible pauses after 4 s.
+- **Builder's call 9** is replaced by I1: a restore waits per display and is retried on each Space while Wallpaper runs; nothing is forgotten.
+- **Builder's call 15:** the window starts transparent, not black (M7).
+- **Builder's call 16** is replaced: `desktopPictures` (`DesktopPictureLedger`) replaces `previousDesktopPictures` and stores options (M3).
+- **New builder's calls:**
+  - Ledger entries are never dropped automatically, because the public API can't enumerate Spaces. They are small, there is one per display, and each keeps 8 still names. Stills are protected only while the display waits for a restore.
+  - On a Space change, a display with a wallpaper only has stale Orbit stills replaced. A Space showing the user's own picture keeps it, so a Space that never got a still shows that picture in Mission Control.
+  - The visibility grace period is 4 s.
+- **Added to the hardware checklist:**
+  - Quit, turn Wallpaper off, or pick None while on a **different Space** from the one that got the still. That Space should get its original back, with its scaling and fill colour, when you next visit it while Wallpaper is on, and its still file must still exist until then.
+  - No black flash at start, after wake with all four DisplayPort displays, or on hot-plug.
+  - The grace-period log line should not appear in normal use. If it does, the window is under the system wallpaper.
+- **Known gap update:** if Wallpaper is turned off and stays off, Spaces other than the current one keep Orbit's still until Wallpaper runs again, because nothing runs while the feature is off.
