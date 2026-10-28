@@ -140,6 +140,13 @@ public struct DockPreviewLayout: Sendable, Equatable {
             || bridge.insetBy(dx: -slack, dy: -slack).contains(point)
     }
 
+    /// The index of the thumbnail under `point` (AppKit coordinates), or nil over the title line, a gap or
+    /// outside the strip.
+    public func thumbnailIndex(at point: CGPoint) -> Int? {
+        let local = CGPoint(x: point.x - stripFrame.minX, y: stripFrame.maxY - point.y)
+        return thumbnailFrames.firstIndex { $0.contains(local) }
+    }
+
     /// The gap between icon and strip, as wide as the icon.
     private var bridge: CGRect {
         switch edge {

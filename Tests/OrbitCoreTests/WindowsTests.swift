@@ -152,6 +152,19 @@ import Testing
         #expect(!side.hoverRegionContains(CGPoint(x: 2940 - Layout.iconGap / 2, y: 832 + 200)))
     }
 
+    /// The pointer (AppKit coordinates, y up) picks the thumbnail under it; the title line and gaps pick none.
+    @Test func thumbnailUnderPointer() throws {
+        let icon = CGRect(x: 1400, y: 4, width: 64, height: 64)
+        let layout = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        let strip = layout.stripFrame
+        func screen(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: strip.minX + x, y: strip.maxY - y) }
+        #expect(layout.thumbnailIndex(at: screen(20, 40)) == 0)
+        #expect(layout.thumbnailIndex(at: screen(250, 170)) == 1)
+        #expect(layout.thumbnailIndex(at: screen(239, 100)) == nil)   // the 10 pt gap
+        #expect(layout.thumbnailIndex(at: screen(20, 15)) == nil)     // the title line
+        #expect(layout.thumbnailIndex(at: CGPoint(x: icon.midX, y: icon.midY)) == nil)
+    }
+
     /// Thumbnails are captured at the size they are shown, never bigger than the window itself.
     @Test func captureSizeIsSmall() {
         #expect(Layout.capturePixelSize(for: CGSize(width: 1600, height: 1000), scale: 2) == PixelSize(width: 448, height: 280))
