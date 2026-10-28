@@ -229,4 +229,20 @@ import Testing
         #expect(SMCCode.celsius(type: "flt ", bytes: [0, 0]) == nil)
         #expect(SMCCode.celsius(type: "sp78", bytes: [1]) == nil)
     }
+
+    // MARK: Uptime
+
+    @Test func uptimeStrings() {
+        let minute = 60.0, hour = 3600.0, day = 86_400.0
+        #expect(UptimeFormatter.string(seconds: 3 * day + 4 * hour + 59 * minute) == "3 d 4 h")
+        #expect(UptimeFormatter.string(seconds: 5 * hour + 12 * minute + 30) == "5 h 12 m")
+        #expect(UptimeFormatter.string(seconds: 12 * minute + 59) == "12 m")
+        #expect(UptimeFormatter.string(seconds: 1 * day) == "1 d 0 h")
+        #expect(UptimeFormatter.string(seconds: 1 * hour) == "1 h 0 m")
+        #expect(UptimeFormatter.string(seconds: 59) == "< 1 m")
+        #expect(UptimeFormatter.string(seconds: 0) == "< 1 m")
+        #expect(UptimeFormatter.string(seconds: -5) == "< 1 m")
+        #expect(UptimeFormatter.string(seconds: .nan) == "< 1 m")
+        #expect(UptimeFormatter.string(seconds: 400 * day) == "400 d 0 h")
+    }
 }
