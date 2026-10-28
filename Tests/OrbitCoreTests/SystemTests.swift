@@ -141,4 +141,92 @@ import Testing
         #expect(SystemFormat.celsius(53.4) == "53°")
         #expect(SystemFormat.celsius(nil) == "—")
     }
+
+    // MARK: Temperatures
+
+    @Test func sensorClassification() {
+        // Present on Kevo's M5 Max (IOHID, PrimaryUsagePage 0xff00 / Usage 5): "PMU tdie1"…"PMU tdie14" (×3),
+        // "PMU tdev1"…"PMU tdev8" (read −9201), "PMU tcal" (×3), "NAND CH0 temp", "gas gauge battery".
+        #expect(SensorGroups.classify("PMU tdie1") == .soc)
+        #expect(SensorGroups.classify("PMU tdie14") == .soc)
+        #expect(SensorGroups.classify("PMU tcal") == nil)        // a calibration reference, not a die temperature
+        #expect(SensorGroups.classify("PMU tdev3") == nil)       // board thermistors (and garbage on the M5 Max)
+        #expect(SensorGroups.classify("NAND CH0 temp") == nil)
+        #expect(SensorGroups.classify("gas gauge battery") == nil)
+        // And its SMC float keys: 23 × "Tp??" (CPU) and 84 × "Tg??" (GPU); "TG0B" there is not a temperature.
+        #expect(SensorGroups.classify("Tp00") == .cpu)
+        #expect(SensorGroups.classify("Tp1g") == .cpu)
+        #expect(SensorGroups.classify("Te05") == .cpu)
+        #expect(SensorGroups.classify("Tg0C") == .gpu)
+        #expect(SensorGroups.classify("Tg7L") == .gpu)
+        #expect(["TG0B", "TB0T", "Tm00", "Ts0P", "TCMb", "TCHP", "TAOL"].allSatisfy { SensorGroups.classify($0) == nil })
+        // Older Apple Silicon names over IOHID (M1/M2).
+        #expect(SensorGroups.classify("pACC MTR Temp Sensor2") == .cpu)
+        #expect(SensorGroups.classify("eACC MTR Temp Sensor0") == .cpu)
+        #expect(SensorGroups.classify("GPU MTR Temp Sensor1") == .gpu)
+        #expect(SensorGroups.classify("SOC MTR Temp Sensor0") == .soc)
+        #expect(SensorGroups.classify("ANE MTR Temp Sensor1") == .soc)
+        #expect(SensorGroups.classify("ISP MTR Temp Sensor5") == .soc)
+        // Intel SMC keys.
+        #expect(SensorGroups.classify("TC0P") == .cpu)
+        #expect(SensorGroups.classify("TC0D") == .cpu)
+        #expect(SensorGroups.classify("TC3C") == .cpu)
+        #expect(SensorGroups.classify("TG0P") == .gpu)
+        #expect(SensorGroups.classify("TG0D") == .gpu)
+        #expect(SensorGroups.classify("TPCD") == .soc)
+        #expect(SensorGroups.classify("") == nil)
+        #expect(SensorGroups.classify("Something else") == nil)
+
+        let groups = SensorGroups(readings: [
+            SensorReading(name: "Tp00", celsius: 50), SensorReading(name: "Tp04", celsius: 56),
+            SensorReading(name: "Tg08", celsius: 49), SensorReading(name: "Tg0C", celsius: 51),
+            SensorReading(name: "PMU tdie1", celsius: 53), SensorReading(name: "PMU tdie1", celsius: 55),
+            SensorReading(name: "PMU tcal", celsius: 51.82), SensorReading(name: "gas gauge battery", celsius: 33),
+        ])
+        #expect(groups.cpu == SensorGroupStats(average: 53, maximum: 56, count: 2))
+        #expect(groups.gpu == SensorGroupStats(average: 50, maximum: 51, count: 2))
+        #expect(groups.soc == SensorGroupStats(average: 54, maximum: 55, count: 2))
+        #expect(groups[.gpu] == groups.gpu)
+        #expect(groups.headline == 53)
+        #expect(SensorKind.allCases.map(\.title) == ["CPU", "GPU", "SoC"])
+        // Without CPU sensors the headline falls back to the SoC die.
+        #expect(SensorGroups(readings: [SensorReading(name: "PMU tdie2", celsius: 47)]).headline == 47)
+        #expect(SensorGroups(readings: []).headline == nil)
+        #expect(SensorGroups(readings: []).isEmpty)
+    }
+
+    @Test func sensorIgnoresImplausible() {
+        let groups = SensorGroups(readings: [
+            SensorReading(name: "PMU tdie1", celsius: -9201.14),
+            SensorReading(name: "PMU tdie2", celsius: 0),
+            SensorReading(name: "PMU tdie3", celsius: 150),
+            SensorReading(name: "PMU tdie4", celsius: .nan),
+            SensorReading(name: "PMU tdie5", celsius: .infinity),
+            SensorReading(name: "PMU tdie6", celsius: 48),
+            SensorReading(name: "Tg00", celsius: 212),
+        ])
+        #expect(groups.soc == SensorGroupStats(average: 48, maximum: 48, count: 1))
+        #expect(groups.gpu == nil)
+        #expect(groups.cpu == nil)
+        #expect(SensorGroups.isPlausible(0.5))
+        #expect(SensorGroups.isPlausible(149.9))
+        #expect(!SensorGroups.isPlausible(0))
+        #expect(!SensorGroups.isPlausible(150))
+    }
+
+    @Test func smcDecoding() {
+        #expect(SMCCode.code("TC0P") == 0x5443_3050)
+        #expect(SMCCode.string(0x5443_3050) == "TC0P")
+        #expect(SMCCode.string(SMCCode.code("flt ")) == "flt ")
+        // Apple Silicon: little-endian Float32.
+        let bytes = withUnsafeBytes(of: Float(49.58).bitPattern.littleEndian) { Array($0) }
+        #expect(abs((SMCCode.celsius(type: "flt ", bytes: bytes) ?? 0) - 49.58) < 0.001)
+        // Intel: big-endian signed 8.8 fixed point.
+        #expect(SMCCode.celsius(type: "sp78", bytes: [0x2F, 0x80]) == 47.5)
+        #expect(SMCCode.celsius(type: "sp78", bytes: [0xFF, 0x00]) == -1)
+        // Anything else, or the wrong size, is not a temperature.
+        #expect(SMCCode.celsius(type: "ioft", bytes: [0, 0, 0, 0, 0, 0, 0, 0]) == nil)
+        #expect(SMCCode.celsius(type: "flt ", bytes: [0, 0]) == nil)
+        #expect(SMCCode.celsius(type: "sp78", bytes: [1]) == nil)
+    }
 }
