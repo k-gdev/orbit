@@ -12,7 +12,9 @@ import OrbitCore
 /// - A tap whose app returns to 100 % on the same device plays at unity for `releaseDelay` before it is
 ///   released, so dragging a slider across 100 doesn't tear down and rebuild the tap on the way.
 /// - A replacement tap (new device, new processes) is started before the old one is released, so the app
-///   is never heard unattenuated in between.
+///   is never heard unattenuated in between. `TapRoster` keeps that bookkeeping: a start releases every older
+///   tap of the app, a failure releases the failed tap and every older one, and releasing an app releases all
+///   its taps, so no replaced tap can outlive its app's release.
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
 /// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
 ///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
@@ -32,9 +34,12 @@ final class SoundEngine {
     let monitor = AudioProcessMonitor()
     private let settings: SoundSettings
     private let hardware: AudioHardware
-    private var taps: [String: AppAudioTap] = [:]
-    /// Taps being replaced, kept until their successor has started.
-    private var retiring: [ObjectIdentifier: AppAudioTap] = [:]
+    /// Each app's current tap and the replaced ones still alive (`TapRoster`), by serial number.
+    private var roster = TapRoster<Int>()
+    /// Every live tap by serial number (serials are never reused, unlike object addresses, so a late callback
+    /// from a released tap can't be mistaken for a newer one).
+    private var alive: [Int: AppAudioTap] = [:]
+    private var nextSerial = 1
     private var failures: [String: TapKey] = [:]
     private var releases: [String: DispatchWorkItem] = [:]
     /// The device each app last played on, kept while it is idle (`AppOutputMemory`).
@@ -72,7 +77,22 @@ final class SoundEngine {
     }
 
     /// The apps that currently have a tap.
-    var tappedBundleIDs: Set<String> { Set(taps.keys) }
+    var tappedBundleIDs: Set<String> { Set(roster.currentByApp.keys) }
+
+    /// The app's current tap.
+    private func currentTap(_ bundleID: String) -> AppAudioTap? {
+        roster.current(for: bundleID).flatMap { alive[$0] }
+    }
+
+    /// Every app's current tap.
+    private var currentTaps: [(bundleID: String, tap: AppAudioTap)] {
+        roster.currentByApp.compactMap { app, serial in alive[serial].map { (app, $0) } }
+    }
+
+    /// Invalidates (and forgets) the taps the roster handed back.
+    private func releaseTaps(_ serials: [Int]) {
+        for serial in serials { alive.removeValue(forKey: serial)?.invalidate() }
+    }
 
     /// The apps whose tap couldn't be built (or stopped working): their setting is not applied, and their row
     /// says so. Cleared when the device list or the permission changes, when the app's destination or
@@ -110,9 +130,9 @@ final class SoundEngine {
         activity = [:]
         activityCheck?.cancel()
         activityCheck = nil
-        let all = Array(taps.values) + Array(retiring.values)
-        taps = [:]
-        retiring = [:]
+        _ = roster.releaseAll()
+        let all = Array(alive.values)
+        alive = [:]
         all.forEach { $0.invalidate() }
         let deadline = DispatchTime.now() + Self.stopTimeout
         // Every tap releases promptly, including one whose queue waits in a TapAutoStart start (it is torn down
@@ -157,7 +177,7 @@ final class SoundEngine {
             onAppsChanged?()
         }
 
-        for (bundleID, tap) in taps where wanted[bundleID] == nil {
+        for (bundleID, tap) in currentTaps where wanted[bundleID] == nil {
             let plan = TapPlan(preference: settings.preference(for: bundleID), defaultOutputUID: followedOutput(for: bundleID),
                                availableOutputUIDs: available)
             let passingThroughUnity = permissionGranted && !plan.needsTap && plan.destinationUID == tap.destinationUID
@@ -172,7 +192,7 @@ final class SoundEngine {
 
         for (bundleID, want) in wanted {
             cancelRelease(bundleID)
-            if let tap = taps[bundleID], tap.destinationUID == want.key.destination, tap.processes == want.key.processes {
+            if let tap = currentTap(bundleID), tap.destinationUID == want.key.destination, tap.processes == want.key.processes {
                 tap.setGain(want.plan.gain)
                 continue
             }
@@ -194,7 +214,7 @@ final class SoundEngine {
         let apps = monitor.apps()
         let now = Date()
         var next: Date?
-        for (bundleID, tap) in taps {
+        for (bundleID, tap) in currentTaps {
             let playing = apps[bundleID]?.isPlaying ?? false
             var state = activity[bundleID] ?? TapActivity(now: now, isPlaying: playing)
             // Only a tap whose first start has returned is paused; before that its own start is already waiting
@@ -203,7 +223,7 @@ final class SoundEngine {
             activity[bundleID] = state
             if let check = state.nextCheck() { next = min(next ?? check, check) }
         }
-        activity = activity.filter { taps[$0.key] != nil }
+        activity = activity.filter { roster.current(for: $0.key) != nil }
         guard let next else { return }
         let work = DispatchWorkItem { [weak self] in self?.updateActivity() }
         activityCheck = work
@@ -230,36 +250,39 @@ final class SoundEngine {
         lastSystemOutput = current
     }
 
+    /// Builds a new current tap for the app; the one it replaces retires until the new one has started
+    /// (`TapRoster`): its start releases every older tap, its failure releases it and every older tap.
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
-        let previous = taps[bundleID]
-        if let previous { retiring[ObjectIdentifier(previous)] = previous }
-        var built: AppAudioTap?
-        let retire: @MainActor () -> Void = { [weak self] in
-            guard let previous else { return }
-            if self?.retiring.removeValue(forKey: ObjectIdentifier(previous)) != nil { previous.invalidate() }
-        }
+        let serial = nextSerial
+        nextSerial += 1
         let tap = AppAudioTap(bundleID: bundleID, processes: key.processes, destinationUID: key.destination, gain: gain,
-                              onStarted: retire,
+                              onStarted: { [weak self] in
+                                  guard let self else { return }
+                                  self.releaseTaps(self.roster.started(serial, for: bundleID))
+                              },
                               onFailure: { [weak self] _ in
-                                  retire()
-                                  guard let self, let built, self.taps[bundleID] === built else { return }
-                                  self.taps[bundleID] = nil
+                                  guard let self else { return }
+                                  let wasCurrent = self.roster.current(for: bundleID) == serial
+                                  self.releaseTaps(self.roster.failed(serial, for: bundleID))
+                                  guard wasCurrent else { return }
                                   self.activity[bundleID] = nil
-                                  built.invalidate()
                                   self.failures[bundleID] = key
                                   self.onAppsChanged?()
                               })
-        built = tap
-        taps[bundleID] = tap
+        alive[serial] = tap
+        roster.install(serial, for: bundleID)
         activity[bundleID] = TapActivity(now: Date(), isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
         onAppsChanged?()
     }
 
+    /// The app needs no tap: its current tap and every tap it replaced go (a tap released before it got going
+    /// reports nothing, so its predecessors can't wait for that).
     private func release(_ bundleID: String) {
         cancelRelease(bundleID)
-        guard let tap = taps.removeValue(forKey: bundleID) else { return }
+        let serials = roster.release(bundleID)
+        guard !serials.isEmpty else { return }
         activity[bundleID] = nil
-        tap.invalidate()
+        releaseTaps(serials)
         onAppsChanged?()
     }
 
@@ -282,7 +305,7 @@ final class SoundEngine {
     /// settings that should apply as soon as it starts playing. Listeners cost nothing until they fire.
     private func updateListening() {
         let pendingSettings = settings.appStates.values.contains { !$0.isDefault }
-        let wanted = isRunning && permissionGranted && (panelVisible || !taps.isEmpty || pendingSettings)
+        let wanted = isRunning && permissionGranted && (panelVisible || !roster.isEmpty || pendingSettings)
         if wanted && !monitor.isListening { monitor.startListening() }
         if !wanted && monitor.isListening { monitor.stopListening() }
     }

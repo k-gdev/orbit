@@ -153,6 +153,79 @@ public struct TapLifecycle: Equatable, Sendable {
     }
 }
 
+/// Which taps each app has: its current one, and the ones it replaced that are still alive.
+///
+/// A replacement tap is started before the one it replaces is released (so the app is never heard
+/// unattenuated in between); the old one "retires" until its successor has started. The rules here make sure
+/// no retired tap outlives that: a start releases every tap built before it, a failure releases the failed
+/// tap and every older one, and releasing an app releases its current tap and all its predecessors (a tap
+/// released before it got going reports nothing, so its predecessors can't wait for its report). Pure
+/// bookkeeping; the engine invalidates what the calls return.
+public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
+    /// Each app's current tap.
+    public private(set) var currentByApp: [String: ID] = [:]
+    /// Each app's replaced taps still alive, oldest first.
+    private var retiringByApp: [String: [ID]] = [:]
+
+    public init() {}
+
+    public func current(for app: String) -> ID? { currentByApp[app] }
+    public func retiring(for app: String) -> [ID] { retiringByApp[app] ?? [] }
+    /// Every tap still alive.
+    public var all: [ID] { Array(currentByApp.values) + retiringByApp.values.flatMap { $0 } }
+    public var isEmpty: Bool { currentByApp.isEmpty && retiringByApp.isEmpty }
+
+    /// `tap` becomes the app's current tap; the one it replaces (if any) retires.
+    public mutating func install(_ tap: ID, for app: String) {
+        if let old = currentByApp[app] { retiringByApp[app, default: []].append(old) }
+        currentByApp[app] = tap
+    }
+
+    /// `tap` has started: every tap of the app built before it is done. Returns those to release.
+    public mutating func started(_ tap: ID, for app: String) -> [ID] {
+        if currentByApp[app] == tap { return removeRetiring(app, upTo: nil) }
+        guard let index = retiringByApp[app]?.firstIndex(of: tap) else { return [] }
+        return removeRetiring(app, upTo: index)
+    }
+
+    /// `tap` failed (or stopped working): it and every tap of the app built before it are done (the app plays as
+    /// usual meanwhile). Returns those to release.
+    public mutating func failed(_ tap: ID, for app: String) -> [ID] {
+        if currentByApp[app] == tap {
+            currentByApp[app] = nil
+            return removeRetiring(app, upTo: nil) + [tap]
+        }
+        guard let index = retiringByApp[app]?.firstIndex(of: tap) else { return [] }
+        return removeRetiring(app, upTo: index + 1)
+    }
+
+    /// The app needs no tap any more: its current tap and every predecessor. Returns those to release.
+    public mutating func release(_ app: String) -> [ID] {
+        var released: [ID] = []
+        if let current = currentByApp.removeValue(forKey: app) { released.append(current) }
+        released += retiringByApp.removeValue(forKey: app) ?? []
+        return released
+    }
+
+    /// Everything (the feature is turned off, Orbit quits).
+    public mutating func releaseAll() -> [ID] {
+        let everything = all
+        currentByApp = [:]
+        retiringByApp = [:]
+        return everything
+    }
+
+    /// Removes and returns the app's retiring taps before index `end` (all of them when nil).
+    private mutating func removeRetiring(_ app: String, upTo end: Int?) -> [ID] {
+        guard var list = retiringByApp[app] else { return [] }
+        let count = min(end ?? list.count, list.count)
+        let removed = Array(list.prefix(count))
+        list.removeFirst(count)
+        retiringByApp[app] = list.isEmpty ? nil : list
+        return removed
+    }
+}
+
 /// The output devices each app last played on. Core Audio reports no devices for a process that is idle,
 /// so without this "Same as Output" would flip an idle app to the system output and back on every sound.
 /// An app's devices are kept while it has audio processes and forgotten when they are gone.

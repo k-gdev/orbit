@@ -828,6 +828,85 @@ extension SoundTests {
             let d2 = failed.invalidate(); #expect(d2 == .alreadyDone)
         }
 
+        /// R1: a replaced tap stays alive only until its successor starts, and never outlives its app's release.
+        /// Scenario 1: Chrome's paused tap A (Headset, 50 %) is replaced by B (Speakers), whose first start waits;
+        /// Chrome is reset to 100 % before B starts. Both A and B go: nothing is left to play Chrome at 50 %.
+        @Test func releasingAnAppReleasesItsReplacedTaps() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            let a = roster.started("A", for: "chrome"); #expect(a.isEmpty)
+            roster.install("B", for: "chrome")
+            #expect(roster.current(for: "chrome") == "B")
+            #expect(roster.retiring(for: "chrome") == ["A"])
+            let released = roster.release("chrome")
+            #expect(Set(released) == ["A", "B"])
+            #expect(roster.isEmpty)
+            // B never reports (released before it got going); a late report of either changes nothing.
+            let lateB = roster.started("B", for: "chrome"); #expect(lateB.isEmpty)
+            let lateA = roster.failed("A", for: "chrome"); #expect(lateA.isEmpty)
+        }
+
+        /// Scenario 2: released while B is still being built (no start yet): same rule, A goes with it.
+        @Test func releasingDuringCreationReleasesThePredecessor() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            roster.install("B", for: "chrome")                    // B is still being created
+            #expect(Set(roster.release("chrome")) == ["A", "B"])
+            #expect(roster.current(for: "chrome") == nil)
+            #expect(roster.retiring(for: "chrome").isEmpty)
+            // Other apps are untouched.
+            roster.install("X", for: "discord")
+            roster.install("C", for: "chrome")
+            #expect(roster.release("chrome") == ["C"])
+            #expect(roster.current(for: "discord") == "X")
+        }
+
+        /// Scenario 3: a chain A → B → C where C starts before B did. C's start releases every tap built before it
+        /// (A and B), so A can't keep playing alongside C. A start of B arriving after C was built releases only
+        /// what came before B.
+        @Test func aStartReleasesEveryOlderTap() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            roster.install("B", for: "chrome")
+            roster.install("C", for: "chrome")
+            #expect(roster.retiring(for: "chrome") == ["A", "B"])
+            let c = roster.started("C", for: "chrome")
+            #expect(Set(c) == ["A", "B"])
+            #expect(roster.retiring(for: "chrome").isEmpty)
+            #expect(roster.current(for: "chrome") == "C")
+
+            var other = TapRoster<String>()
+            other.install("A", for: "chrome")
+            other.install("B", for: "chrome")
+            other.install("C", for: "chrome")
+            let b = other.started("B", for: "chrome")            // B started, but C is already current
+            #expect(b == ["A"])
+            #expect(other.retiring(for: "chrome") == ["B"])
+            let c2 = other.started("C", for: "chrome")
+            #expect(c2 == ["B"])
+            #expect(Set(other.all) == ["C"])
+        }
+
+        /// A failed current tap goes with every tap built before it (the app then plays as usual); a failed
+        /// retiring tap takes only the older ones. `releaseAll` empties everything (feature off, quit).
+        @Test func aFailureReleasesItAndOlderTaps() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            roster.install("B", for: "chrome")
+            roster.install("C", for: "chrome")
+            #expect(Set(roster.failed("C", for: "chrome")) == ["A", "B", "C"])
+            #expect(roster.isEmpty)
+            roster.install("A", for: "chrome")
+            roster.install("B", for: "chrome")
+            roster.install("C", for: "chrome")
+            #expect(Set(roster.failed("B", for: "chrome")) == ["A", "B"])
+            #expect(roster.current(for: "chrome") == "C")
+            roster.install("X", for: "discord")
+            #expect(Set(roster.releaseAll()) == ["C", "X"])
+            #expect(roster.isEmpty)
+            #expect(roster.currentByApp.isEmpty)
+        }
+
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {
             #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)
