@@ -233,6 +233,30 @@ import Testing
         #expect(policy.hoverChanged(to: 11, delay: 0) == .schedule(pid: 11, after: 0))
     }
 
+    // MARK: Thumbnail cache
+
+    /// Thumbnails are reused for a few seconds, then captured again; the cache never grows without bound.
+    @Test func thumbnailCacheExpires() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: 3, capacity: 2)
+        cache.insert("inbox", for: 41, now: t0)
+        #expect(cache.value(for: 41, now: t0.addingTimeInterval(2.9)) == "inbox")
+        #expect(cache.value(for: 41, now: t0.addingTimeInterval(3.1)) == nil)
+        #expect(cache.count == 0)
+        // Over capacity, the oldest entry goes first.
+        cache.insert("a", for: 1, now: t0)
+        cache.insert("b", for: 2, now: t0.addingTimeInterval(1))
+        cache.insert("c", for: 3, now: t0.addingTimeInterval(2))
+        #expect(cache.count == 2)
+        #expect(cache.value(for: 1, now: t0.addingTimeInterval(2)) == nil)
+        #expect(cache.value(for: 3, now: t0.addingTimeInterval(2)) == "c")
+        // Replacing a key restarts its lifetime.
+        cache.insert("b2", for: 2, now: t0.addingTimeInterval(2.5))
+        #expect(cache.value(for: 2, now: t0.addingTimeInterval(5)) == "b2")
+        cache.removeAll()
+        #expect(cache.count == 0)
+    }
+
     // MARK: Running apps
 
     private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
