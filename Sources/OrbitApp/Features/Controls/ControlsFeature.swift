@@ -38,7 +38,11 @@ final class ControlsFeature: SuiteFeature {
             context?.closePanel()
             context?.openSettings(.feature(.controls))
         }
-        model.permissionGranted = { [weak context] in context?.permissions.status(.screenRecording) == .granted }
+        model.permissionGranted = { [weak context] in
+            // Opening the panel doesn't activate Orbit, so re-read (no prompt) before showing the hint.
+            context?.permissions.refresh()
+            return context?.permissions.status(.screenRecording) == .granted
+        }
     }
 
     func start() {
