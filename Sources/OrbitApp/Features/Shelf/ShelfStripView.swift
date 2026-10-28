@@ -199,7 +199,8 @@ struct ShelfTile: View {
                             onOpen: { if !offline { NSWorkspace.shared.open(url) } },
                             onRemove: { model.remove(url) },
                             onMovedOut: { model.verifyMoved($0) },
-                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) }) },
+                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) },
+                                                        trash: { model.moveToTrash(url) }) },
                             simulatesHover: previewHover == url)
         }
         .frame(width: Self.size.width, height: Self.size.height)
@@ -232,21 +233,38 @@ struct ShelfOfflineBadge: View {
     }
 }
 
-/// The right-click menu of a shelf entry. An item that can't be reached right now offers only what still works.
+/// The right-click menu of a shelf entry. What it offers is decided by `ShelfMenuLayout`: an item that can't be
+/// reached right now offers only what still works.
 enum ShelfMenus {
-    static func entries(for url: URL, offline: Bool = false, remove: @escaping () -> Void) -> [ShelfMenuEntry] {
-        let copyPath = ShelfMenuEntry.action("Copy Path") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(url.path, forType: .string)
+    static func entries(for url: URL, offline: Bool = false, remove: @escaping () -> Void,
+                        trash: @escaping () -> Void) -> [ShelfMenuEntry] {
+        ShelfMenuLayout.items(offline: offline).map { item in
+            switch item {
+            case .separator:
+                return .separator
+            case .command(let command):
+                return .action(command.title, action(for: command, url: url, remove: remove, trash: trash))
+            }
         }
-        if offline { return [copyPath, .separator, .action("Remove from Shelf", remove)] }
-        return [
-            .action("Open") { NSWorkspace.shared.open(url) },
-            .action("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) },
-            copyPath,
-            .separator,
-            .action("Remove from Shelf", remove),
-        ]
+    }
+
+    private static func action(for command: ShelfMenuCommand, url: URL, remove: @escaping () -> Void,
+                               trash: @escaping () -> Void) -> () -> Void {
+        switch command {
+        case .open:
+            return { NSWorkspace.shared.open(url) }
+        case .showInFinder:
+            return { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        case .copyPath:
+            return {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url.path, forType: .string)
+            }
+        case .moveToTrash:
+            return trash
+        case .removeFromShelf:
+            return remove
+        }
     }
 }
 

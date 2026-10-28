@@ -97,7 +97,8 @@ private struct ShelfListRow: View {
                             onOpen: { if !offline { NSWorkspace.shared.open(url) } },
                             onRemove: { model.remove(url) },
                             onMovedOut: { model.verifyMoved($0) },
-                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) }) })
+                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) },
+                                                        trash: { model.moveToTrash(url) }) })
         }
         .frame(height: 40)
     }

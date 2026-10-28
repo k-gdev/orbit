@@ -5,12 +5,15 @@ import UniformTypeIdentifiers
 
 /// What is on the shelf, as the floating shelf and the menu bar tab show it, persisted through a
 /// `ShelfStore` after every change. The shelf holds references to the original files: nothing here moves,
-/// copies or deletes a file. Main actor only.
+/// copies or deletes a file, except `moveToTrash` when the user asks for it. Main actor only.
 ///
 /// Nothing in here touches the file system on the main thread: the saved list is read, saved, and every
 /// item is checked on background threads (a file on a network share that has gone away can take a long
 /// time to answer, and a view must never wait for that). Items whose volume is offline are kept and shown
 /// dimmed (`unreachable`); only a file that is gone from a volume that is up is dropped.
+///
+/// While the floating shelf is on screen the folders of the items are watched (`startWatching`), so a file that
+/// is trashed, moved or renamed leaves or follows right away instead of when the shelf is next shown.
 @MainActor
 final class ShelfModel: ObservableObject {
     /// The items, oldest first.
@@ -33,6 +36,13 @@ final class ShelfModel: ObservableObject {
     private var saveAfterLoad = false
     private var loadTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
+    /// Something asked for a check while one was already running. That check may have looked at a file before
+    /// it changed, so one more follows it.
+    private var rescanWhenDone = false
+    private var isWatching = false
+    private lazy var watcher = ShelfFolderWatcher { [weak self] in
+        Task { @MainActor in self?.watchedFilesChanged() }
+    }
     private let saveQueue = DispatchQueue(label: "com.kevo.orbit.shelf.save", qos: .utility)
     private let pendingSaves = DispatchGroup()
 
@@ -44,6 +54,9 @@ final class ShelfModel: ObservableObject {
         self.store = store
         isLoaded = store == nil
     }
+
+    /// Shows a message to the user (set by the feature; the model has no window of its own to put it in).
+    var showToast: (ToastContent) -> Void = { _ in }
 
     /// A model over fixed URLs that never touches disk, for snapshots. The URLs need not exist.
     static func fixture(_ urls: [URL], unreachable: Set<URL> = []) -> ShelfModel {
@@ -76,6 +89,7 @@ final class ShelfModel: ObservableObject {
                 self.saveAfterLoad = false
                 self.save()
             }
+            self.updateWatch()
             self.refreshAvailability()
         }
     }
@@ -87,6 +101,8 @@ final class ShelfModel: ObservableObject {
         loadTask = nil
         scanTask?.cancel()
         scanTask = nil
+        rescanWhenDone = false
+        stopWatching()
         flush()
         guard store != nil else { return }
         isLoaded = false
@@ -106,6 +122,7 @@ final class ShelfModel: ObservableObject {
         let current = Set(urls)
         if !unreachable.isSubset(of: current) { unreachable.formIntersection(current) }
         save()
+        updateWatch()
     }
 
     /// Writes the list on a background queue (in order; the last write wins).
@@ -148,20 +165,87 @@ final class ShelfModel: ObservableObject {
         commit()
     }
 
+    /// The one thing here that touches a file, and only because the user chose "Move to Trash" in an item's
+    /// menu: the file goes to the Trash (where Finder's Put Back finds it) and, once it is there, off the shelf.
+    /// If the Trash refuses (no permission, a locked file, a read-only volume) the file stays on the shelf and a
+    /// message says why; and since a failure may also mean the file is already gone, the items are checked again.
+    func moveToTrash(_ url: URL) {
+        guard items.contains(url), !unreachable.contains(url) else { return }
+        Task { [weak self] in
+            do {
+                try await Self.recycle(url)
+                self?.remove(url)
+            } catch {
+                Log.error("shelf: couldn't move \(url.path) to the Trash: \(error.localizedDescription)")
+                self?.showToast(ToastContent(message: "Couldn't move \(url.lastPathComponent) to the Trash",
+                                             detail: error.localizedDescription, isError: true))
+                self?.refreshAvailability()
+            }
+        }
+    }
+
+    private static func recycle(_ url: URL) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            NSWorkspace.shared.recycle([url]) { @Sendable _, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
     // MARK: Looking at the files
 
-    /// Checks every item off the main thread (when the shelf is shown, and when the tab appears). A file that
-    /// is gone from a volume that is up leaves the shelf (or is followed to where it moved); a file on a
-    /// volume that is offline, or that can't be checked in time, stays and is marked unreachable.
+    /// Checks every item off the main thread (when the shelf is shown, when the tab appears, and while the shelf
+    /// is open whenever one of its files changes on disk). A file that is gone from a volume that is up leaves
+    /// the shelf (or is followed to where it moved); a file on a volume that is offline, or that can't be
+    /// checked in time, stays and is marked unreachable. Asking while a check is running doesn't start a second
+    /// one in parallel: one more check follows the running one.
     func refreshAvailability() {
-        guard let store, isLoaded, scanTask == nil, !items.isEmpty else { return }
+        guard let store, isLoaded, !items.isEmpty else { return }
+        guard scanTask == nil else {
+            rescanWhenDone = true
+            return
+        }
         let candidates = items.urls
         scanTask = Task { [weak self] in
             let outcomes = await ShelfScan.scan(candidates, store: store, timeout: Self.scanTimeout)
             guard let self, !Task.isCancelled else { return }
             self.scanTask = nil
             self.apply(outcomes, to: candidates)
+            if self.rescanWhenDone {
+                self.rescanWhenDone = false
+                self.refreshAvailability()
+            }
         }
+    }
+
+    // MARK: Watching the files
+
+    /// Starts watching the folders of the items for changes (the floating shelf was shown). Each change to one
+    /// of the files, however many at once, runs one `refreshAvailability`.
+    func startWatching() {
+        guard store != nil, !isWatching else { return }
+        isWatching = true
+        updateWatch()
+    }
+
+    /// Stops watching (the shelf was hidden or closed, or the feature stopped).
+    func stopWatching() {
+        guard isWatching else { return }
+        isWatching = false
+        watcher.stop()
+    }
+
+    /// Points the watcher at the folders the items are in now. Items that can't be reached are left out, so a
+    /// drive that has gone away is never waited on; they are checked again when the shelf is next shown. Does
+    /// nothing when the folders are the same as before.
+    private func updateWatch() {
+        guard isWatching, isLoaded else { return }
+        watcher.watch(ShelfWatchPlan(items: items.urls, skipping: unreachable))
+    }
+
+    private func watchedFilesChanged() {
+        guard isWatching else { return }
+        refreshAvailability()
     }
 
     private func apply(_ outcomes: [ShelfScan.Outcome], to scanned: [URL]) {
@@ -193,7 +277,7 @@ final class ShelfModel: ObservableObject {
         let current = Set(items.urls)
         let newOffline = offline.intersection(current)
         if newOffline != unreachable { unreachable = newOffline }
-        if changed { commit() }
+        if changed { commit() } else { updateWatch() } // an item may have become unreachable, or reachable again
         primeIcons(for: present)
     }
 

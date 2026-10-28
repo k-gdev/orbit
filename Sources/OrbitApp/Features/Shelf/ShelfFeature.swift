@@ -28,6 +28,7 @@ final class ShelfFeature: SuiteFeature {
         // The store only remembers where to write; nothing is read or created until `start()` / the first change.
         let directory = context.supportDirectory.appending(path: FeatureID.shelf.title, directoryHint: .isDirectory)
         model = ShelfModel(store: ShelfStore(directory: directory))
+        model.showToast = { [weak context] content in context?.toasts.show(content) }
         window = ShelfWindowController(model: model, settings: settings)
         window.onDrop = { [weak self] urls in self?.model.add(urls) }
         watcher.onShake = { [weak self] point in self?.window.show(.nearPoint(point)) }

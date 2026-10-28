@@ -209,6 +209,7 @@ final class ShelfWindowController: NSObject, NSWindowDelegate {
         panel.setFrame(frame, display: true)
         panel.orderFrontRegardless()
         model.isShelfOpen = true
+        model.startWatching() // files that leave while the shelf is up leave it too
     }
 
     func hide() {
@@ -218,6 +219,7 @@ final class ShelfWindowController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
         model.isShelfOpen = false
         model.isDropTargeted = false
+        model.stopWatching()
     }
 
     func toggle(_ placement: Placement) {
@@ -245,6 +247,7 @@ final class ShelfWindowController: NSObject, NSWindowDelegate {
         panel = nil
         model.isShelfOpen = false
         model.isDropTargeted = false
+        model.stopWatching()
     }
 
     // MARK: Window
