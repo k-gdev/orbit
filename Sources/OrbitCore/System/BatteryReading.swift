@@ -77,13 +77,14 @@ public enum BatteryParser {
     /// Every battery, de-duplicated: the Mac's first, then devices by name. `powerSources` are
     /// `IOPSGetPowerSourceDescription` dictionaries (internal battery and accessories); `registry` are the
     /// property dictionaries of IORegistry HID services (`AppleDeviceManagementHIDEventService`), of which
-    /// only those with `BatteryPercent` count. A registry device that is also a power source is dropped.
+    /// only those with `BatteryPercent` count. A registry device that is also a power source (the same name,
+    /// ignoring case and curly apostrophes; never an empty one) is dropped.
     public static func readings(powerSources: [[String: Any]], registry: [[String: Any]]) -> [BatteryReading] {
         let sources = self.powerSources(powerSources)
-        let sourceNames = sources.map { normalized($0.name) }
+        let sourceNames = Set(sources.map { normalized($0.name) }.filter { !$0.isEmpty })
         let devices = registryDevices(registry).filter { device in
             let name = normalized(device.name)
-            return !sourceNames.contains { $0 == name || $0.contains(name) }
+            return name.isEmpty || !sourceNames.contains(name)
         }
         return sorted(sources + devices)
     }
@@ -123,7 +124,8 @@ public enum BatteryParser {
         var readings: [BatteryReading] = []
         for entry in properties {
             guard let level = int(entry["BatteryPercent"]) else { continue }
-            let name = (entry["Product"] as? String) ?? "Bluetooth Device"
+            let product = (entry["Product"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+            let name = product.isEmpty ? "Bluetooth Device" : product
             let address = (entry["DeviceAddress"] as? String).map(normalizedAddress)
             let id = address.map { "bt:\($0)" } ?? "hid:\(normalized(name))"
             guard seen.insert(id).inserted else { continue }

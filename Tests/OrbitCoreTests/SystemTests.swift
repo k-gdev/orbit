@@ -388,6 +388,20 @@ import Testing
         #expect(BatteryParser.registryDevices([["Product": "Xbox Wireless Controller", "BatteryPercent": 50]]).first?.kind == .gameController)
         #expect(BatteryParser.registryDevices([["Product": "Beats Studio Buds", "BatteryPercent": 50]]).first?.kind == .headphones)
         #expect(BatteryParser.registryDevices([["Product": "Pen", "BatteryPercent": 50]]).first?.kind == .other)
+
+        // Cross-source de-dup is an exact (case- and apostrophe-insensitive) name match only: a registry device
+        // whose name is merely part of a power source's name stays, and so does one with no name.
+        let magicKeyboardSource: [String: Any] = [
+            "Type": "Accessory Source", "Name": "Kevo’s Magic Keyboard", "Accessory Category": "Keyboard",
+            "Accessory Identifier": "AB12", "Current Capacity": 80, "Max Capacity": 100,
+        ]
+        let loose = BatteryParser.readings(powerSources: [magicKeyboardSource], registry: [
+            ["Product": "Magic Keyboard", "BatteryPercent": 79, "DeviceAddress": "aa-bb-cc-dd-ee-01"],
+            ["Product": "", "BatteryPercent": 40, "DeviceAddress": "aa-bb-cc-dd-ee-02"],
+            ["Product": "kevo's magic keyboard", "BatteryPercent": 80, "DeviceAddress": "aa-bb-cc-dd-ee-03"],
+        ])
+        #expect(loose.map(\.name) == ["Bluetooth Device", "Kevo’s Magic Keyboard", "Magic Keyboard"])
+        #expect(loose.first?.id == "bt:aa:bb:cc:dd:ee:02")
     }
 
     // MARK: Settings
