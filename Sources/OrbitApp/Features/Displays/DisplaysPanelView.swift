@@ -50,6 +50,9 @@ private struct DisplayTileView: View {
                 Spacer(minLength: 8)
                 DisplayModeMenu(model: model, tile: tile)
             }
+            if model.confirmation?.displayID == tile.id {
+                ResolutionConfirmCard(model: model, compact: true)
+            }
             if tile.control.hasPill {
                 let range = model.range(for: tile)
                 PillSlider(value: Binding(get: { model.brightness(of: tile.id) }, set: { model.setBrightness($0, for: tile.id) }),

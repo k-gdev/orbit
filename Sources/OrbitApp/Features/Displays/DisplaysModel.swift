@@ -25,13 +25,21 @@ final class DisplaysDriver {
         }
     }
 
-    func apply(_ mode: RawDisplayMode, to id: CGDirectDisplayID) -> Bool { DisplayModeService.apply(mode, to: id) }
+    let confirmWindow = ResolutionConfirmWindow()
+
+    func apply(_ mode: RawDisplayMode, to id: CGDirectDisplayID, permanently: Bool) -> Bool {
+        DisplayModeService.apply(mode, to: id, permanently: permanently)
+    }
+
+    /// Puts every display back to its saved (permanent) configuration: the last resort for a revert.
+    func restorePermanentConfiguration() { CGRestorePermanentDisplayConfiguration() }
 
     func modes(for id: CGDirectDisplayID) -> DisplayModeList { DisplayModeService.list(for: id) }
 
     func stop() {
         ddc.invalidate()
         gamma.restoreAll()
+        confirmWindow.close()
     }
 }
 
@@ -83,11 +91,14 @@ final class DisplaysModel: ObservableObject {
     /// feature is off. Fixture models leave it false and never look at the hardware.
     private let readsCatalogWhenIdle: Bool
 
-    init(settings: DisplaySettings, driver: DisplaysDriver?, tiles: [Tile] = [], readsCatalogWhenIdle: Bool = false) {
+    /// `confirmation` is for fixtures (a pending "Keep this resolution?" in snapshots).
+    init(settings: DisplaySettings, driver: DisplaysDriver?, tiles: [Tile] = [], readsCatalogWhenIdle: Bool = false,
+         confirmation: ResolutionConfirmation? = nil) {
         self.settings = settings
         self.driver = driver
         self.tiles = tiles
         self.readsCatalogWhenIdle = readsCatalogWhenIdle
+        self.confirmation = confirmation
         self.hasScanned = !tiles.isEmpty || driver == nil
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         settings.$useGammaFallback.dropFirst().removeDuplicates().sink { [weak self] on in
@@ -238,6 +249,7 @@ final class DisplaysModel: ObservableObject {
     func displaysChanged(refreshTiles: Bool) {
         startOver()
         applySavedSoftwareDims()
+        driver?.confirmWindow.reposition()   // the changed display may have a new size
         if refreshTiles { refresh() }
     }
 
@@ -359,17 +371,74 @@ final class DisplaysModel: ObservableObject {
 
     // MARK: Resolution
 
+    /// A resolution change waiting for Keep / Revert (applied for this session only meanwhile).
+    @Published private(set) var confirmation: ResolutionConfirmation?
+    private var confirmationTimer: DispatchWorkItem?
+
+    /// Switches `id` to `entry` for this session only and asks "Keep this resolution?" for 15 s; Keep makes it
+    /// permanent, Revert or no answer goes back. A change still waiting is reverted first.
     func select(_ entry: DisplayModeEntry, for id: CGDirectDisplayID) {
         guard !entry.isCurrent, let driver, let index = tiles.firstIndex(where: { $0.id == id }) else { return }
-        if driver.apply(entry.mode, to: id) {
-            tiles[index].modes = driver.modes(for: id)
+        if confirmation != nil { revertResolution() }
+        guard let previous = driver.modes(for: id).current?.mode ?? tiles[index].modes.current?.mode else {
+            Log.info("displays: not switching \(tiles[index].title): its current mode is unknown, so it couldn't be reverted")
+            return
         }
+        guard driver.apply(entry.mode, to: id, permanently: false) else { return }
+        let pending = ResolutionConfirmation(displayID: id, displayTitle: tiles[index].title, previous: previous, proposed: entry.mode,
+                                             proposedLabel: entry.label, startedAt: Date())
+        confirmation = pending
+        refreshModes(id)
+        driver.confirmWindow.show(model: self, on: id)
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.confirmation == pending else { return }
+                Log.info("displays: no answer to Keep this resolution? for \(pending.displayTitle); reverting")
+                self.revertResolution()
+            }
+        }
+        confirmationTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + ResolutionConfirmation.duration, execute: work)
+    }
+
+    /// Keep: the new mode becomes permanent.
+    func keepResolution() {
+        guard let pending = endConfirmation() else { return }
+        if driver?.apply(pending.proposed, to: pending.displayID, permanently: true) != true {
+            Log.info("displays: couldn't save \(pending.proposedLabel) for \(pending.displayTitle) permanently; it stays for this session")
+        }
+        refreshModes(pending.displayID)
+    }
+
+    /// Revert (or the countdown ran out): the previous mode comes back.
+    func revertResolution() {
+        guard let pending = endConfirmation(), let driver else { return }
+        if !driver.apply(pending.previous, to: pending.displayID, permanently: false) {
+            Log.info("displays: couldn't switch \(pending.displayTitle) back directly; restoring the saved display configuration")
+            driver.restorePermanentConfiguration()
+        }
+        refreshModes(pending.displayID)
+    }
+
+    private func endConfirmation() -> ResolutionConfirmation? {
+        confirmationTimer?.cancel()
+        confirmationTimer = nil
+        driver?.confirmWindow.close()
+        defer { confirmation = nil }
+        return confirmation
+    }
+
+    private func refreshModes(_ id: CGDirectDisplayID) {
+        guard let driver, let index = tiles.firstIndex(where: { $0.id == id }) else { return }
+        tiles[index].modes = driver.modes(for: id)
     }
 
     // MARK: Lifecycle
 
-    /// The feature stopped: drop queued writes and retries, give gamma back, release DDC services.
+    /// The feature stopped (or Orbit quits): revert a resolution change nobody kept, drop queued writes and
+    /// retries, give gamma back, release DDC services.
     func stop() {
+        if confirmation != nil { revertResolution() }
         writeTimer?.cancel()
         writeTimer = nil
         pendingWrites.removeAll()

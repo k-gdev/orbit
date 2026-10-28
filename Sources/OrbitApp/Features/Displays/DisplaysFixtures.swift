@@ -1,16 +1,29 @@
 import CoreGraphics
+import Foundation
 import OrbitCore
 
 /// Snapshot data shaped like Kevo's desk (plus the MacBook's own panel, which is closed tonight): the two
 /// ThinkVision P27u-20 replying "150 of 100" over DDC, the AOC at 100 of 100, and the Acer that doesn't
 /// answer DDC and is dimmed in software. No hardware is touched; settings live in a throwaway suite.
+///
+/// `ORBIT_DISPLAYS_SNAPSHOT=busy` in the environment of `Orbit --snapshot-panel displays` draws the busy
+/// variant instead: a "Keep this resolution?" pending on the AOC (inline row, plus the floating card under the
+/// tiles so its look can be checked) and the BetterDisplay hint. Only the snapshot CLI reads it.
 @MainActor
 enum DisplaysFixtures {
+    static var isBusyVariant: Bool { ProcessInfo.processInfo.environment["ORBIT_DISPLAYS_SNAPSHOT"] == "busy" }
+
     static func model() -> DisplaysModel {
         let settings = DisplaySettings(defaults: SnapshotFixtures.defaults())
         settings.lastSoftwareDim = ["fixture-acer": 80]
         settings.learn(maximum: 150, reported: 100, for: "fixture-tv-left")
-        return DisplaysModel(settings: settings, driver: nil, tiles: tiles)
+        guard isBusyVariant else { return DisplaysModel(settings: settings, driver: nil, tiles: tiles) }
+        let aoc = qhdModes(current: 240, rates: [240, 144, 120, 60])
+        let previous = aoc.current?.mode ?? RawDisplayMode(id: 0, width: 2560, height: 1440, pixelWidth: 2560, pixelHeight: 1440, refreshRate: 240)
+        let proposed = RawDisplayMode(id: 1, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080, refreshRate: 60)
+        let pending = ResolutionConfirmation(displayID: 3, displayTitle: "Q27G4ZD", previous: previous, proposed: proposed,
+                                             proposedLabel: "1920 × 1080", startedAt: Date().addingTimeInterval(-3))
+        return DisplaysModel(settings: settings, driver: nil, tiles: tiles, confirmation: pending)
     }
 
     static let tiles: [DisplaysModel.Tile] = [

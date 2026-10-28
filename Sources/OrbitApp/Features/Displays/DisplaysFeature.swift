@@ -93,7 +93,15 @@ final class DisplaysFeature: SuiteFeature {
 
     static func snapshotViews() -> FeatureSnapshotViews {
         let model = DisplaysFixtures.model()
-        return FeatureSnapshotViews(panel: DisplaysPanelView(model: model), settings: DisplaysSettingsView(model: model))
+        guard DisplaysFixtures.isBusyVariant else {
+            return FeatureSnapshotViews(panel: DisplaysPanelView(model: model), settings: DisplaysSettingsView(model: model))
+        }
+        // The busy variant also draws the floating confirm card (live, it sits centred on the changed display).
+        let panel = VStack(spacing: 12) {
+            DisplaysPanelView(model: model)
+            ResolutionConfirmCard(model: model).environment(\.glassRendering, .flat)
+        }
+        return FeatureSnapshotViews(panel: panel, settings: DisplaysSettingsView(model: model))
     }
 
     private var idle: DisplaysModel?
