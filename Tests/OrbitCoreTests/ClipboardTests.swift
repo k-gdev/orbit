@@ -45,6 +45,151 @@ import Testing
         }
     }
 
+    // MARK: History
+
+    static let base = Date(timeIntervalSince1970: 2_000_000)
+
+    /// A text entry made `minutesAgo` before `base`.
+    static func item(_ text: String, minutesAgo: Double = 0, source: String? = nil, pinned: Bool = false,
+                     size: Int? = nil) -> ClipboardItem {
+        var item = ClipboardCapture.text(text, sourceBundleID: source.map { "com.example.\($0)" }, sourceName: source,
+                                         date: base.addingTimeInterval(-minutesAgo * 60)).makeItem(payloadFile: "\(text).txt")
+        item.pinned = pinned
+        if let size { item.byteSize = size }
+        return item
+    }
+
+    @Suite struct ClipboardHistoryTests {
+        @Test func addPutsNewestFirst() {
+            var history = ClipboardHistory()
+            let a = ClipboardTests.item("a")
+            let b = ClipboardTests.item("b")
+            let first = history.add(a)
+            #expect(first == .inserted)
+            let second = history.add(b)
+            #expect(second == .inserted)
+            #expect(history.items.map(\.preview) == ["b", "a"])
+            #expect(history.totalBytes == 2)
+            #expect(history.count == 2)
+        }
+
+        @Test func duplicateMovesToTop() {
+            var history = ClipboardHistory()
+            var a = ClipboardTests.item("a", minutesAgo: 10, source: "Safari")
+            a.pinned = true
+            history.add(a)
+            history.add(ClipboardTests.item("b", minutesAgo: 5))
+            history.add(ClipboardTests.item("c", minutesAgo: 1))
+            #expect(history.items.map(\.preview) == ["c", "b", "a"])
+
+            // Copy "a" again, from another app, with a fresh blob that nothing will reference.
+            var again = ClipboardTests.item("a", minutesAgo: 0, source: "Notes")
+            again.payloadFile = "other-blob.txt"
+            let result = history.add(again)
+            #expect(result == .movedToTop(unusedPayload: "other-blob.txt"))
+            #expect(history.items.map(\.preview) == ["a", "c", "b"])
+            #expect(history.count == 3)
+            let top = history.items[0]
+            #expect(top.id == a.id, "the original entry is kept")
+            #expect(top.pinned, "its pin survives")
+            #expect(top.date == again.date, "the date is the latest copy's")
+            #expect(top.sourceName == "Notes", "the source is the latest copy's")
+            #expect(top.payloadFile == "a.txt")
+
+            // A duplicate that brings no new blob has nothing to throw away.
+            var bare = ClipboardTests.item("b")
+            bare.payloadFile = nil
+            let bareResult = history.add(bare)
+            #expect(bareResult == .movedToTop(unusedPayload: nil))
+            #expect(history.items.map(\.preview) == ["b", "a", "c"])
+        }
+
+        @Test func togglePinAndRemove() {
+            var history = ClipboardHistory()
+            let a = ClipboardTests.item("a")
+            history.add(a)
+            let pinned = history.togglePin(id: a.id)
+            #expect(pinned == true)
+            #expect(history.items[0].pinned)
+            let unpinned = history.togglePin(id: a.id)
+            #expect(unpinned == false)
+            let missingPin = history.togglePin(id: UUID())
+            #expect(missingPin == nil)
+            let missingRemove = history.remove(id: UUID())
+            #expect(missingRemove == nil)
+            let removed = history.remove(id: a.id)
+            #expect(removed?.id == a.id)
+            #expect(history.isEmpty)
+        }
+
+        @Test func pinSurvivesClear() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("old", minutesAgo: 30, pinned: true))
+            history.add(ClipboardTests.item("x", minutesAgo: 20))
+            history.add(ClipboardTests.item("y", minutesAgo: 10))
+            let removed = history.clear(keepPinned: true)
+            #expect(removed.map(\.preview) == ["y", "x"])
+            #expect(history.items.map(\.preview) == ["old"])
+            // Clearing everything, pins included, is still available.
+            let rest = history.clear(keepPinned: false)
+            #expect(rest.map(\.preview) == ["old"])
+            #expect(history.isEmpty)
+        }
+
+        @Test func displayOrderPutsPinnedFirst() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("p1", minutesAgo: 50, pinned: true))
+            history.add(ClipboardTests.item("a", minutesAgo: 40))
+            history.add(ClipboardTests.item("p2", minutesAgo: 30, pinned: true))
+            history.add(ClipboardTests.item("b", minutesAgo: 20))
+            #expect(history.displayItems.map(\.preview) == ["p2", "p1", "b", "a"])
+            #expect(history.search("").map(\.preview) == ["p2", "p1", "b", "a"])
+            #expect(history.search("   ").map(\.preview) == ["p2", "p1", "b", "a"])
+        }
+
+        @Test func searchIsCaseAndDiacriticInsensitive() {
+            var history = ClipboardHistory()
+            history.add(ClipboardTests.item("Café menu: crème brûlée", minutesAgo: 3, source: "Notes"))
+            history.add(ClipboardTests.item("ÉCOLE report", minutesAgo: 2, source: "Pages"))
+            history.add(ClipboardTests.item("plain text", minutesAgo: 1, source: "Safari"))
+            #expect(history.search("cafe").map(\.preview) == ["Café menu: crème brûlée"])
+            #expect(history.search("CAFÉ").map(\.preview) == ["Café menu: crème brûlée"])
+            #expect(history.search("creme brulee").map(\.preview) == ["Café menu: crème brûlée"])
+            #expect(history.search("ecole").map(\.preview) == ["ÉCOLE report"])
+            #expect(history.search("école").map(\.preview) == ["ÉCOLE report"])
+            // The source app's name is searched too.
+            #expect(history.search("safari").map(\.preview) == ["plain text"])
+            #expect(history.search("NOTES").map(\.preview) == ["Café menu: crème brûlée"])
+            // Every word has to match, in any order.
+            #expect(history.search("report ecole").map(\.preview) == ["ÉCOLE report"])
+            #expect(history.search("report safari").isEmpty)
+            #expect(history.search("zzz").isEmpty)
+        }
+
+        @Test func moveToTopOnUse() {
+            var history = ClipboardHistory()
+            let a = ClipboardTests.item("a", minutesAgo: 2)
+            history.add(a)
+            history.add(ClipboardTests.item("b", minutesAgo: 1))
+            let moved = history.moveToTop(id: a.id, date: ClipboardTests.base)
+            #expect(moved)
+            #expect(history.items.map(\.preview) == ["a", "b"])
+            #expect(history.items[0].date == ClipboardTests.base)
+            let movedMissing = history.moveToTop(id: UUID(), date: ClipboardTests.base)
+            #expect(!movedMissing)
+        }
+
+        @Test func lookupsByIDAndHash() {
+            var history = ClipboardHistory()
+            let a = ClipboardTests.item("a")
+            history.add(a)
+            #expect(history.item(id: a.id) == a)
+            #expect(history.item(id: UUID()) == nil)
+            #expect(history.contains(contentHash: a.contentHash))
+            #expect(!history.contains(contentHash: "nope"))
+        }
+    }
+
     // MARK: Items and captures
 
     @Suite struct ClipboardItemTests {
