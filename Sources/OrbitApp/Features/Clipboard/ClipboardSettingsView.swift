@@ -42,7 +42,7 @@ struct ClipboardSettingsView: View {
                 }
             }
 
-            SettingsSection("History", footnote: "Pinned entries are never removed automatically.") {
+            SettingsSection("History", footnote: "Pinned entries are never removed automatically and don't count toward these limits.") {
                 LimitRow(title: "Keep up to", value: $settings.maxItems,
                          presets: [50, 100, 200, 500, 1_000, 2_000]) { "\($0) entries" }
                 LimitRow(title: "Keep for", value: $settings.maxAgeDays,

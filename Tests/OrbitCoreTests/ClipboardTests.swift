@@ -246,6 +246,29 @@ import Testing
             #expect(history.items.allSatisfy { $0.pinned })
         }
 
+        @Test func pinnedEntriesDoNotCountTowardBudgets() {
+            // Pinned entries are exempt from the count and size budgets. If they counted, a few big pins
+            // would use the whole budget up and every new copy would be written and evicted at once:
+            // the history would silently stop.
+            var history = ClipboardHistory()
+            for n in 0..<3 { history.add(ClipboardTests.item("pin\(n)", minutesAgo: 100 + Double(n), pinned: true, size: 600)) }
+            history.add(ClipboardTests.item("fresh", minutesAgo: 1, size: 100))
+            let limits = Self.limits(items: 2, totalBytes: 500)
+            let none = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(none.isEmpty, "the new copy fits the budget for unpinned entries")
+            #expect(history.count == 4)
+
+            // The unpinned entries are still held to their own budgets.
+            history.add(ClipboardTests.item("second", minutesAgo: 0, size: 450))
+            let evicted = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(evicted.map(\.preview) == ["fresh"], "100 + 450 bytes is over 500: the oldest unpinned goes")
+            #expect(history.items.filter { $0.pinned }.count == 3)
+            history.add(ClipboardTests.item("third", minutesAgo: 0, size: 10))
+            history.add(ClipboardTests.item("fourth", minutesAgo: 0, size: 10))
+            let overCount = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(overCount.map(\.preview) == ["second"], "three unpinned entries against a budget of two")
+        }
+
         @Test func limitsFromSettingsUnits() {
             let limits = ClipboardLimits(maxItems: 200, maxAgeDays: 30, maxMegabytes: 200, maxItemMegabytes: 20)
             #expect(limits.maxItems == 200)
