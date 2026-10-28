@@ -199,3 +199,74 @@ import Testing
         #expect(DisplayModeList.empty.groups.isEmpty)
     }
 }
+
+/// Brightness ranges, boost zones and tile captions.
+@Suite struct BrightnessRangeTests {
+    @Test func rangeUsesOverrideThenDDC() {
+        // Override wins over everything.
+        let overridden = BrightnessRange(override: 150, reportedMaximum: 100)
+        #expect(overridden.maximum == 150)
+        #expect(overridden.nominalMaximum == 100)
+        #expect(overridden.isBoostable)
+        #expect(overridden.scale == PillScale(maximum: 150, boostStart: 100))
+        #expect(BrightnessRange(override: 120, reportedMaximum: 100, reportedCurrent: 150).maximum == 120)
+        // An override below the reported maximum limits the pill, with no boost zone.
+        let limited = BrightnessRange(override: 80, reportedMaximum: 100)
+        #expect(limited.maximum == 80)
+        #expect(limited.nominalMaximum == 80)
+        #expect(!limited.isBoostable)
+        // Then what DDC reported.
+        #expect(BrightnessRange(override: nil, reportedMaximum: 100).maximum == 100)
+        #expect(!BrightnessRange(override: nil, reportedMaximum: 100).isBoostable)
+        // A native 0...255 monitor has no boost zone.
+        let wide = BrightnessRange(override: nil, reportedMaximum: 255)
+        #expect(wide.maximum == 255)
+        #expect(!wide.isBoostable)
+        // Then 100.
+        #expect(BrightnessRange(override: nil, reportedMaximum: nil) == .percent)
+        #expect(BrightnessRange.percent.maximum == 100)
+        #expect(BrightnessRange.percent.scale == .percent)
+        // A zero or negative override / maximum means "unknown".
+        #expect(BrightnessRange(override: 0, reportedMaximum: 0).maximum == 100)
+        #expect(BrightnessRange(override: -3, reportedMaximum: 60).maximum == 60)
+    }
+
+    @Test func rangeLearnsFromObservedValues() {
+        // Kevo's ThinkVision: "150 of 100".
+        let thinkVision = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)
+        #expect(thinkVision.maximum == 150)
+        #expect(thinkVision.nominalMaximum == 100)
+        #expect(thinkVision.isBoostable)
+        // Remembered from an earlier read, after the user turned it down to 80.
+        #expect(BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 80, learnedMaximum: 150).maximum == 150)
+        // A current value at or below the maximum changes nothing.
+        #expect(BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 60).maximum == 100)
+        // Observations stretch the range at most to twice the reported maximum.
+        #expect(BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 65_535).maximum == 200)
+        // Overrides are capped at the 16-bit DDC ceiling.
+        #expect(BrightnessRange(override: 100_000, reportedMaximum: 100).maximum == 0xFFFF)
+    }
+
+    @Test func rangeMapsFractions() {
+        let range = BrightnessRange(override: 150, reportedMaximum: 100)
+        #expect(range.fraction(for: 75) == 0.5)
+        #expect(range.fraction(for: 300) == 1)
+        #expect(range.value(forFraction: 0.5) == 75)
+        #expect(range.value(forFraction: 0.333) == 50)
+        #expect(range.value(forFraction: 2) == 150)
+        #expect(range.clamped(-4) == 0)
+    }
+
+    @Test func captions() {
+        let boost = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)
+        #expect(BrightnessControl.ddc.caption(range: boost) == "DDC · up to 150")
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: nil, reportedMaximum: 100)) == "DDC")
+        #expect(BrightnessControl.native(builtIn: true).caption(range: .percent) == "Built-in")
+        #expect(BrightnessControl.native(builtIn: false).caption(range: .percent) == "Apple display")
+        #expect(BrightnessControl.software.caption(range: .percent) == "Software dimming")
+        #expect(BrightnessControl.probing.caption(range: .percent) == "Checking DDC…")
+        #expect(BrightnessControl.unavailable.caption(range: .percent) == "Brightness not adjustable")
+        #expect(!BrightnessControl.unavailable.hasPill)
+        #expect(BrightnessControl.software.hasPill)
+    }
+}
