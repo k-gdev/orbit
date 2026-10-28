@@ -418,4 +418,33 @@ import Testing
         #expect(MenuBarReadout.temperature.metrics == [.temperature])
         #expect(MenuBarReadout.cpuAndTemperature.metrics == [.cpu, .temperature])
     }
+
+    // MARK: When sampling runs
+
+    @Test func samplingPlan() {
+        // Hidden tab and no readout: nothing runs at all.
+        #expect(SamplingPlan.make(panelVisible: false, readout: .off, panelInterval: 1) == nil)
+        // The readout alone: every 2 s, only what it shows.
+        #expect(SamplingPlan.make(panelVisible: false, readout: .cpu, panelInterval: 1)
+                == SamplingPlan(interval: 2, metrics: [.cpu]))
+        #expect(SamplingPlan.make(panelVisible: false, readout: .cpuAndTemperature, panelInterval: 1)
+                == SamplingPlan(interval: 2, metrics: [.cpu, .temperature]))
+        // The System tab visible: everything at the panel's interval, whatever the readout.
+        #expect(SamplingPlan.make(panelVisible: true, readout: .off, panelInterval: 1)
+                == SamplingPlan(interval: 1, metrics: Set(SystemMetric.allCases)))
+        #expect(SamplingPlan.make(panelVisible: true, readout: .temperature, panelInterval: 5)?.interval == 5)
+        #expect(SamplingPlan.make(panelVisible: true, readout: .off, panelInterval: 0)?.interval == SystemSettings.intervalRange.lowerBound)
+
+        // Batteries change slowly: refreshed at most every 10 s.
+        let now = Date(timeIntervalSinceReferenceDate: 1000)
+        #expect(SamplingPlan.isBatteryRefreshDue(lastRefresh: nil, now: now))
+        #expect(!SamplingPlan.isBatteryRefreshDue(lastRefresh: now.addingTimeInterval(-9), now: now))
+        #expect(SamplingPlan.isBatteryRefreshDue(lastRefresh: now.addingTimeInterval(-10), now: now))
+
+        // A sparkline isn't spliced across a gap (the panel was closed): history restarts after 3 missed samples.
+        #expect(!SamplingPlan.isGap(since: nil, now: now, interval: 1))
+        #expect(!SamplingPlan.isGap(since: now.addingTimeInterval(-2.5), now: now, interval: 1))
+        #expect(SamplingPlan.isGap(since: now.addingTimeInterval(-3.5), now: now, interval: 1))
+        #expect(!SamplingPlan.isGap(since: now.addingTimeInterval(-5), now: now, interval: 2))
+    }
 }
