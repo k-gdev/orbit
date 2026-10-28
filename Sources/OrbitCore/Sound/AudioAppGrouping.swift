@@ -58,10 +58,11 @@ public struct AudioAppCandidate: Equatable, Sendable {
 
 /// Which apps the Apps list shows, in what order.
 public enum AudioAppList {
-    /// Pinned apps first (in pinned order, running or not, as long as the caller supplied them), then every
-    /// user-facing app that is playing, or running with settings of its own (`customised`), or running at
-    /// all when `showAll` is on, sorted by name. Duplicate entries for one bundle ID merge; `excluding`
-    /// (Orbit itself) never shows.
+    /// Shown: pinned apps (running or not, as long as the caller supplied them) and every user-facing app
+    /// that is playing, or running with settings of its own (`customised`), or running at all when
+    /// `showAll` is on. Ordered as in the mockup: playing apps by name, then quiet pinned apps in pinned
+    /// order, then the rest by name. Duplicate entries for one bundle ID merge; `excluding` (Orbit itself)
+    /// never shows.
     public static func visible(_ candidates: [AudioAppCandidate], pinned: [String], customised: Set<String>,
                                showAll: Bool, excluding: Set<String> = []) -> [AudioAppCandidate] {
         var merged: [String: AudioAppCandidate] = [:]
@@ -79,20 +80,22 @@ public enum AudioAppList {
             }
         }
         let pinnedSet = Set(pinned)
-        var seenPinned = Set<String>()
-        let head = pinned.compactMap { id -> AudioAppCandidate? in
-            guard seenPinned.insert(id).inserted else { return nil }
-            return merged[id]
+        func byName(_ a: AudioAppCandidate, _ b: AudioAppCandidate) -> Bool {
+            let order = a.name.localizedStandardCompare(b.name)
+            return order == .orderedSame ? a.bundleID < b.bundleID : order == .orderedAscending
         }
-        let tail = order.compactMap { merged[$0] }
-            .filter { app in
-                guard !pinnedSet.contains(app.bundleID), app.isListable else { return false }
-                return app.isPlaying || (app.isRunning && (showAll || customised.contains(app.bundleID)))
-            }
-            .sorted { a, b in
-                let byName = a.name.localizedStandardCompare(b.name)
-                return byName == .orderedSame ? a.bundleID < b.bundleID : byName == .orderedAscending
-            }
-        return head + tail
+        let shown = order.compactMap { merged[$0] }.filter { app in
+            if pinnedSet.contains(app.bundleID) { return true }
+            guard app.isListable else { return false }
+            return app.isPlaying || (app.isRunning && (showAll || customised.contains(app.bundleID)))
+        }
+        let playing = shown.filter(\.isPlaying).sorted(by: byName)
+        var seenPinned = Set<String>()
+        let quietPinned = pinned.compactMap { id -> AudioAppCandidate? in
+            guard seenPinned.insert(id).inserted, let app = merged[id], !app.isPlaying else { return nil }
+            return app
+        }
+        let rest = shown.filter { !$0.isPlaying && !pinnedSet.contains($0.bundleID) }.sorted(by: byName)
+        return playing + quietPinned + rest
     }
 }

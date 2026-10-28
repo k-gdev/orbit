@@ -172,7 +172,8 @@ import Testing
     }
 
     /// The Apps list: what's playing, pinned apps, apps with settings that are running, or every app with
-    /// audio when "Show all apps" is on. Pinned first, then by name, so rows don't jump around.
+    /// audio when "Show all apps" is on. As in the mockup: playing apps first (by name), then quiet pinned
+    /// apps (in pinned order), then the rest (by name).
     @Test func visibleAppsFilterAndOrder() {
         func app(_ id: String, _ name: String, running: Bool = true, playing: Bool = false, listable: Bool = true) -> AudioAppCandidate {
             AudioAppCandidate(bundleID: id, name: name, isRunning: running, isPlaying: playing, isListable: listable)
@@ -192,10 +193,15 @@ import Testing
 
         let pinned = AudioAppList.visible(candidates, pinned: ["com.ringcentral.glip", "com.spotify.client"],
                                           customised: ["com.tinyspeck.slackmacgap"], showAll: false, excluding: ["com.kevo.orbit"])
-        #expect(pinned.map(\.name) == ["RingCentral", "Spotify", "Google Chrome", "Music", "Slack"])
+        #expect(pinned.map(\.name) == ["Google Chrome", "Music", "RingCentral", "Spotify", "Slack"])
 
         let all = AudioAppList.visible(candidates, pinned: ["com.spotify.client"], customised: [], showAll: true, excluding: ["com.kevo.orbit"])
-        #expect(all.map(\.name) == ["Spotify", "Discord", "Google Chrome", "Music", "RingCentral", "Slack"])
+        #expect(all.map(\.name) == ["Google Chrome", "Music", "Spotify", "Discord", "RingCentral", "Slack"])
+
+        // A pinned app that is playing sits with the playing apps.
+        let playingPinned = AudioAppList.visible(candidates, pinned: ["com.spotify.client", "com.apple.Music"], customised: [],
+                                                 showAll: false, excluding: ["com.kevo.orbit"])
+        #expect(playingPinned.map(\.name) == ["Google Chrome", "Music", "Spotify"])
 
         // Two entries for one app (main process and a helper resolved separately) merge.
         let merged = AudioAppList.visible([app("a", "A"), app("a", "A", playing: true)], pinned: [], customised: [], showAll: false)
