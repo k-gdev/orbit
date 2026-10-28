@@ -99,6 +99,98 @@ public struct KeepAwakeSession: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Engine
+
+/// The two power assertions Keep Awake can hold.
+public enum PowerAssertionKind: Hashable, Sendable {
+    /// `kIOPMAssertionTypePreventUserIdleSystemSleep`: the Mac doesn't idle-sleep.
+    case preventSystemSleep
+    /// `kIOPMAssertionTypePreventUserIdleDisplaySleep`: the display doesn't idle-sleep either.
+    case preventDisplaySleep
+}
+
+/// Takes and releases power assertions. The app's implementation calls `IOPMAssertionCreateWithName` /
+/// `IOPMAssertionRelease`; tests use a fake that only records.
+public protocol PowerAsserting: AnyObject {
+    /// Takes the assertion. Returns false when macOS refused it.
+    func acquire(_ kind: PowerAssertionKind, reason: String) -> Bool
+    /// Releases an assertion taken with `acquire`.
+    func release(_ kind: PowerAssertionKind)
+}
+
+/// Keep Awake's state machine: the current session and exactly the assertions it needs. Every way a
+/// session ends (`stop()`, `evaluate` finding it expired, the engine going away) releases them all.
+public final class KeepAwakeEngine {
+    /// The name the assertions carry in `pmset -g assertions`.
+    public static let reason = "Orbit Keep Awake"
+
+    public private(set) var session: KeepAwakeSession?
+    private let asserter: PowerAsserting
+    private var held: Set<PowerAssertionKind> = []
+
+    public init(asserter: PowerAsserting) {
+        self.asserter = asserter
+    }
+
+    deinit { stop() }
+
+    public var isActive: Bool { session != nil }
+
+    /// Starts (or replaces) the session. The system assertion is kept across a replacement, so there is
+    /// no moment without one. Returns false, holding nothing, when macOS refuses the assertion.
+    @discardableResult
+    public func start(_ mode: KeepAwakeMode, keepDisplayAwake: Bool, now: Date, appName: String? = nil) -> Bool {
+        guard hold(.preventSystemSleep) else {
+            stop()
+            return false
+        }
+        session = KeepAwakeSession(startDate: now, mode: mode, keepDisplayAwake: keepDisplayAwake, appName: appName)
+        applyDisplayOption()
+        return true
+    }
+
+    /// Turns the display assertion on or off for the running session (nothing while off).
+    public func setKeepDisplayAwake(_ on: Bool) {
+        guard session != nil else { return }
+        session?.keepDisplayAwake = on
+        applyDisplayOption()
+    }
+
+    /// Ends the session if it has expired (deadline passed, app quit, downloads done). Returns whether
+    /// it ended now.
+    @discardableResult
+    public func evaluate(now: Date, appRunning: Bool = true, downloadsActive: Bool = true) -> Bool {
+        guard let session, session.isExpired(now: now, appRunning: appRunning, downloadsActive: downloadsActive) else { return false }
+        stop()
+        return true
+    }
+
+    /// Ends the session and releases every assertion. Idempotent.
+    public func stop() {
+        for kind in [PowerAssertionKind.preventDisplaySleep, .preventSystemSleep] where held.contains(kind) {
+            asserter.release(kind)
+            held.remove(kind)
+        }
+        session = nil
+    }
+
+    private func applyDisplayOption() {
+        if session?.keepDisplayAwake == true {
+            _ = hold(.preventDisplaySleep)
+        } else if held.contains(.preventDisplaySleep) {
+            asserter.release(.preventDisplaySleep)
+            held.remove(.preventDisplaySleep)
+        }
+    }
+
+    private func hold(_ kind: PowerAssertionKind) -> Bool {
+        if held.contains(kind) { return true }
+        guard asserter.acquire(kind, reason: Self.reason) else { return false }
+        held.insert(kind)
+        return true
+    }
+}
+
 // MARK: - Formatting
 
 public enum KeepAwakeFormat {

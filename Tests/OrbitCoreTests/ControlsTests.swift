@@ -132,3 +132,107 @@ extension ControlsTests {
         }
     }
 }
+
+// MARK: - Keep Awake engine (fake asserter: no real power assertion is ever taken)
+
+/// Records what the engine holds instead of calling IOKit.
+final class FakeAsserter: PowerAsserting {
+    private(set) var held: Set<PowerAssertionKind> = []
+    private(set) var acquired: [PowerAssertionKind] = []
+    private(set) var released: [PowerAssertionKind] = []
+    var refuse = false
+
+    func acquire(_ kind: PowerAssertionKind, reason: String) -> Bool {
+        #expect(reason == "Orbit Keep Awake")
+        guard !refuse else { return false }
+        #expect(!held.contains(kind), "acquired \(kind) twice without releasing")
+        held.insert(kind)
+        acquired.append(kind)
+        return true
+    }
+
+    func release(_ kind: PowerAssertionKind) {
+        #expect(held.contains(kind), "released \(kind) that wasn't held")
+        held.remove(kind)
+        released.append(kind)
+    }
+}
+
+extension ControlsTests.KeepAwakeTests {
+    @Test func engineReleasesAtDeadline() {
+        let fake = FakeAsserter()
+        let engine = KeepAwakeEngine(asserter: fake)
+        #expect(engine.start(.duration(900), keepDisplayAwake: true, now: start))
+        #expect(fake.held == [.preventSystemSleep, .preventDisplaySleep])
+        #expect(engine.isActive)
+        #expect(!engine.evaluate(now: start.addingTimeInterval(899)))
+        #expect(fake.held.count == 2)
+        #expect(engine.evaluate(now: start.addingTimeInterval(900)))
+        #expect(fake.held.isEmpty)
+        #expect(!engine.isActive)
+        #expect(engine.session == nil)
+        // Nothing left to expire.
+        #expect(!engine.evaluate(now: start.addingTimeInterval(1000)))
+    }
+
+    @Test func engineReleasesOnStopAndDeinit() {
+        let fake = FakeAsserter()
+        let engine = KeepAwakeEngine(asserter: fake)
+        engine.start(.indefinitely, keepDisplayAwake: false, now: start)
+        #expect(fake.held == [.preventSystemSleep])
+        engine.stop()
+        #expect(fake.held.isEmpty)
+        engine.stop()   // idempotent
+        #expect(fake.released == [.preventSystemSleep])
+
+        let other = FakeAsserter()
+        do {
+            let scoped = KeepAwakeEngine(asserter: other)
+            scoped.start(.indefinitely, keepDisplayAwake: true, now: start)
+            #expect(other.held.count == 2)
+        }
+        #expect(other.held.isEmpty)   // released when the engine goes away
+    }
+
+    @Test func engineFollowsDisplayOption() {
+        let fake = FakeAsserter()
+        let engine = KeepAwakeEngine(asserter: fake)
+        engine.start(.indefinitely, keepDisplayAwake: false, now: start)
+        engine.setKeepDisplayAwake(true)
+        #expect(fake.held == [.preventSystemSleep, .preventDisplaySleep])
+        #expect(engine.session?.keepDisplayAwake == true)
+        engine.setKeepDisplayAwake(false)
+        #expect(fake.held == [.preventSystemSleep])
+        // Restarting with another mode keeps one system assertion (no second one, no gap).
+        engine.start(.duration(3600), keepDisplayAwake: true, now: start)
+        #expect(fake.acquired.filter { $0 == .preventSystemSleep }.count == 1)
+        #expect(engine.session?.mode == .duration(3600))
+        // While off, the display option holds nothing.
+        engine.stop()
+        engine.setKeepDisplayAwake(true)
+        #expect(fake.held.isEmpty)
+    }
+
+    @Test func engineEndsWithAppOrDownloads() {
+        let fake = FakeAsserter()
+        let engine = KeepAwakeEngine(asserter: fake)
+        engine.start(.whileAppRunning(bundleID: "com.apple.dt.Xcode"), keepDisplayAwake: false, now: start, appName: "Xcode")
+        #expect(engine.session?.appName == "Xcode")
+        #expect(!engine.evaluate(now: start, appRunning: true))
+        #expect(engine.evaluate(now: start, appRunning: false))
+        #expect(fake.held.isEmpty)
+        engine.start(.whileDownloading, keepDisplayAwake: false, now: start)
+        #expect(!engine.evaluate(now: start, downloadsActive: true))
+        #expect(engine.evaluate(now: start, downloadsActive: false))
+        #expect(fake.held.isEmpty)
+    }
+
+    @Test func engineRefusedByMacOS() {
+        let fake = FakeAsserter()
+        fake.refuse = true
+        let engine = KeepAwakeEngine(asserter: fake)
+        #expect(!engine.start(.indefinitely, keepDisplayAwake: true, now: start))
+        #expect(!engine.isActive)
+        #expect(fake.held.isEmpty)
+    }
+}
