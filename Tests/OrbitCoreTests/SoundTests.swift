@@ -693,6 +693,22 @@ extension SoundTests {
             #expect(memory.devices(for: "com.hnc.Discord").isEmpty)
             #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
         }
+
+        /// N4: an idle app that follows the system output had the old output remembered. When the system output
+        /// changes, that memory goes, so the app follows the switch; an app on its own device keeps it.
+        @Test func systemOutputChangeDropsFollowers() {
+            var memory = AppOutputMemory()
+            _ = memory.observe(app: "com.google.Chrome", deviceUIDs: ["Headset"], hasProcesses: true)   // follows the system
+            _ = memory.observe(app: "com.hnc.Discord", deviceUIDs: ["Speakers"], hasProcesses: true)    // its own choice
+            memory.systemOutputChanged(from: "Headset")
+            #expect(memory.devices(for: "com.google.Chrome").isEmpty)
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Speakers"])
+            let chrome = memory.observe(app: "com.google.Chrome", deviceUIDs: [], hasProcesses: true)  // still idle
+            #expect(TapPlan.followedOutput(appDeviceUIDs: chrome, systemOutputUID: "Speakers",
+                                           availableOutputUIDs: ["Headset", "Speakers"]) == "Speakers")
+            memory.systemOutputChanged(from: nil)                     // no previous output: nothing to drop
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Speakers"])
+        }
         /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
         /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
         @Test func tapPausesAfterIdleDelay() {

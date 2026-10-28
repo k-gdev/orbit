@@ -39,6 +39,8 @@ final class SoundEngine {
     private var releases: [String: DispatchWorkItem] = [:]
     /// The device each app last played on, kept while it is idle (`AppOutputMemory`).
     private var outputMemory = AppOutputMemory()
+    /// The system output `outputMemory` was last told about.
+    private var lastSystemOutput: String?
     /// Per tap: whether its app is quiet long enough to pause the aggregate (`TapActivity`).
     private var activity: [String: TapActivity] = [:]
     /// The one pending re-check of `activity` (a single one-shot, no polling).
@@ -104,6 +106,7 @@ final class SoundEngine {
         releases = [:]
         failures = [:]
         outputMemory = AppOutputMemory()
+        lastSystemOutput = nil
         activity = [:]
         activityCheck?.cancel()
         activityCheck = nil
@@ -133,6 +136,7 @@ final class SoundEngine {
         if !monitor.isListening { monitor.refresh() }
         let available = Set(hardware.outputDevices.map(\.uid))
         let running = monitor.apps()
+        noteSystemOutput()
         for app in running.keys { _ = outputMemory.observe(app: app, deviceUIDs: monitor.outputDeviceUIDs(forApp: app), hasProcesses: true) }
         outputMemory.forgetApps(notIn: Set(running.keys))
 
@@ -210,10 +214,20 @@ final class SoundEngine {
     /// own settings), otherwise the system output (`TapPlan.followedOutput`). While the app is idle Core
     /// Audio reports no device, so the last one it played on is used until its processes go away.
     func followedOutput(for bundleID: String) -> String? {
+        noteSystemOutput()
         let devices = outputMemory.observe(app: bundleID, deviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID),
                                            hasProcesses: !monitor.processObjects(forApp: bundleID).isEmpty)
         return TapPlan.followedOutput(appDeviceUIDs: devices, systemOutputUID: hardware.defaultOutputUID,
                                       availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
+    }
+
+    /// When the system output switched, idle apps that were following it forget the old device, so they
+    /// follow the switch instead of staying planned on the old output (N4).
+    private func noteSystemOutput() {
+        let current = hardware.defaultOutputUID
+        guard current != lastSystemOutput else { return }
+        outputMemory.systemOutputChanged(from: lastSystemOutput)
+        lastSystemOutput = current
     }
 
     private func build(_ bundleID: String, key: TapKey, gain: Float) {

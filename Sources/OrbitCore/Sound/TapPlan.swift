@@ -182,4 +182,12 @@ public struct AppOutputMemory: Equatable, Sendable {
     public mutating func forgetApps(notIn apps: Set<String>) {
         remembered = remembered.filter { apps.contains($0.key) }
     }
+
+    /// The system output changed from `old`. Apps remembered on exactly that device were following the system
+    /// output (macOS moves them along), so their memory goes and an idle one follows the switch; apps on a
+    /// device of their own keep it.
+    public mutating func systemOutputChanged(from old: String?) {
+        guard let old else { return }
+        remembered = remembered.filter { !$0.value.allSatisfy { $0 == old } }
+    }
 }
