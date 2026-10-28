@@ -1,6 +1,27 @@
 import CoreAudio
 import Foundation
 
+/// Where the tap's audio sits in the input buffer list of a tap's private aggregate device.
+public enum TapStreamLayout {
+    /// The buffers holding the tap, given the channels per input stream of the aggregate and of its output
+    /// device: after the device's own input streams (the usual layout) or before them, as long as the
+    /// leftover streams carry exactly `tapChannels` channels. Nil for any other layout, so a microphone
+    /// stream is never mistaken for the tap.
+    public static func tapBuffers(aggregateInputs: [Int], deviceInputs: [Int], tapChannels: Int) -> Range<Int>? {
+        let tapStreams = aggregateInputs.count - deviceInputs.count
+        guard tapStreams >= 1 else { return nil }
+        if Array(aggregateInputs.prefix(deviceInputs.count)) == deviceInputs,
+           aggregateInputs.suffix(tapStreams).reduce(0, +) == tapChannels {
+            return deviceInputs.count..<aggregateInputs.count
+        }
+        if Array(aggregateInputs.suffix(deviceInputs.count)) == deviceInputs,
+           aggregateInputs.prefix(tapStreams).reduce(0, +) == tapChannels {
+            return 0..<tapStreams
+        }
+        return nil
+    }
+}
+
 /// The body of a process tap's IOProc: copies the tap's audio to the output device's channels, applying
 /// the app's volume through a `GainRamp` and, while the gain is past unity, `SoftClip`.
 ///

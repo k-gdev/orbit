@@ -144,6 +144,24 @@ import Testing
         #expect(stereo.samples(buffer: 0, channel: 1).allSatisfy { $0 == 0.3 })
     }
 
+    /// Which of the aggregate's input buffers are the tap's. Kevo's headset has one 1-channel input stream;
+    /// the speakers and the DisplayPort outputs have none. Anything that doesn't add up is refused, so a
+    /// microphone stream is never mistaken for the tap.
+    @Test func tapStreamLayout() {
+        typealias L = TapStreamLayout
+        #expect(L.tapBuffers(aggregateInputs: [2], deviceInputs: [], tapChannels: 2) == 0..<1)
+        #expect(L.tapBuffers(aggregateInputs: [1, 2], deviceInputs: [1], tapChannels: 2) == 1..<2)
+        #expect(L.tapBuffers(aggregateInputs: [2, 1], deviceInputs: [1], tapChannels: 2) == 0..<1)
+        #expect(L.tapBuffers(aggregateInputs: [1, 1, 2], deviceInputs: [1, 1], tapChannels: 2) == 2..<3)
+        #expect(L.tapBuffers(aggregateInputs: [1, 1], deviceInputs: [], tapChannels: 2) == 0..<2)
+        // No tap stream at all, or channel counts that don't match: refuse.
+        #expect(L.tapBuffers(aggregateInputs: [1], deviceInputs: [1], tapChannels: 2) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [], deviceInputs: [], tapChannels: 2) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [1, 4], deviceInputs: [1], tapChannels: 2) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [2, 2], deviceInputs: [1], tapChannels: 2) == nil)
+        #expect(L.tapBuffers(aggregateInputs: [1], deviceInputs: [1, 1], tapChannels: 2) == nil)
+    }
+
     /// When the output wants more frames than the tap delivered, the rest is silence.
     @Test func shortInputLeavesSilentTail() {
         let input = Buffers(channels: [2], frames: 16) { _, _, _ in 0.5 }
