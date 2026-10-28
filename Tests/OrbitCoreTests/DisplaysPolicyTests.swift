@@ -2,6 +2,37 @@ import Foundation
 import Testing
 @testable import OrbitCore
 
+/// The "Keep this resolution?" countdown (M2) and the other-app hint (M6).
+@Suite struct ResolutionConfirmationTests {
+    private let previous = RawDisplayMode(id: 82, width: 3008, height: 1692, pixelWidth: 6016, pixelHeight: 3384, refreshRate: 60)
+    private let proposed = RawDisplayMode(id: 75, width: 2560, height: 1440, pixelWidth: 5120, pixelHeight: 2880, refreshRate: 60)
+
+    @Test func countsDownFifteenSecondsThenExpires() {
+        let start = Date(timeIntervalSinceReferenceDate: 1000)
+        let confirmation = ResolutionConfirmation(displayID: 2, displayTitle: "P27u-20 · Left", previous: previous, proposed: proposed,
+                                                  proposedLabel: "2560 × 1440 HiDPI", startedAt: start)
+        #expect(ResolutionConfirmation.duration == 15)
+        #expect(confirmation.deadline == start.addingTimeInterval(15))
+        #expect(confirmation.secondsLeft(at: start) == 15)
+        #expect(confirmation.secondsLeft(at: start.addingTimeInterval(0.2)) == 15)      // rounded up
+        #expect(confirmation.secondsLeft(at: start.addingTimeInterval(14.1)) == 1)
+        #expect(confirmation.secondsLeft(at: start.addingTimeInterval(20)) == 0)
+        #expect(!confirmation.isExpired(at: start.addingTimeInterval(14.9)))
+        #expect(confirmation.isExpired(at: start.addingTimeInterval(15)))
+        #expect(confirmation.countdown(at: start.addingTimeInterval(3)) == "Reverting in 12 s")
+        #expect(confirmation.countdown(at: start.addingTimeInterval(15)) == "Reverting…")
+    }
+
+    @Test func hintNamesTheOtherDisplayApps() {
+        #expect(DisplayConflicts.hint(runningBundleIDs: ["com.apple.finder"]) == nil)
+        #expect(DisplayConflicts.hint(runningBundleIDs: []) == nil)
+        #expect(DisplayConflicts.hint(runningBundleIDs: ["com.apple.finder", "pro.betterdisplay.BetterDisplay"])
+                == "BetterDisplay is also running and controls these monitors. Quit it so the two don't undo each other.")
+        #expect(DisplayConflicts.hint(runningBundleIDs: ["fyi.lunar.Lunar", "pro.betterdisplay.BetterDisplay", "fyi.lunar.Lunar"])
+                == "BetterDisplay and Lunar are also running and control these monitors. Quit them so they don't undo Orbit's changes.")
+    }
+}
+
 /// The gamma table Orbit keeps as a display's original (M4).
 @Suite struct GammaRampTests {
     @Test func trustsANormalTable() {
