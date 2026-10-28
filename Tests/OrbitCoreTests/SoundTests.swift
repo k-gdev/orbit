@@ -935,6 +935,42 @@ extension SoundTests {
             #expect(TapActivity.idleDelay >= .seconds(2) && TapActivity.idleDelay <= .seconds(10))
         }
 
+        /// G3: every live tap gets the idle pause, not only each app's current one. Chrome plays through A; while it
+        /// plays, a rebuild (new output) replaces A with B, and A is kept until B starts. Chrome goes quiet before B
+        /// has started: A must still pause after `idleDelay`, instead of streaming silence until Chrome's next sound.
+        @Test func keptPredecessorsPauseWhenQuietToo() {
+            let t0 = ContinuousClock.now
+            func at(_ seconds: Double) -> ContinuousClock.Instant { t0 + .seconds(seconds) }
+            typealias Tap = TapActivityBook<String>.Tap
+            var book = TapActivityBook<String>()
+            book.track("A", isPlaying: true, now: t0)
+            book.track("B", isPlaying: true, now: at(10))
+            let playing = book.update([Tap(id: "A", isPlaying: true, hasStarted: true), Tap(id: "B", isPlaying: true, hasStarted: false)],
+                                      now: at(10))
+            #expect(playing.pause.isEmpty && playing.nextCheck == nil)
+            let quiet = [Tap(id: "A", isPlaying: false, hasStarted: true), Tap(id: "B", isPlaying: false, hasStarted: false)]
+            let early = book.update(quiet, now: at(12))
+            #expect(early.pause.isEmpty)
+            #expect(early.nextCheck == at(12) + TapActivity.idleDelay)
+            // A (started, kept as B's predecessor) pauses; B's own first start is still waiting for audio, so it isn't.
+            let due = book.update(quiet, now: at(12) + TapActivity.idleDelay)
+            #expect(due.pause == ["A"])
+            #expect(due.nextCheck == nil)
+            #expect(book.update(quiet, now: at(60)).pause.isEmpty)    // once per quiet spell
+            // Playing again starts a new spell for every tap still alive.
+            _ = book.update([Tap(id: "A", isPlaying: true, hasStarted: true), Tap(id: "B", isPlaying: true, hasStarted: true)], now: at(61))
+            let again = book.update([Tap(id: "A", isPlaying: false, hasStarted: true), Tap(id: "B", isPlaying: false, hasStarted: true)],
+                                    now: at(70))
+            #expect(again.nextCheck == at(70) + TapActivity.idleDelay)
+            #expect(Set(book.update([Tap(id: "A", isPlaying: false, hasStarted: true), Tap(id: "B", isPlaying: false, hasStarted: true)],
+                                    now: at(70) + TapActivity.idleDelay).pause) == ["A", "B"])
+            // A tap no longer listed (released) is forgotten; one never tracked starts from the reading it is first fed.
+            _ = book.update([Tap(id: "B", isPlaying: false, hasStarted: true)], now: at(90))
+            #expect(!book.isTracking("A") && book.isTracking("B"))
+            let fresh = book.update([Tap(id: "C", isPlaying: true, hasStarted: true)], now: at(91))
+            #expect(fresh.pause.isEmpty && book.isTracking("C") && !book.isTracking("B"))
+        }
+
         /// N3: releasing a tap never waits for a start that may only return with the app's next sound. While the
         /// tap's queue sits in such a start, the teardown runs from outside it; when the start returns afterwards,
         /// the queue sees the tap is gone and stops there.

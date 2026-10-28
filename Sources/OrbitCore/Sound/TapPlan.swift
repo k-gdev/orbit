@@ -103,6 +103,53 @@ public struct TapActivity: Equatable, Sendable {
     }
 }
 
+/// The idle pause for every live tap, current or kept predecessor (`TapRoster`). Each tap has its own `TapActivity`, so
+/// a replaced tap kept until its successor starts is paused too once its app has been quiet for `idleDelay`, instead of
+/// streaming silence until the app's next sound (which may be hours away).
+public struct TapActivityBook<ID: Hashable & Sendable>: Equatable, Sendable {
+    /// One live tap as the engine sees it now.
+    public struct Tap: Equatable, Sendable {
+        public var id: ID
+        /// Its app is playing (`kAudioProcessPropertyIsRunningOutput`).
+        public var isPlaying: Bool
+        /// Its first start has returned. Only then is it paused: before that, its own start already waits for audio.
+        public var hasStarted: Bool
+
+        public init(id: ID, isPlaying: Bool, hasStarted: Bool) {
+            self.id = id
+            self.isPlaying = isPlaying
+            self.hasStarted = hasStarted
+        }
+    }
+
+    private var activity: [ID: TapActivity] = [:]
+
+    public init() {}
+
+    public func isTracking(_ id: ID) -> Bool { activity[id] != nil }
+
+    /// A tap was just built (`TapActivity(now:isPlaying:)`).
+    public mutating func track(_ id: ID, isPlaying: Bool, now: ContinuousClock.Instant) {
+        activity[id] = TapActivity(now: now, isPlaying: isPlaying)
+    }
+
+    /// Feeds every live tap. Returns the taps to pause now (each once per quiet spell, and only once started) and when
+    /// to look again (the earliest pending quiet spell's end). Taps no longer listed are forgotten.
+    public mutating func update(_ taps: [Tap], now: ContinuousClock.Instant) -> (pause: [ID], nextCheck: ContinuousClock.Instant?) {
+        var pause: [ID] = []
+        var next: ContinuousClock.Instant?
+        var kept: [ID: TapActivity] = [:]
+        for tap in taps {
+            var state = activity[tap.id] ?? TapActivity(now: now, isPlaying: tap.isPlaying)
+            if state.update(isPlaying: tap.isPlaying, now: now) == .pause, tap.hasStarted { pause.append(tap.id) }
+            if let check = state.nextCheck() { next = min(next ?? check, check) }
+            kept[tap.id] = state
+        }
+        activity = kept
+        return (pause, next)
+    }
+}
+
 /// Who tears a tap down, and when, so releasing it never waits for a start that may block.
 ///
 /// With `kAudioAggregateDeviceTapAutoStartKey`, `AudioDeviceStart` may only return with the app's next audio.
