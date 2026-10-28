@@ -258,10 +258,17 @@ private struct UptimeTile: View {
 
     /// "Sat 13:57", or "Oct 3" when it was more than a week ago.
     private static func bootText(_ date: Date) -> String {
-        let format = Date().timeIntervalSince(date) > 6 * 86_400 ? "MMM d" : "EEE HH:mm"
+        (Date().timeIntervalSince(date) > 6 * 86_400 ? dayFormatter : weekdayTimeFormatter).string(from: date)
+    }
+
+    /// Built once, not per render (the tab redraws every second).
+    private static let weekdayTimeFormatter = formatter(template: "EEE HH:mm")
+    private static let dayFormatter = formatter(template: "MMM d")
+
+    private static func formatter(template: String) -> DateFormatter {
         let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate(format)
-        return formatter.string(from: date)
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter
     }
 }
 
