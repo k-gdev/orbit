@@ -118,6 +118,18 @@ public struct SensorGroups: Equatable, Sendable {
     }
 }
 
+/// How hot a chip temperature reads, for colouring it: Apple Silicon idles around 40–55 °C, runs into the
+/// 80s under sustained load and throttles near 100 °C.
+public enum HeatLevel: Sendable {
+    case normal, warm, hot
+
+    /// Below 80 °C normal, below 95 °C warm, hotter is hot. No reading is normal.
+    public init(celsius: Double?) {
+        guard let celsius, celsius.isFinite else { self = .normal; return }
+        self = celsius >= 95 ? .hot : celsius >= 80 ? .warm : .normal
+    }
+}
+
 /// SMC (System Management Controller) four-character codes and the two temperature encodings.
 public enum SMCCode {
     /// "TC0P" → 0x54433050.

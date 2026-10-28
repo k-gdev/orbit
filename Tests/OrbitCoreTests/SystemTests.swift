@@ -214,6 +214,16 @@ import Testing
         #expect(!SensorGroups.isPlausible(150))
     }
 
+    @Test func heatLevels() {
+        #expect(HeatLevel(celsius: 45) == .normal)
+        #expect(HeatLevel(celsius: 79.9) == .normal)
+        #expect(HeatLevel(celsius: 80) == .warm)
+        #expect(HeatLevel(celsius: 94.9) == .warm)
+        #expect(HeatLevel(celsius: 95) == .hot)
+        #expect(HeatLevel(celsius: nil) == .normal)
+        #expect(HeatLevel(celsius: .nan) == .normal)
+    }
+
     @Test func smcDecoding() {
         #expect(SMCCode.code("TC0P") == 0x5443_3050)
         #expect(SMCCode.string(0x5443_3050) == "TC0P")
