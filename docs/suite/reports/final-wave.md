@@ -83,5 +83,5 @@ While it ran it may have shown a second Orbit menu bar icon, possibly the Welcom
 - **Item 2 fallback:** with the new mode applied `.permanently`, `CGRestorePermanentDisplayConfiguration` restores the new mode, so the fallback can no longer revert anything. It was kept per the ruling. The resolution flow has not been run on hardware.
 - **Item 3 side effect:** a resolution change from the Displays tab now closes the panel, because the screen parameters change. The floating confirm card stays up and is key.
 - **Item 1:** ⌘Q now also quits Orbit from Settings and the editors (through the main menu's Quit). The key handling was verified in a probe, not in the running app.
-- **Items 1, 3 and 6** were not exercised live, because the app is never launched in this wave.
+- **Items 1, 3 and 6** were not exercised live: the app was not deliberately launched in this wave. (Controller's correction: the debug build did run as a full app once by accident, about 03:17–03:28, when `.build/debug/Orbit --help` was tried; see the Summary of `docs/suite/REPORT.md`.)
 - **Left alone:** `Tests/OrbitCoreTests/SoundTests.swift:272` still has "Kevo's AirPods Pro", because the Sound agent is working in parallel. Controls (`fixtureModel`) and System (`SystemFixtures.throwawayDefaults`) still make their own temp-path suites; they weren't on the list.
