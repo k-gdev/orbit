@@ -83,9 +83,12 @@ final class DockPreviewController {
                 }
             }
             delayWork = work
+            // A click during the wait (on the Dock icon, say) cancels the preview before it opens.
+            installClickMonitor()
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         case .cancelSchedule:
             cancelDelay()
+            if model.layout == nil { removeClickMonitor() }
         case .show(let pid):
             show(pid)
         case .hide:
@@ -191,12 +194,7 @@ final class DockPreviewController {
             RunLoop.main.add(timer, forMode: .common)
             pointerTimer = timer
         }
-        if clickMonitor == nil {
-            // Clicks anywhere else (the Dock icon itself included) close the strip; clicks in it are local.
-            clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-                MainActor.assumeIsolated { self?.dismiss() }
-            }
-        }
+        installClickMonitor()
         if spaceObserver == nil {
             spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -205,11 +203,25 @@ final class DockPreviewController {
         }
     }
 
+    /// A click anywhere outside Orbit (the Dock icon itself included) cancels a pending preview or closes the
+    /// strip; clicks in the strip are local events and don't reach it. Installed from the moment the hover
+    /// delay starts until the strip is gone or the wait is cancelled.
+    private func installClickMonitor() {
+        guard clickMonitor == nil else { return }
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismiss() }
+        }
+    }
+
+    private func removeClickMonitor() {
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        clickMonitor = nil
+    }
+
     private func stopTracking() {
         pointerTimer?.invalidate()
         pointerTimer = nil
-        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-        clickMonitor = nil
+        removeClickMonitor()
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
         spaceObserver = nil
         outsideSince = nil
