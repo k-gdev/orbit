@@ -481,6 +481,15 @@ import Testing
         #expect(!SamplingPlan.isGap(since: now.addingTimeInterval(-2.5), now: now, interval: 1))
         #expect(SamplingPlan.isGap(since: now.addingTimeInterval(-3.5), now: now, interval: 1))
         #expect(!SamplingPlan.isGap(since: now.addingTimeInterval(-5), now: now, interval: 2))
+
+        // Closing the tab with the CPU readout on drops everything but the CPU: those samplers get closed.
+        let panel = SamplingPlan.make(panelVisible: true, readout: .cpu, panelInterval: 1)
+        let readoutOnly = SamplingPlan.make(panelVisible: false, readout: .cpu, panelInterval: 1)
+        #expect(SamplingPlan.droppedMetrics(from: panel, to: readoutOnly)
+                == [.gpu, .memory, .temperature, .batteries, .uptime])
+        #expect(SamplingPlan.droppedMetrics(from: readoutOnly, to: panel).isEmpty)
+        #expect(SamplingPlan.droppedMetrics(from: panel, to: nil) == Set(SystemMetric.allCases))
+        #expect(SamplingPlan.droppedMetrics(from: nil, to: panel).isEmpty)
     }
 
     @Test func readingsApplySamples() {
