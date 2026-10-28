@@ -16,10 +16,12 @@ import OrbitCore
 ///   tap of the app, a failure of the current tap releases it and every older one (a failed replaced tap takes
 ///   only itself), and releasing an app releases all its taps, so no replaced tap can outlive its app's release.
 ///   Only the newest replaced tap that has started is kept that way; replaced taps that never started (a quiet
-///   app rebuilt as its output flaps) are released at once, so they can't pile up.
+///   app rebuilt as its output flaps) are released at once, so they can't pile up. While the app plays, the newest
+///   one not yet noted as started is kept too (its start may just have returned).
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
-/// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
-///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
+/// - When a tapped app has been quiet for `TapActivity.idleDelay`, the aggregate of each of its live taps (the
+///   current one and any kept predecessor) has its IO stopped and re-armed to restart with the app's next audio (no
+///   IO wakeups, no streaming, no sleep assertion while idle).
 /// - `stop()` releases everything and waits (bounded by `stopTimeout`) for the teardown; it runs when the
 ///   feature is turned off and from `applicationWillTerminate` via `FeatureRegistry.stopAll()`.
 @available(macOS 14.2, *)
@@ -48,8 +50,9 @@ final class SoundEngine {
     private var outputMemory = AppOutputMemory()
     /// The system output `outputMemory` was last told about.
     private var lastSystemOutput: String?
-    /// Per tap: whether its app is quiet long enough to pause the aggregate (`TapActivity`).
-    private var activity: [String: TapActivity] = [:]
+    /// Per live tap (each app's current one and the replaced ones kept until their successor starts), by serial:
+    /// whether its app is quiet long enough to pause the aggregate (`TapActivityBook`).
+    private var activity = TapActivityBook<Int>()
     /// The one pending re-check of `activity` (a single one-shot, no polling).
     private var activityCheck: DispatchWorkItem?
     private var subscriptions: Set<AnyCancellable> = []
@@ -129,7 +132,7 @@ final class SoundEngine {
         failures = [:]
         outputMemory = AppOutputMemory()
         lastSystemOutput = nil
-        activity = [:]
+        activity = TapActivityBook()
         activityCheck?.cancel()
         activityCheck = nil
         _ = roster.releaseAll()
@@ -206,30 +209,26 @@ final class SoundEngine {
         updateActivity()
     }
 
-    /// Pauses the aggregate of every tap whose app has been quiet for `TapActivity.idleDelay`, and schedules
-    /// the next look for the earliest pending quiet spell. Playing again needs nothing from here: the re-armed
-    /// aggregate restarts with the app's audio.
+    /// Pauses the aggregate of every live tap whose app has been quiet for `TapActivity.idleDelay` (current taps and
+    /// the replaced ones kept until their successor starts alike), and schedules the next look for the earliest
+    /// pending quiet spell. Playing again needs nothing from here: the re-armed aggregate restarts with the app's audio.
     private func updateActivity() {
         activityCheck?.cancel()
         activityCheck = nil
         guard isRunning else { return }
         let apps = monitor.apps()
-        let now = Date()
-        var next: Date?
-        for (bundleID, tap) in currentTaps {
-            let playing = apps[bundleID]?.isPlaying ?? false
-            var state = activity[bundleID] ?? TapActivity(now: now, isPlaying: playing)
-            // Only a tap whose first start has returned is paused; before that its own start is already waiting
-            // for the app's audio (and a tap built while quiet counts as paused from the start).
-            if state.update(isPlaying: playing, now: now) == .pause, tap.hasStarted { tap.pauseUntilNextAudio() }
-            activity[bundleID] = state
-            if let check = state.nextCheck() { next = min(next ?? check, check) }
+        let now = ContinuousClock.now
+        // Only a tap whose first start has returned is paused; before that its own start is already waiting for the
+        // app's audio (and a tap built while quiet counts as paused from the start).
+        let taps = alive.sorted { $0.key < $1.key }.map { serial, tap in
+            TapActivityBook<Int>.Tap(id: serial, isPlaying: apps[tap.bundleID]?.isPlaying ?? false, hasStarted: tap.hasStarted)
         }
-        activity = activity.filter { roster.current(for: $0.key) != nil }
-        guard let next else { return }
+        let result = activity.update(taps, now: now)
+        for serial in result.pause { alive[serial]?.pauseUntilNextAudio() }
+        guard let next = result.nextCheck else { return }
         let work = DispatchWorkItem { [weak self] in self?.updateActivity() }
         activityCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(next.timeIntervalSince(now), 0.05), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max((next - now) / .seconds(1), 0.05), execute: work)
     }
 
     /// Where "Same as Output" keeps this app: the device it plays to on its own (an app that chose one in its
@@ -253,9 +252,9 @@ final class SoundEngine {
     }
 
     /// Builds a new current tap for the app (`TapRoster`). Of the taps it replaces, the newest one that has started
-    /// retires until the new one has started; the others never started (they aren't playing) and are released at
-    /// once. The new tap's start releases every older tap, its failure (while current) releases it and every older
-    /// tap.
+    /// retires until the new one has started, and so does the newest one not noted as started if its processes are
+    /// playing right now; the others never started (they aren't playing) and are released at once. The new tap's
+    /// start releases every older tap, its failure (while current) releases it and every older tap.
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
         let serial = nextSerial
         nextSerial += 1
@@ -270,13 +269,14 @@ final class SoundEngine {
                                   let wasCurrent = self.roster.current(for: bundleID) == serial
                                   self.releaseTaps(self.roster.failed(serial, for: bundleID))
                                   guard wasCurrent else { return }
-                                  self.activity[bundleID] = nil
                                   self.failures[bundleID] = key
                                   self.onAppsChanged?()
                               })
         alive[serial] = tap
-        releaseTaps(roster.install(serial, for: bundleID))
-        activity[bundleID] = TapActivity(now: Date(), isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
+        // A replaced tap whose start just returned (its app began to play) may not have set `hasStarted` yet: while
+        // its processes play right now, it is kept rather than released mid-sound (`TapRoster.install`).
+        releaseTaps(roster.install(serial, for: bundleID, isPlaying: { self.alive[$0]?.processesArePlaying() ?? false }))
+        activity.track(serial, isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false, now: .now)
         onAppsChanged?()
     }
 
@@ -296,7 +296,6 @@ final class SoundEngine {
         cancelRelease(bundleID)
         let serials = roster.release(bundleID)
         guard !serials.isEmpty else { return }
-        activity[bundleID] = nil
         releaseTaps(serials)
         onAppsChanged?()
     }

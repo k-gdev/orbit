@@ -122,8 +122,9 @@ final class AppAudioTap: @unchecked Sendable {
         }
     }
 
-    /// Whether any of the tapped processes is playing right now (a plain HAL read, safe off the main thread).
-    private func processesArePlaying() -> Bool {
+    /// Whether any of the tapped processes is playing right now (a plain HAL read of `IsRunningOutput`, safe on any
+    /// thread). With TapAutoStart, a tap whose start is waiting starts as soon as this turns true.
+    func processesArePlaying() -> Bool {
         processes.contains { process in
             (SoundHAL.read(process, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), zero: UInt32(0)) ?? 0) != 0
         }

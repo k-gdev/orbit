@@ -58,6 +58,9 @@ public struct TapPlan: Equatable, Sendable {
 /// coreaudiod's idle-sleep assertion up. So once the app has been quiet for `idleDelay` the aggregate is
 /// stopped and re-armed with `kAudioAggregateDeviceTapAutoStartKey`, which restarts it with the app's next
 /// audio. Nothing is rebuilt; with `.mutedWhenTapped` the app is never muted while the IO is stopped.
+///
+/// Times are on the monotonic `ContinuousClock`, so a change of the wall clock can't stretch a quiet spell (and
+/// keep an aggregate streaming silence meanwhile).
 public struct TapActivity: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
         /// Stop the aggregate's IO and re-arm it for the next audio.
@@ -65,38 +68,85 @@ public struct TapActivity: Equatable, Sendable {
     }
 
     /// How long an app must stay quiet before its aggregate pauses.
-    public static let idleDelay: TimeInterval = 5
+    public static let idleDelay: Duration = .seconds(5)
 
     /// The aggregate is stopped, waiting for the app's next audio.
     public private(set) var isPaused = false
     /// When the app went quiet; nil while it plays.
-    private var quietSince: Date?
+    private var quietSince: ContinuousClock.Instant?
 
     /// A tap built while its app is quiet counts as paused from the start: its first start already waits for
     /// the app's audio (TapAutoStart), so a pause queued behind it would only fire on the first sound.
-    public init(now: Date, isPlaying: Bool) {
+    public init(now: ContinuousClock.Instant, isPlaying: Bool) {
         quietSince = isPlaying ? nil : now
         isPaused = !isPlaying
     }
 
     /// Feeds whether the app is playing now (`kAudioProcessPropertyIsRunningOutput`). Returns `.pause` once per
     /// quiet spell, when it has lasted `idleDelay`.
-    public mutating func update(isPlaying: Bool, now: Date) -> Action? {
+    public mutating func update(isPlaying: Bool, now: ContinuousClock.Instant) -> Action? {
         if isPlaying {
             quietSince = nil
             isPaused = false
             return nil
         }
         if quietSince == nil { quietSince = now }
-        guard !isPaused, let since = quietSince, now.timeIntervalSince(since) >= Self.idleDelay else { return nil }
+        guard !isPaused, let since = quietSince, now - since >= Self.idleDelay else { return nil }
         isPaused = true
         return .pause
     }
 
     /// When to call `update` again (the end of the current quiet spell's delay), or nil when nothing is pending.
-    public func nextCheck() -> Date? {
+    public func nextCheck() -> ContinuousClock.Instant? {
         guard !isPaused, let since = quietSince else { return nil }
-        return since.addingTimeInterval(Self.idleDelay)
+        return since + Self.idleDelay
+    }
+}
+
+/// The idle pause for every live tap, current or kept predecessor (`TapRoster`). Each tap has its own `TapActivity`, so
+/// a replaced tap kept until its successor starts is paused too once its app has been quiet for `idleDelay`, instead of
+/// streaming silence until the app's next sound (which may be hours away).
+public struct TapActivityBook<ID: Hashable & Sendable>: Equatable, Sendable {
+    /// One live tap as the engine sees it now.
+    public struct Tap: Equatable, Sendable {
+        public var id: ID
+        /// Its app is playing (`kAudioProcessPropertyIsRunningOutput`).
+        public var isPlaying: Bool
+        /// Its first start has returned. Only then is it paused: before that, its own start already waits for audio.
+        public var hasStarted: Bool
+
+        public init(id: ID, isPlaying: Bool, hasStarted: Bool) {
+            self.id = id
+            self.isPlaying = isPlaying
+            self.hasStarted = hasStarted
+        }
+    }
+
+    private var activity: [ID: TapActivity] = [:]
+
+    public init() {}
+
+    public func isTracking(_ id: ID) -> Bool { activity[id] != nil }
+
+    /// A tap was just built (`TapActivity(now:isPlaying:)`).
+    public mutating func track(_ id: ID, isPlaying: Bool, now: ContinuousClock.Instant) {
+        activity[id] = TapActivity(now: now, isPlaying: isPlaying)
+    }
+
+    /// Feeds every live tap. Returns the taps to pause now (each once per quiet spell, and only once started) and when
+    /// to look again (the earliest pending quiet spell's end). Taps no longer listed are forgotten.
+    public mutating func update(_ taps: [Tap], now: ContinuousClock.Instant) -> (pause: [ID], nextCheck: ContinuousClock.Instant?) {
+        var pause: [ID] = []
+        var next: ContinuousClock.Instant?
+        var kept: [ID: TapActivity] = [:]
+        for tap in taps {
+            var state = activity[tap.id] ?? TapActivity(now: now, isPlaying: tap.isPlaying)
+            if state.update(isPlaying: tap.isPlaying, now: now) == .pause, tap.hasStarted { pause.append(tap.id) }
+            if let check = state.nextCheck() { next = min(next ?? check, check) }
+            kept[tap.id] = state
+        }
+        activity = kept
+        return (pause, next)
     }
 }
 
@@ -162,12 +212,15 @@ public struct TapLifecycle: Equatable, Sendable {
 /// current tap and all its predecessors (a tap released before it got going reports nothing, so its
 /// predecessors can't wait for its report). Only a tap that has started can be playing the app, so a new tap
 /// keeps just the newest such predecessor and releases the others at once: a quiet app rebuilt again and again
-/// (an output flapping, its processes churning) never piles up replaced taps. Pure bookkeeping; the engine
-/// invalidates what the calls return.
+/// (an output flapping, its processes churning) never piles up replaced taps. The one exception: while the app is
+/// playing, the newest replaced tap that hasn't been noted as started is kept too, since its start may just have
+/// returned (with its report still on the way) and it may be the tap playing the app. Pure bookkeeping; the
+/// engine invalidates what the calls return.
 public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     /// Each app's current tap.
     public private(set) var currentByApp: [String: ID] = [:]
-    /// Each app's replaced taps still alive, oldest first (after an install, at most one: one that has started).
+    /// Each app's replaced taps still alive, oldest first. After an install, at most two: the newest one that has
+    /// started, and (only if the app was playing then) the newest one not noted as started.
     private var retiringByApp: [String: [ID]] = [:]
     /// The live taps that have started (their IO has run, so they may be playing, or paused and re-armed).
     private var startedTaps: Set<ID> = []
@@ -180,19 +233,24 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     public var all: [ID] { Array(currentByApp.values) + retiringByApp.values.flatMap { $0 } }
     public var isEmpty: Bool { currentByApp.isEmpty && retiringByApp.isEmpty }
 
-    /// `tap` becomes the app's current tap. Of the taps it replaces, only the newest one that has started stays
-    /// (it may be playing the app at its setting) until `tap` starts. The others never started: their start still
-    /// waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would hold a
-    /// process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
-    /// sound at stale gains and devices. Returns those to release.
+    /// `tap` becomes the app's current tap. Of the taps it replaces, the newest one that has started stays (it may be
+    /// playing the app at its setting) until `tap` starts. The others haven't been noted as started: normally their
+    /// start still waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would
+    /// hold a process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
+    /// sound at stale gains and devices. But if the newest of them belongs to an app playing right now (`isPlaying`,
+    /// asked about that one tap only: its processes' `IsRunningOutput`), its start may have just returned with the
+    /// report still on its way, so it may be playing the app: it stays too. Returns those to release.
     @discardableResult
-    public mutating func install(_ tap: ID, for app: String) -> [ID] {
+    public mutating func install(_ tap: ID, for app: String, isPlaying: (ID) -> Bool = { _ in false }) -> [ID] {
         var replaced = retiringByApp.removeValue(forKey: app) ?? []
         if let old = currentByApp[app] { replaced.append(old) }
         currentByApp[app] = tap
-        let kept = replaced.last(where: startedTaps.contains)
-        if let kept { retiringByApp[app] = [kept] }
-        return forget(replaced.filter { $0 != kept })
+        // A start releases every older tap, so taps not noted as started are all newer than the newest that started.
+        let started = replaced.last(where: startedTaps.contains)
+        let justStarting = replaced.last.flatMap { !startedTaps.contains($0) && isPlaying($0) ? $0 : nil }
+        let kept = [started, justStarting].compactMap { $0 }
+        if !kept.isEmpty { retiringByApp[app] = kept }
+        return forget(replaced.filter { !kept.contains($0) })
     }
 
     /// `tap` has started: every tap of the app built before it is done. Returns those to release.
