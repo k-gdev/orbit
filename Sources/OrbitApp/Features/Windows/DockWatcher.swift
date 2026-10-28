@@ -72,10 +72,9 @@ final class DockWatcher {
         detach()
         guard isRunning, AXIsProcessTrusted(),
               let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockBundleID).first else { return }
-        let app = AXUIElementCreateApplication(dock.processIdentifier)
-        AXUIElementSetMessagingTimeout(app, 0.5)
-        let children: [AXUIElement] = AX.copy(app, kAXChildrenAttribute) ?? []
-        guard let list = children.first(where: { (AX.copy($0, kAXRoleAttribute) as String?) == kAXListRole }) else {
+        // Every element read here (the Dock, its list, each hovered item) carries `AX.timeout`.
+        let app = AX.application(dock.processIdentifier)
+        guard let list = AX.elements(app, kAXChildrenAttribute).first(where: { (AX.value($0, kAXRoleAttribute) as String?) == kAXListRole }) else {
             // A Dock that has just launched may not have built its list yet.
             scheduleAttach(after: 1)
             return
@@ -127,15 +126,14 @@ final class DockWatcher {
 
     private func selectionChanged() {
         guard isRunning, let list else { return }
-        let selected: [AXUIElement] = AX.copy(list, kAXSelectedChildrenAttribute) ?? []
-        onHover(selected.first.flatMap(hover(for:)))
+        onHover(AX.elements(list, kAXSelectedChildrenAttribute).first.flatMap(hover(for:)))
     }
 
     private func hover(for item: AXUIElement) -> DockHover? {
-        guard (AX.copy(item, kAXSubroleAttribute) as String?) == "AXApplicationDockItem",
+        guard (AX.value(item, kAXSubroleAttribute) as String?) == "AXApplicationDockItem",
               let origin = AX.point(item, kAXPositionAttribute), let size = AX.size(item, kAXSizeAttribute) else { return nil }
-        let url: URL? = (AX.copy(item, kAXURLAttribute) as NSURL?).map { $0 as URL }
-        let title: String? = AX.copy(item, kAXTitleAttribute)
+        let url: URL? = (AX.value(item, kAXURLAttribute) as NSURL?).map { $0 as URL }
+        let title: String? = AX.value(item, kAXTitleAttribute)
         guard let app = Self.runningApp(url: url, title: title) else { return nil }
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         return DockHover(pid: app.processIdentifier, name: app.localizedName ?? title ?? "",
