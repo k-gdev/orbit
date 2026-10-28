@@ -153,3 +153,147 @@ alone straight afterwards: `VideoToolTests/compressMKV` (the VideoToolbox hardwa
 - No `~/Library/Preferences/*.plist` was created by my runs: tests and snapshots only use absolute-path suites in temp folders (`Fixtures.defaults()`, `SnapshotFixtures`). I checked read-only for new Orbit/fixture/snapshot/shelf plists since the session start: none (the only Orbit plist, `com.kevo.orbit.plist`, is Kevo's, dated Oct 20). `~/Library/Application Support/Orbit` was never created. (`MicMuteService.fixture()`, used by `--check-shelf` through the shell's own helper, writes its throwaway plist in the temp folder.)
 - Nothing was pushed. I never launched the app. The snapshots and `--check-shelf` run offscreen and never order a window front; the shake monitor in `--check-shelf` is installed and removed within the process.
 - Nothing under `.orbit-signing`, `Support/Brand/Concepts/` or `brag-output/` was touched. No file outside temp folders was created, moved, copied or deleted by tests or snapshots.
+
+---
+
+# Fix round 1
+
+Task review items I1, M2, M1, M3 and the controller's robustness ruling on shake detection. All on `suite/shelf`, one commit
+per fix (trailer `Co-Authored-By: Claude Sonnet 5.5`), not pushed. **This section supersedes the earlier text where they
+disagree**: "missing files are pruned when the shelf is shown" (now: only when truly gone, see I1), "a move result removes the
+item" (now: re-checked first, see M1), "the shake watcher uses a global `leftMouseDragged` monitor" (now: polling, see the
+last item), and `ShelfStore.load()` doing the file checks at start-up (now: nothing on the main thread, see M2).
+
+Commits, in order (new tests were written first and seen to fail to compile, `error: cannot find ... in scope`, each time):
+
+| Commit | Fix |
+|---|---|
+| `cc315cc` feat(shelf): tell a missing file from one whose drive is offline | I1 core |
+| `b6358b9` fix(shelf): never silently overwrite a shelf file that can't be fully read | M3 |
+| `4577550` feat(shelf): ShakePoller, the polling decisions behind shake to open | shake ruling, core |
+| `d2c3375` fix(shelf): a move result no longer removes the item at drop time | M1 |
+| `e985b63` feat(shelf): ShelfItems.replace keeps a re-found file's place | I1 support |
+| `c3c6a39` fix(shelf): keep items on an offline drive, and keep the file system off the main thread | I1 app + M2 |
+| `a6be5f2` fix(shelf): shake to open polls instead of relying on drag events reaching a global monitor | shake ruling, app |
+
+## I1 Items on an offline volume were deleted from the shelf
+
+**Cause.** `removeMissing()` treated `!fileExists` as gone, and `fileExists` is also false for "permission denied", a timeout, or
+an unmounted drive. It ran on every show and every tab appearance and rewrote `shelf.json`.
+
+**Fix (core, tested).** `OrbitCore/Shelf/ShelfAvailability.swift`: `ShelfProbeResult` (`exists` / `absent` / `unavailable`),
+`ShelfItemStatus` (`available` / `missing` / `unreachable`), `ShelfAvailability.status(of:probe:)`. A path is `missing` only when
+the probe says **absent** and its volume is mounted: the volume is `/Volumes/<name>` for anything under `/Volumes` (checked with
+the same probe: that folder exists only while the drive is mounted), otherwise the startup disk. An error (`EACCES`, `EPERM`,
+`EIO`, `ETIMEDOUT`, `ESTALE`, ...) is never "gone": only `ENOENT`/`ENOTDIR` mean absent (`probeResult(errnoValue:)`, real probe is
+`lstat` + `errno`). Everything else is `unreachable`. This also closes a second data-loss route in my first version: a TCC
+"denied" answer on Documents/Downloads used to look like "missing".
+
+**Fix (app).** `ShelfModel.refreshAvailability()` (replaces `removeMissing()`): checks every item concurrently on background queues
+with a 3 s deadline (`ShelfScan`; a path whose check hasn't returned is never checked again, so a stuck mount can't pile up
+threads). Result per item: available (nothing), **missing -> dropped, or followed through its bookmark and replaced in place**
+(`ShelfItems.replace`, new, tested), **unreachable or no answer in time -> kept, `model.unreachable`**. Unreachable items show
+dimmed with a warning mark, "Not connected" in the tab's list, a tooltip explaining it ("Can't reach this file right now: its
+drive may be disconnected or asleep. It stays on the shelf until you remove it."), the header says e.g. "5 files, 2 offline",
+they can't be dragged or opened or previewed (no thumbnail request, no "Drag all" inclusion), only removed or have their path
+copied. `shelf.json` is only rewritten when something really changed.
+
+Tests (`Tests/OrbitCoreTests/ShelfRobustnessTests.swift`, new suite `ShelfRobustnessTests`): `volumeRootComesFromThePath`,
+`aFileThatIsThereIsAvailable`, `goneFileOnAMountedVolumeIsMissing`, `fileOnAnUnmountedVolumeIsUnreachableNotMissing`,
+`anErrorIsNeverTreatedAsGone`, `errnoMapsToAProbeResult`, `realProbeSeesTheFilesystem`, `replaceKeepsTheItemsPlace`.
+`--check-shelf` end to end: an item under `/Volumes/OrbitShelfCheck-<uuid>/` stays on the shelf, shows as unreachable, is not
+in `availableURLs`, is still in `shelf.json` after a flush, and after a "relaunch" (new model, `load()`) is still there and
+unreachable; a file deleted from the startup disk is dropped; a renamed file is followed and keeps its place.
+
+## M2 Synchronous file system access on the main thread
+
+- `ShelfModel.load()` returns immediately: `ShelfStore.loadStored()` (reads `shelf.json` only, **no stat of the listed files**)
+  runs detached; items dropped before it finishes are kept after the saved ones; nothing is written before the saved list has
+  loaded (so a drop at launch can't overwrite it).
+- Saving is `save(_:)` on a serial background queue (last write wins); `flush()` waits at most 1 s (used by `stop()`, i.e. on
+  disable and quit, and by the check). `ShelfStore` is now thread-safe (internal lock, `@unchecked Sendable`) and remembers when
+  a bookmark could not be made, so a save doesn't re-stat dead paths.
+- The availability checks (I1) and `ShelfIcon.prime` (real icons) run off the main thread. **Views never touch the file system**:
+  `ShelfIcon.icon(for:)` returns the cached real icon or the icon for the file's type (`NSWorkspace.icon(for: UTType)`, no stat);
+  tiles and rows read it; the drag source copies the cached icon instead of resizing the shared one; `ShelfThumbnails` is no
+  longer main-actor and probes the file on the background pool first, and unreachable tiles don't ask for one.
+- Paths loaded from `shelf.json` are `URL(fileURLWithPath:isDirectory: false)` so no hidden stat decides the trailing slash.
+
+Tests/evidence: `ShelfStore.loadStored()` is covered by `loadStoredNeverTouchesTheFilesItListsAndLoadFollowsMovedOnes` (items on
+`/Volumes/Gone Drive/...` come back from `loadStored()` untouched, `follow` finds a renamed file and nothing for the missing
+drive, `load()` = `loadStored()` + following). `--check-shelf`: `load returns at once and reads in the background` (`!model.isLoaded`
+right after `load()`), `add wrote shelf.json (in the background)`, `stopping releases the items and leaves the file`.
+**Not provable here:** an actual stall on a dead SMB mount. By construction nothing on the main thread can wait for one now.
+
+## M1 A `.move` drag result removed the item at drop time
+
+`ShelfDragOutcome.removesFromShelf` is now `mayHaveMovedFiles(operationRawValue:)` (+ `recheckDelay = 1.5`). The drag source calls
+`ShelfModel.verifyMoved(_:)` for a move or delete result; it waits 1.5 s, checks off the main thread with `ShelfAvailability`, and
+removes **only** files that are `missing` (absent from a mounted volume). A cancelled Replace dialog or failed move keeps the
+reference; an unreachable file stays. A large cross-volume move that is still in progress at 1.5 s is dropped at the next
+`refreshAvailability()` (next show or tab appearance) when the file is really gone.
+Tests: `dragOutMoveOrDeleteMeansLookAgain` (renamed from `dragOutMoveRemovesCopyKeeps`; asserts the AppKit constants, the delay, and
+that copy/link/generic/none don't trigger it). `--check-shelf`: `nothing leaves the shelf at the drop itself (Finder hasn't done
+anything yet)` then `after the re-check only the file that really went is dropped` (one file really moved, the other's "move"
+cancelled, so it stays).
+
+## M3 A corrupt or newer `shelf.json` was silently treated as empty and overwritten
+
+`ShelfStore` now: decodes entries leniently (one bad entry, a bad bookmark, a non-object element no longer drops the others; a
+bad bookmark just means no bookmark), checks `version` (writes 1; a larger one is read as far as possible and marked newer),
+and **before the first save after a `load` that found anything it couldn't fully read** moves the original aside to
+`shelf.json.corrupt-<yyyyMMdd-HHmmss>` (undecodable, unreadable, or some entries skipped) or `shelf.json.newer-<...>` (UTC; `-2`,
+`-3`, ... appended so an earlier backup is never overwritten). If the move fails, `save` throws and writes nothing (the damaged
+file stays). A clean file or no file never produces a backup. `load` itself never writes.
+Tests: `aCorruptShelfFileIsMovedAsideBeforeTheFirstSave`, `aBackupNeverOverwritesAnEarlierOne` (three damages in the same second
+give `...073320`, `-2`, `-3` with the right contents), `aNewerVersionIsReadAsFarAsPossibleAndPreserved`,
+`oneBadEntryDoesNotDiscardTheRest`, `aCleanShelfFileMakesNoBackups`, `ifTheDamagedFileCannotBeKeptItIsNotOverwritten`.
+`--check-shelf`: `a damaged shelf file is moved aside before the first save, with its content` + `and the new shelf file is valid`
+(through the model, end to end).
+
+## Shake detection no longer depends on `leftMouseDragged`
+
+`ShakeWatcher` (rewritten) installs **one global `leftMouseDown` monitor** (nothing else) and, like the wheel's `InputSampler`,
+polls: a press starts a timer that reads `NSEvent.pressedMouseButtons`, `NSEvent.mouseLocation` and the drag pasteboard and
+feeds the new pure `ShakePoller` (core, tested), which wraps `FileDragGate` + `ShakeDetector`:
+- waiting (button down, no file drag yet): 20 Hz, and the pasteboard's types are read **only when its change count moved** since the press;
+- tracking (change count moved AND it holds file URLs): 60 Hz, samples go to `ShakeDetector`; after a shake the timer keeps
+  running at the fast rate until release (the detector's 1 s lockout stops repeats);
+- the button is up: the timer stops. A click costs one or two ticks.
+The `leftMouseDragged` path is **removed** (it added nothing the poller doesn't have, and double-feeding the detector was a risk).
+Nothing exists while Shelf is off or shake-to-open is off: `start()`/`stop()` install/remove the monitor, `stop()` also kills the timer.
+`ShakeWatcher` takes an `Inputs` struct (buttons, change count, types, location, clock; default live) so the glue is checked
+without a real drag. [builder's call] I did **not** add the wheel's 4 Hz idle backstop for a press the monitor missed (it would
+cost a permanent timer): a global left-press monitor is the one mouse event every other app already depends on.
+Tests: `pollerStopsWhenTheButtonIsReleased`, `pollerLeavesThePasteboardAloneUntilItChanges`, `pollerIgnoresATextDragEvenWhenShakenHard`
+(types read once per change), `pollerReportsAShakeOnlyForAFileDrag` (tracks from the first file-drag tick, one shake, not before the third
+reversal), `pollerStartsFreshOnTheNextPress`, `pollIntervalsKeepIdleCostLowAndShakingResponsive`. `--check-shelf` with a scripted mouse:
+`an idle watcher has no timer`, `a press starts the timer, slowly`, `a stale file pasteboard never counts, however hard the mouse is
+shaken`, `shaking a text drag does nothing`, `releasing the button stops the timer`, `shaking a file drag opens the shelf, once`,
+`the timer is at the fast rate while the file drag lasts`, `the timer stops when the button is released`.
+Still needs Kevo's Mac: a real Finder drag (the press monitor firing for a Finder press, the drag pasteboard changing as the drag
+starts), exactly as the wheel already relies on.
+
+## Commands and results
+
+```
+swift test --filter Shelf            ->  ✔ Test run with 47 tests in 2 suites passed   (26 ShelfTests + 21 ShelfRobustnessTests)
+.build/debug/Orbit --check-shelf     ->  54 PASS, 0 FAIL, "all checks passed", exit 0
+swift test                           ->  ✔ Test run with 608 tests in 27 suites passed after 82.263 seconds
+swift build -c release --arch arm64 --arch x86_64   ->  Build complete! (exit 0)
+```
+RED evidence per unit (each time `swift build --build-tests` before the implementation): `cannot find type 'ShelfProbeResult' in
+scope` / `cannot find 'ShelfAvailability' in scope`; `extra argument 'now' in call` and `value of type 'ShelfStore' has no member
+'loadStored'`; `cannot find type 'ShakePoller' in scope`; `type 'ShelfDragOutcome' has no member 'mayHaveMovedFiles'` / `'recheckDelay'`;
+`value of type 'ShelfItems' has no member 'replace'`.
+
+Snapshots re-checked: `shelf-offline-light.png` (`--snapshot-shelf ... --offline 2 --hover 4`: two dimmed tiles with warning marks,
+"5 files, 2 offline", hover ✕ still drawn), `panel-offline-dark.png` (tab row "Archive 2026.zip / Not connected" dimmed with the mark).
+The `--snapshot-panel shelf` fixture now includes that one offline row.
+
+## Known gaps added or changed by this round
+
+- Only `/Volumes/<name>` is recognised as another volume's mount point. A drive mounted somewhere else is treated like the startup
+  disk, so a file missing there would still be dropped when it is absent (an unmounted custom mount point is not detected).
+- A file that is still being moved by Finder after 1.5 s (a big cross-volume move) leaves the shelf at the next show or tab view, not at once.
+- No idle backstop for a press the global monitor misses (see the shake section).
