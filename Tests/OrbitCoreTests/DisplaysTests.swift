@@ -129,6 +129,24 @@ import Testing
         // Out-of-range inputs for the others are clamped too.
         #expect(close(BrightnessLink.values(changing: "a", to: 0.5, current: ["a": 0.5, "z": 1.7]), ["a": 0.5, "z": 1.0]))
     }
+
+    @Test func linkWorksInEachDisplaysOwnRange() {
+        let boost = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)    // 0...150
+        let members = [
+            BrightnessLink.Member(id: "tv", range: boost, value: 150),
+            BrightnessLink.Member(id: "aoc", range: .percent, value: 80),
+            BrightnessLink.Member(id: "acer", range: .percent, value: 40),
+        ]
+        // The ThinkVision from 150 (1.0) to 75 (0.5): everyone halves, in their own units.
+        #expect(BrightnessLink.values(changing: "tv", to: 75, members: members) == ["tv": 75, "aoc": 40, "acer": 20])
+        // The AOC from 80 to 100 (×1.25): the ThinkVision is already at its top.
+        #expect(BrightnessLink.values(changing: "aoc", to: 100, members: members) == ["tv": 150, "aoc": 100, "acer": 50])
+        // Values are clamped to each range and rounded to whole steps.
+        #expect(BrightnessLink.values(changing: "acer", to: 33, members: members) == ["tv": 124, "aoc": 66, "acer": 33])
+        #expect(BrightnessLink.values(changing: "aoc", to: 500, members: members)["aoc"] == 100)
+        // An id that isn't a member changes nothing.
+        #expect(BrightnessLink.values(changing: "nope", to: 10, members: members) == ["tv": 150, "aoc": 80, "acer": 40])
+    }
 }
 
 /// The resolution menu. Modes are a subset of what Kevo's main ThinkVision P27u-20 lists (2026-10-28).
