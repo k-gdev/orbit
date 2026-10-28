@@ -20,6 +20,11 @@ final class ShakeWatcher {
     /// The change count `hasFiles` was read for, so the pasteboard is inspected once per drag, not per event.
     private var inspectedChangeCount = -1
     private var hasFiles = false
+    /// Once a file drag is recognised, later events of the same press skip the pasteboard altogether.
+    private var isFileDragConfirmed = false
+    private var lastPasteboardCheck: TimeInterval = -.infinity
+    /// Until a file drag is confirmed the pasteboard is looked at no more often than this (seconds).
+    private static let pasteboardCheckInterval: TimeInterval = 0.05
 
     var isRunning: Bool { monitor != nil }
 
@@ -40,6 +45,8 @@ final class ShakeWatcher {
         gate = FileDragGate()
         inspectedChangeCount = -1
         hasFiles = false
+        isFileDragConfirmed = false
+        lastPasteboardCheck = -.infinity
     }
 
     private func handle(_ event: NSEvent) {
@@ -47,16 +54,26 @@ final class ShakeWatcher {
         case .leftMouseDown:
             gate.buttonDown(changeCount: dragPasteboard.changeCount)
             detector.reset()
+            isFileDragConfirmed = false
+            lastPasteboardCheck = -.infinity
         case .leftMouseUp:
             gate.buttonUp()
             detector.reset()
+            isFileDragConfirmed = false
         case .leftMouseDragged:
-            let changeCount = dragPasteboard.changeCount
-            if changeCount != inspectedChangeCount {
-                inspectedChangeCount = changeCount
-                hasFiles = dragPasteboard.types?.contains(.fileURL) ?? false
+            if !isFileDragConfirmed {
+                // Drags in other apps (selecting text, moving a window) arrive here too, at 60 Hz or more:
+                // look at the pasteboard a few times a second until it says this is a drag of files.
+                guard event.timestamp - lastPasteboardCheck >= Self.pasteboardCheckInterval else { return }
+                lastPasteboardCheck = event.timestamp
+                let changeCount = dragPasteboard.changeCount
+                if changeCount != inspectedChangeCount {
+                    inspectedChangeCount = changeCount
+                    hasFiles = dragPasteboard.types?.contains(.fileURL) ?? false
+                }
+                guard gate.isFileDrag(changeCount: changeCount, hasFiles: hasFiles) else { return }
+                isFileDragConfirmed = true
             }
-            guard gate.isFileDrag(changeCount: changeCount, hasFiles: hasFiles) else { return }
             let point = NSEvent.mouseLocation
             if detector.feed(point, at: event.timestamp) { onShake(point) }
         default:
