@@ -147,6 +147,43 @@ import Testing
         #expect(PillScale(maximum: 100).wheelNudged(99, notches: 1, step: 1) == 100)
     }
 
+    /// A pill can show a range further than it lets the user set (a monitor's own boost, which DDC can't write).
+    @Test func pillScaleWithASettableLimit() {
+        let scale = PillScale(maximum: 150, boostStart: 100, limit: 100)
+        #expect(scale.settableMaximum == 100)
+        #expect(PillScale(maximum: 150).settableMaximum == 150)
+        #expect(PillScale(maximum: 150) == PillScale(maximum: 150, limit: nil))
+        // A limit past the range is the range.
+        #expect(PillScale(maximum: 150, limit: 400).settableMaximum == 150)
+        // What is shown is unchanged: the whole 0...150 track, striped past 100, a 150 reading shown in full.
+        #expect(scale.hasBoost && scale.isBoosted(150))
+        #expect(scale.fraction(for: 150) == 1)
+        #expect(scale.clamped(150) == 150)
+        // Dragging into the striped zone stops at the limit.
+        #expect(scale.value(forFraction: 0.5) == 75)
+        #expect(scale.value(forFraction: 100.0 / 150.0) == 100)
+        #expect(scale.value(forFraction: 0.9) == 100)
+        #expect(scale.value(forFraction: 1) == 100)
+        // So do wheel notches, keys and accessibility increments.
+        #expect(scale.nudged(98, by: 5) == 100)
+        #expect(scale.wheelNudged(99, notches: 3, step: 1) == 100)
+        #expect(scale.moved(98, by: 5) == 100)
+        // Nudging up from a boost the monitor set itself changes nothing; nudging down comes to the limit.
+        #expect(scale.nudged(150, by: 1) == 150)
+        #expect(scale.wheelNudged(150, notches: 1, step: 1) == 150)
+        #expect(scale.moved(150, by: 4) == 150)
+        #expect(scale.nudged(150, by: -1) == 100)
+        #expect(scale.wheelNudged(150, notches: -1, step: 1) == 100)
+        #expect(scale.moved(150, by: -4) == 100)
+        // Below the limit everything moves as before.
+        #expect(scale.nudged(50, by: -1) == 49)
+        #expect(scale.moved(50, by: 2.5) == 52.5)
+        #expect(scale.moved(1, by: -5) == 0)
+        // Without a limit nothing changes.
+        #expect(PillScale(maximum: 150).nudged(150, by: 1) == 150)
+        #expect(PillScale(maximum: 150).moved(149, by: 5) == 150)
+    }
+
     @Test func settingsPageArguments() {
         #expect(SettingsPage(argument: "sound") == .feature(.sound))
         #expect(SettingsPage(argument: "features") == .features)

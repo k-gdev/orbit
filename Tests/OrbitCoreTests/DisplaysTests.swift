@@ -131,7 +131,8 @@ import Testing
     }
 
     @Test func linkWorksInEachDisplaysOwnRange() {
-        let boost = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)    // 0...150
+        // An override says the monitor accepts 150 over DDC, so the whole 0...150 range is writable.
+        let boost = BrightnessRange(override: 150, reportedMaximum: 100)
         let members = [
             BrightnessLink.Member(id: "tv", range: boost, value: 150),
             BrightnessLink.Member(id: "aoc", range: .percent, value: 80),
@@ -147,6 +148,38 @@ import Testing
         // An id that isn't a member changes nothing.
         #expect(BrightnessLink.values(changing: "nope", to: 10, members: members) == ["tv": 150, "aoc": 80, "acer": 40])
     }
+
+    /// A boost the monitor made itself (150 of a reported 100) shows in the pill but DDC can't write it, so a
+    /// linked move works on the writable 0...100 and never sends more.
+    @Test func linkNeverExceedsTheWritableMaximum() {
+        let observed = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)    // shows 0...150, writes 0...100
+        let members = [
+            BrightnessLink.Member(id: "tv", range: observed, value: 150),
+            BrightnessLink.Member(id: "aoc", range: .percent, value: 80),
+            BrightnessLink.Member(id: "acer", range: .percent, value: 40),
+        ]
+        // The ThinkVision from its boosted 150 (fully up, 1.0) to 75 (0.75 of what DDC can write).
+        #expect(BrightnessLink.values(changing: "tv", to: 75, members: members) == ["tv": 75, "aoc": 60, "acer": 30])
+        // The AOC from 80 to 100 (×1.25): the ThinkVision goes to 100, not 150 or 187.
+        #expect(BrightnessLink.values(changing: "aoc", to: 100, members: members) == ["tv": 100, "aoc": 100, "acer": 50])
+        // Dimming the AOC dims the ThinkVision with it, instead of sitting at the top of its shown range.
+        #expect(BrightnessLink.values(changing: "aoc", to: 40, members: members) == ["tv": 50, "aoc": 40, "acer": 20])
+        #expect(BrightnessLink.values(changing: "acer", to: 36, members: members) == ["tv": 90, "aoc": 72, "acer": 36])
+        // A ThinkVision that is not boosted right now (60) still stops at 100.
+        let quiet = [
+            BrightnessLink.Member(id: "tv", range: observed, value: 60),
+            BrightnessLink.Member(id: "aoc", range: .percent, value: 40),
+        ]
+        #expect(BrightnessLink.values(changing: "aoc", to: 100, members: quiet) == ["tv": 100, "aoc": 100])
+        // Whatever is dragged, and from wherever, no member leaves its writable range.
+        for target in stride(from: -50.0, through: 400.0, by: 7.0) {
+            for id in ["tv", "aoc", "acer"] {
+                let result = BrightnessLink.values(changing: id, to: target, members: members)
+                #expect(result.allSatisfy { 0...100 ~= $0.value }, "moving \(id) to \(target) gave \(result)")
+            }
+        }
+    }
+
 }
 
 /// The resolution menu. Modes are a subset of what Kevo's main ThinkVision P27u-20 lists (2026-10-28).
@@ -275,9 +308,84 @@ import Testing
         #expect(range.clamped(-4) == 0)
     }
 
+    /// DDC can't set a value above what the monitor reports as its maximum: Kevo's ThinkVisions clamp every
+    /// write to 100, even while their own menu holds them at 150. Only an override says otherwise.
+    @Test func writableMaximumIsTheReportedMaximumForObservedBoost() {
+        let current = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)
+        #expect(current.maximum == 150)
+        #expect(current.writableMaximum == 100)
+        #expect(current.isBoostable)
+        #expect(!current.isBoostWritable)
+        // Remembered from an earlier read, after the monitor was turned down.
+        let learned = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 80, learnedMaximum: 150)
+        #expect(learned.maximum == 150)
+        #expect(learned.writableMaximum == 100)
+        // The garbage-reading cap still applies to what is shown; writes stay at 100.
+        let garbage = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 65_535)
+        #expect(garbage.maximum == 200)
+        #expect(garbage.writableMaximum == 100)
+        // An invalid override is no override.
+        #expect(BrightnessRange(override: 0, reportedMaximum: 100, reportedCurrent: 150).writableMaximum == 100)
+        // The pill shows 0...150 but only lets the user set up to 100.
+        #expect(current.scale == PillScale(maximum: 150, boostStart: 100, limit: 100))
+        #expect(current.scale.settableMaximum == 100)
+    }
+
+    @Test func writableMaximumFollowsAnOverride() {
+        // The override is Kevo's word that the monitor takes more over DDC: writes go up to it.
+        let overridden = BrightnessRange(override: 150, reportedMaximum: 100, reportedCurrent: 150)
+        #expect(overridden.maximum == 150)
+        #expect(overridden.writableMaximum == 150)
+        #expect(overridden.isBoostable)
+        #expect(overridden.isBoostWritable)
+        #expect(overridden.scale == PillScale(maximum: 150, boostStart: 100))
+        #expect(BrightnessRange(override: 120, reportedMaximum: 100, reportedCurrent: 150).writableMaximum == 120)
+        #expect(BrightnessRange(override: 100_000, reportedMaximum: 100).writableMaximum == 0xFFFF)
+        // An override below the reported maximum limits writes as well as the pill.
+        #expect(BrightnessRange(override: 80, reportedMaximum: 100, reportedCurrent: 150).writableMaximum == 80)
+        #expect(BrightnessRange(override: 100, reportedMaximum: 100, reportedCurrent: 150).writableMaximum == 100)
+    }
+
+    @Test func writableMaximumWithoutABoost() {
+        #expect(BrightnessRange.percent.writableMaximum == 100)
+        #expect(BrightnessRange(override: nil, reportedMaximum: nil).writableMaximum == 100)
+        // A native 0...255 monitor takes all of it.
+        let wide = BrightnessRange(override: nil, reportedMaximum: 255, reportedCurrent: 200)
+        #expect(wide.writableMaximum == 255)
+        #expect(!wide.isBoostWritable)
+        #expect(wide.scale == PillScale(maximum: 255, boostStart: 255))
+        #expect(BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 60).writableMaximum == 100)
+    }
+
+    @Test func writesAreClampedToTheWritableMaximum() {
+        let observed = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)
+        #expect(observed.clampedForWrite(130) == 100)
+        #expect(observed.clampedForWrite(150) == 100)
+        #expect(observed.clampedForWrite(42) == 42)
+        #expect(observed.clampedForWrite(-4) == 0)
+        // What is shown still goes to 150.
+        #expect(observed.clamped(150) == 150)
+        // Fractions are of the writable range, so linking can't ask for more than DDC takes.
+        #expect(observed.fraction(for: 50) == 0.5)
+        #expect(observed.fraction(for: 150) == 1)
+        #expect(observed.value(forFraction: 1) == 100)
+        #expect(observed.value(forFraction: 2) == 100)
+        let overridden = BrightnessRange(override: 150, reportedMaximum: 100)
+        #expect(overridden.clampedForWrite(130) == 130)
+        #expect(overridden.clampedForWrite(400) == 150)
+    }
+
     @Test func captions() {
+        // A boost the monitor made itself can be shown but not set.
         let boost = BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 150)
-        #expect(BrightnessControl.ddc.caption(range: boost) == "DDC · up to 150")
+        #expect(BrightnessControl.ddc.caption(range: boost) == "DDC · boost from monitor menu")
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: nil, reportedMaximum: 100, reportedCurrent: 80, learnedMaximum: 150))
+                == "DDC · boost from monitor menu")
+        // An override says DDC takes it.
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: 150, reportedMaximum: 100, reportedCurrent: 150)) == "DDC · up to 150")
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: 130, reportedMaximum: 100)) == "DDC · up to 130")
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: 80, reportedMaximum: 100, reportedCurrent: 150)) == "DDC")
+        #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: nil, reportedMaximum: 255)) == "DDC")
         #expect(BrightnessControl.ddc.caption(range: BrightnessRange(override: nil, reportedMaximum: 100)) == "DDC")
         #expect(BrightnessControl.native(builtIn: true).caption(range: .percent) == "Built-in")
         #expect(BrightnessControl.native(builtIn: false).caption(range: .percent) == "Apple display")

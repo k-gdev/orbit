@@ -7,10 +7,15 @@ import Foundation
 ///   current value exceeds its maximum, now or remembered from an earlier read), that higher value is used:
 ///   Kevo's ThinkVisions reply "150 of 100" after their own menu boosted them.
 /// - `nominalMaximum` (where the boost begins) = what DDC reported ?? 100, never past `maximum`. A monitor
-///   that natively reports 0...255 therefore has no boost zone; one that reports 100 but takes 150 does.
+///   that natively reports 0...255 therefore has no boost zone; one that reports 100 but shows 150 does.
+/// - `writableMaximum` (the most Orbit sends) = the override ?? `nominalMaximum`. A boost seen only in a
+///   reading is the monitor's own (its menu set it) and DDC can't reach it: the ThinkVisions clamp every write
+///   above their reported 100 to 100. The pill shows the boost but stops there; an override is Kevo's word that
+///   the monitor takes more over DDC, so writes go up to it.
 public struct BrightnessRange: Equatable, Sendable {
     public private(set) var maximum: Int
     public private(set) var nominalMaximum: Int
+    public private(set) var writableMaximum: Int
 
     /// The largest maximum Orbit accepts from anywhere (DDC values are 16-bit).
     public static let ceiling = 0xFFFF
@@ -26,25 +31,39 @@ public struct BrightnessRange: Equatable, Sendable {
         let limit = reported * Self.observedExtensionLimit
         let observed = [reportedCurrent, learnedMaximum].compactMap { $0 }.filter { $0 > reported }.map { min($0, limit) }.max()
         let automatic = max(reported, observed ?? reported)
-        let chosen = override.flatMap { $0 > 0 ? min($0, Self.ceiling) : nil } ?? automatic
+        let overridden = override.flatMap { $0 > 0 ? min($0, Self.ceiling) : nil }
+        let chosen = overridden ?? automatic
         maximum = chosen
         nominalMaximum = min(reported, chosen)
+        writableMaximum = overridden ?? nominalMaximum
     }
 
-    /// The `PillSlider` scale: 0...maximum, striped past `nominalMaximum`.
-    public var scale: PillScale { PillScale(maximum: Double(maximum), boostStart: Double(nominalMaximum)) }
+    /// The `PillSlider` scale: 0...maximum, striped past `nominalMaximum`, settable up to `writableMaximum`.
+    public var scale: PillScale {
+        PillScale(maximum: Double(maximum), boostStart: Double(nominalMaximum),
+                  limit: writableMaximum < maximum ? Double(writableMaximum) : nil)
+    }
 
     /// Whether the pill has a boost zone.
     public var isBoostable: Bool { maximum > nominalMaximum }
 
-    /// `value` limited to 0...maximum.
+    /// Whether Orbit can set values in the boost zone (an override), rather than only show them.
+    public var isBoostWritable: Bool { writableMaximum > nominalMaximum }
+
+    /// `value` limited to 0...maximum: what the pill can show.
     public func clamped(_ value: Double) -> Double { min(max(value, 0), Double(maximum)) }
 
-    /// `value` as a fraction of the range, 0...1 (for linking).
-    public func fraction(for value: Double) -> Double { maximum > 0 ? clamped(value) / Double(maximum) : 0 }
+    /// `value` limited to 0...writableMaximum: the most that is ever sent to the display.
+    public func clampedForWrite(_ value: Double) -> Double { min(max(value, 0), Double(writableMaximum)) }
 
-    /// The value at `fraction` of the range, rounded to a whole step.
-    public func value(forFraction fraction: Double) -> Double { clamped((min(max(fraction, 0), 1) * Double(maximum)).rounded()) }
+    /// `value` as a fraction of the writable range, 0...1 (for linking). Writable rather than shown, so a
+    /// monitor boosted to 150 of a reported 100 counts as full and a linked move never asks for more than DDC takes.
+    public func fraction(for value: Double) -> Double { writableMaximum > 0 ? clampedForWrite(value) / Double(writableMaximum) : 0 }
+
+    /// The value at `fraction` of the writable range, rounded to a whole step.
+    public func value(forFraction fraction: Double) -> Double {
+        clampedForWrite((min(max(fraction, 0), 1) * Double(writableMaximum)).rounded())
+    }
 }
 
 /// How Orbit drives a display's brightness, in the order it tries them.
@@ -60,11 +79,11 @@ public enum BrightnessControl: Equatable, Sendable {
     /// None of the above (no DDC and software dimming turned off).
     case unavailable
 
-    /// The tile's caption under the display name: "Built-in", "DDC · up to 150", "Software dimming", ...
+    /// The tile's caption under the display name: "Built-in", "DDC · boost from monitor menu", "Software dimming", ...
     public func caption(range: BrightnessRange) -> String {
         switch self {
         case .native(let builtIn): builtIn ? "Built-in" : "Apple display"
-        case .ddc: range.isBoostable ? "DDC · up to \(range.maximum)" : "DDC"
+        case .ddc: range.isBoostable ? (range.isBoostWritable ? "DDC · up to \(range.maximum)" : "DDC · boost from monitor menu") : "DDC"
         case .software: "Software dimming"
         case .probing: "Checking DDC…"
         case .unavailable: "Brightness not adjustable"

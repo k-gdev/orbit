@@ -92,13 +92,18 @@ private struct DisplayTileView: View {
     private var help: String {
         switch tile.control {
         case .native: "Brightness of \(tile.title)"
-        case .ddc: model.range(for: tile).isBoostable
-            ? "Brightness over DDC. Past \(model.range(for: tile).nominalMaximum) is the monitor's boost range."
-            : "Brightness over DDC"
+        case .ddc: ddcHelp(model.range(for: tile))
         case .software: "This monitor doesn't answer DDC, so Orbit darkens the picture instead (the backlight stays as it is)."
         case .probing: "Asking the monitor for its brightness…"
         case .unavailable: ""
         }
+    }
+
+    private func ddcHelp(_ range: BrightnessRange) -> String {
+        guard range.isBoostable else { return "Brightness over DDC" }
+        return range.isBoostWritable
+            ? "Brightness over DDC. Past \(range.nominalMaximum) is the monitor's boost range."
+            : "Brightness over DDC, up to \(range.nominalMaximum). Past that is a boost only the monitor's own menu can set; Orbit shows it but can't."
     }
 }
 

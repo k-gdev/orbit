@@ -22,8 +22,9 @@ struct DisplaysSettingsView: View {
                         + "Turning this off, or quitting Orbit, puts the colours back.")
             }
             SettingsSection("Maximum brightness",
-                            footnote: "For monitors that report 100 but accept more from their own menu, such as ThinkVisions that go to 150. "
-                                + "Auto uses what the monitor reports, or the highest value Orbit has read from it twice in a row. Past 100 the pill is striped.") {
+                            footnote: "For monitors that report 100 but accept more over DDC. Past 100 the pill is striped. "
+                                + "Auto shows what the monitor reports, or the highest value Orbit has read from it twice in a row, but sends 100 at most: "
+                                + "ThinkVisions that go to 150 from their own menu ignore DDC above 100. A fixed maximum is sent as it is.") {
                 let externals = model.tiles.filter { !$0.isBuiltIn && !Self.isNative($0.control) }
                 if externals.isEmpty {
                     Text("No external displays connected.").foregroundStyle(.secondary)
@@ -92,7 +93,7 @@ private struct MaximumBrightnessRow: View {
                 } onDecrement: {
                     set((override ?? automatic ?? 100) - Self.step)
                 }
-                .help("The most this monitor's pill goes to (\(Self.range.lowerBound)–\(Self.range.upperBound))")
+                .help("The most this monitor's pill goes to, and the most Orbit sends it (\(Self.range.lowerBound)–\(Self.range.upperBound)). Auto shows a boost from the monitor's menu but doesn't send it.")
             }
         }
     }

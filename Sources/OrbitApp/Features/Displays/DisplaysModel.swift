@@ -114,7 +114,8 @@ final class DisplaysModel: ObservableObject {
 
     // MARK: Ranges
 
-    /// The pill's range for `tile`: DDC displays get their reported / learned / overridden range.
+    /// The pill's range for `tile`: DDC displays get their reported / learned / overridden range. What it shows
+    /// can be more than what is written (`writableMaximum`): a boost the monitor's own menu set is shown only.
     func range(for tile: Tile) -> BrightnessRange {
         guard tile.control == .ddc || (tile.control == .probing && tile.reading != nil) else { return .percent }
         return BrightnessRange(override: settings.maxOverride(for: tile.key), reportedMaximum: tile.reading?.maximum,
@@ -320,11 +321,15 @@ final class DisplaysModel: ObservableObject {
             let members = linked.map { BrightnessLink.Member(id: String($0.id), range: range(for: $0), value: baseline[$0.id] ?? $0.brightness) }
             let values = BrightnessLink.values(changing: String(id), to: value, members: members)
             for i in tiles.indices {
-                guard let new = values[String(tiles[i].id)], new != tiles[i].brightness else { continue }
+                guard let new = values[String(tiles[i].id)] else { continue }
+                // Another display sitting past what DDC can write (boosted from its menu) and only asked for that
+                // maximum stays as it is: writing 100 would drop its boost for a move that didn't dim it.
+                let current = tiles[i].id == id ? tiles[i].brightness : range(for: tiles[i]).clampedForWrite(tiles[i].brightness)
+                guard new != current else { continue }
                 change(i, to: new)
             }
         } else {
-            let new = range(for: tiles[index]).clamped(value.rounded())
+            let new = range(for: tiles[index]).clampedForWrite(value.rounded())
             if new != tiles[index].brightness { change(index, to: new) }
         }
     }

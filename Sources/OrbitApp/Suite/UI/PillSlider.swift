@@ -8,7 +8,8 @@ import SwiftUI
 ///   content (an SF Symbol, or an app icon). An optional `label` (an app name, `LevelBars`) follows it.
 /// - The value text (`valueText(value)`) sits inside on the right; it turns accent-coloured when boosted.
 /// - Past `scale.boostStart` (100) the track is striped in the accent colour (`Stripes`), whether or not
-///   the fill reaches it, and the filled part of that zone is tinted.
+///   the fill reaches it, and the filled part of that zone is tinted. With `scale.limit` the stripes can be
+///   shown but not set: input stops at the limit, while a value past it (a boost the monitor chose) is drawn as is.
 /// - Dragging anywhere on the pill sets the value (the fill's end follows the pointer); a mouse wheel
 ///   nudges it by `scale.wheelStep`; a sideways trackpad swipe moves it continuously (vertical trackpad
 ///   scrolling is left to the enclosing scroll view, and momentum after lift-off is ignored). Scrolls only
@@ -220,7 +221,7 @@ struct PillSlider: View {
         let whole = step > 0 ? (wheel.residual / step).rounded(.towardZero) * step : wheel.residual
         if whole != 0 {
             wheel.residual -= whole
-            set(scale.clamped(value + whole))
+            set(scale.moved(value, by: whole))
         }
         scheduleEditingEnded()
         return true
