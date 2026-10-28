@@ -137,6 +137,72 @@ import Testing
         #expect(ramp.next() == 1.5)
     }
 
+    // MARK: Apps
+
+    /// Helper processes (Chrome renderers, Electron helpers, WebKit's GPU process) count as their app, so
+    /// each app gets one pill. Process IDs and responsible apps are from Kevo's Mac.
+    @Test func helperGroupsUnderApp() {
+        typealias G = AudioAppGrouping
+        #expect(G.appBundleID(processBundleID: "com.google.Chrome.helper") == "com.google.Chrome")
+        #expect(G.appBundleID(processBundleID: "com.google.Chrome.helper.renderer") == "com.google.Chrome")
+        #expect(G.appBundleID(processBundleID: "com.google.Chrome.helper.GPU", responsibleBundleID: "com.google.Chrome") == "com.google.Chrome")
+        #expect(G.appBundleID(processBundleID: "com.hnc.Discord.helper.Renderer") == "com.hnc.Discord")
+        #expect(G.appBundleID(processBundleID: "com.ringcentral.glip.helper.Plugin") == "com.ringcentral.glip")
+        #expect(G.appBundleID(processBundleID: "com.tinyspeck.slackmacgap.helper") == "com.tinyspeck.slackmacgap")
+        // WebKit's out-of-process pieces belong to whichever app is responsible for them.
+        #expect(G.appBundleID(processBundleID: "com.apple.WebKit.GPU", responsibleBundleID: "com.apple.Safari") == "com.apple.Safari")
+        #expect(G.appBundleID(processBundleID: "com.apple.WebKit.WebContent", responsibleBundleID: "com.apple.mail") == "com.apple.mail")
+        #expect(G.appBundleID(processBundleID: "com.apple.WebKit.GPU") == "com.apple.WebKit.GPU")
+        // A helper whose name doesn't follow the app's ID still goes to its responsible app.
+        #expect(G.appBundleID(processBundleID: "com.anysphere.sand.electron-helper", responsibleBundleID: "com.todesktop.cursor") == "com.todesktop.cursor")
+        #expect(G.appBundleID(processBundleID: "com.anysphere.sand.electron-helper") == "com.anysphere.sand")
+        // Processes without a bundle ID (a command-line player) show as the app that launched them.
+        #expect(G.appBundleID(processBundleID: nil, responsibleBundleID: "com.apple.Terminal") == "com.apple.Terminal")
+        #expect(G.appBundleID(processBundleID: "", responsibleBundleID: nil) == nil)
+        #expect(G.appBundleID(processBundleID: nil, responsibleBundleID: "") == nil)
+        // Ordinary apps stay themselves; an app launched from Xcode is still itself.
+        #expect(G.appBundleID(processBundleID: "com.spotify.client") == "com.spotify.client")
+        #expect(G.appBundleID(processBundleID: "com.spotify.client", responsibleBundleID: "com.spotify.client") == "com.spotify.client")
+        #expect(G.appBundleID(processBundleID: "com.example.Game", responsibleBundleID: "com.apple.dt.Xcode", processIsApp: true) == "com.example.Game")
+        // "helper" must be a whole component past the vendor part.
+        #expect(G.helperParent(of: "com.example.helperkit") == nil)
+        #expect(G.helperParent(of: "helper.example.app") == nil)
+        #expect(G.helperParent(of: "com.helper") == nil)
+        #expect(G.helperParent(of: "com.example.Helper") == "com.example")
+    }
+
+    /// The Apps list: what's playing, pinned apps, apps with settings that are running, or every app with
+    /// audio when "Show all apps" is on. Pinned first, then by name, so rows don't jump around.
+    @Test func visibleAppsFilterAndOrder() {
+        func app(_ id: String, _ name: String, running: Bool = true, playing: Bool = false, listable: Bool = true) -> AudioAppCandidate {
+            AudioAppCandidate(bundleID: id, name: name, isRunning: running, isPlaying: playing, isListable: listable)
+        }
+        let candidates = [
+            app("com.apple.Music", "Music", playing: true),
+            app("com.google.Chrome", "Google Chrome", playing: true),
+            app("com.hnc.Discord", "Discord"),
+            app("com.tinyspeck.slackmacgap", "Slack"),
+            app("com.ringcentral.glip", "RingCentral"),
+            app("com.apple.controlcenter", "Control Center", playing: true, listable: false),
+            app("com.kevo.orbit", "Orbit", playing: true),
+            app("com.spotify.client", "Spotify", running: false),
+        ]
+        let quiet = AudioAppList.visible(candidates, pinned: [], customised: [], showAll: false, excluding: ["com.kevo.orbit"])
+        #expect(quiet.map(\.name) == ["Google Chrome", "Music"])
+
+        let pinned = AudioAppList.visible(candidates, pinned: ["com.ringcentral.glip", "com.spotify.client"],
+                                          customised: ["com.tinyspeck.slackmacgap"], showAll: false, excluding: ["com.kevo.orbit"])
+        #expect(pinned.map(\.name) == ["RingCentral", "Spotify", "Google Chrome", "Music", "Slack"])
+
+        let all = AudioAppList.visible(candidates, pinned: ["com.spotify.client"], customised: [], showAll: true, excluding: ["com.kevo.orbit"])
+        #expect(all.map(\.name) == ["Spotify", "Discord", "Google Chrome", "Music", "RingCentral", "Slack"])
+
+        // Two entries for one app (main process and a helper resolved separately) merge.
+        let merged = AudioAppList.visible([app("a", "A"), app("a", "A", playing: true)], pinned: [], customised: [], showAll: false)
+        #expect(merged.count == 1)
+        #expect(merged.first?.isPlaying == true)
+    }
+
     @Test func settingsRejectBadData() throws {
         let (d, cleanup) = Fixtures.defaults()
         defer { cleanup() }
