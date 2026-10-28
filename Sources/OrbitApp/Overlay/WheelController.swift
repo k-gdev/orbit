@@ -15,6 +15,9 @@ final class WheelController {
     var logsDropEvents = false
     /// Helper availability used to build slices. Task 10 points this at the job coordinator.
     var capabilities: () -> Capabilities
+    /// Whether the Actions ring offers SHELF: true while the Shelf feature is on. `SettingsStore` cannot
+    /// see suite state, so the app supplies it.
+    var shelfActionEnabled: () -> Bool = { false }
 
     /// Wheel centre in screen coordinates while shown.
     private(set) var center: CGPoint = .zero
@@ -115,8 +118,9 @@ final class WheelController {
     }
 
     private func content(for kind: WheelKind, items: [DroppedItem]) -> WheelContent {
-        SliceCatalog.content(for: items, wheel: kind, capabilities: capabilities(),
-                             settings: settings.catalogSettings)
+        var catalog = settings.catalogSettings
+        catalog.showShelfAction = shelfActionEnabled()
+        return SliceCatalog.content(for: items, wheel: kind, capabilities: capabilities(), settings: catalog)
     }
 
     private func loadThumbnail(for items: [DroppedItem]) {
