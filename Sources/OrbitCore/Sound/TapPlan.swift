@@ -157,10 +157,10 @@ public struct TapLifecycle: Equatable, Sendable {
 ///
 /// A replacement tap is started before the one it replaces is released (so the app is never heard
 /// unattenuated in between); the old one "retires" until its successor has started. The rules here make sure
-/// no retired tap outlives that: a start releases every tap built before it, a failure releases the failed
-/// tap and every older one, and releasing an app releases its current tap and all its predecessors (a tap
-/// released before it got going reports nothing, so its predecessors can't wait for its report). Pure
-/// bookkeeping; the engine invalidates what the calls return.
+/// no retired tap outlives that: a start releases every tap built before it, a failure of the current tap
+/// releases it and every older one (a failed retiring tap takes only itself), and releasing an app releases its
+/// current tap and all its predecessors (a tap released before it got going reports nothing, so its
+/// predecessors can't wait for its report). Pure bookkeeping; the engine invalidates what the calls return.
 public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     /// Each app's current tap.
     public private(set) var currentByApp: [String: ID] = [:]
@@ -188,15 +188,20 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
         return removeRetiring(app, upTo: index)
     }
 
-    /// `tap` failed (or stopped working): it and every tap of the app built before it are done (the app plays as
-    /// usual meanwhile). Returns those to release.
+    /// `tap` failed (or stopped working). Returns those to release:
+    /// - the current tap: it and every tap of the app built before it (the app plays as usual meanwhile, and no
+    ///   successor is left whose start would release them);
+    /// - a retiring tap: only itself. An older one may still be playing the app at its setting, and goes when the
+    ///   current tap starts or fails, or the app is released.
     public mutating func failed(_ tap: ID, for app: String) -> [ID] {
         if currentByApp[app] == tap {
             currentByApp[app] = nil
             return removeRetiring(app, upTo: nil) + [tap]
         }
-        guard let index = retiringByApp[app]?.firstIndex(of: tap) else { return [] }
-        return removeRetiring(app, upTo: index + 1)
+        guard var list = retiringByApp[app], let index = list.firstIndex(of: tap) else { return [] }
+        list.remove(at: index)
+        retiringByApp[app] = list.isEmpty ? nil : list
+        return [tap]
     }
 
     /// The app needs no tap any more: its current tap and every predecessor. Returns those to release.

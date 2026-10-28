@@ -13,8 +13,8 @@ import OrbitCore
 ///   released, so dragging a slider across 100 doesn't tear down and rebuild the tap on the way.
 /// - A replacement tap (new device, new processes) is started before the old one is released, so the app
 ///   is never heard unattenuated in between. `TapRoster` keeps that bookkeeping: a start releases every older
-///   tap of the app, a failure releases the failed tap and every older one, and releasing an app releases all
-///   its taps, so no replaced tap can outlive its app's release.
+///   tap of the app, a failure of the current tap releases it and every older one (a failed replaced tap takes
+///   only itself), and releasing an app releases all its taps, so no replaced tap can outlive its app's release.
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
 /// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
 ///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
@@ -251,7 +251,8 @@ final class SoundEngine {
     }
 
     /// Builds a new current tap for the app; the one it replaces retires until the new one has started
-    /// (`TapRoster`): its start releases every older tap, its failure releases it and every older tap.
+    /// (`TapRoster`): its start releases every older tap, its failure (while current) releases it and every older
+    /// tap.
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
         let serial = nextSerial
         nextSerial += 1

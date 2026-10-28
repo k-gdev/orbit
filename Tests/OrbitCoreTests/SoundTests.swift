@@ -1050,8 +1050,8 @@ extension SoundTests {
             #expect(Set(other.all) == ["C"])
         }
 
-        /// A failed current tap goes with every tap built before it (the app then plays as usual); a failed
-        /// retiring tap takes only the older ones. `releaseAll` empties everything (feature off, quit).
+        /// A failed current tap goes with every tap built before it (the app then plays as usual, and no successor is
+        /// left to release them). `releaseAll` empties everything (feature off, quit).
         @Test func aFailureReleasesItAndOlderTaps() {
             var roster = TapRoster<String>()
             roster.install("A", for: "chrome")
@@ -1059,15 +1059,43 @@ extension SoundTests {
             roster.install("C", for: "chrome")
             #expect(Set(roster.failed("C", for: "chrome")) == ["A", "B", "C"])
             #expect(roster.isEmpty)
-            roster.install("A", for: "chrome")
-            roster.install("B", for: "chrome")
             roster.install("C", for: "chrome")
-            #expect(Set(roster.failed("B", for: "chrome")) == ["A", "B"])
-            #expect(roster.current(for: "chrome") == "C")
             roster.install("X", for: "discord")
             #expect(Set(roster.releaseAll()) == ["C", "X"])
             #expect(roster.isEmpty)
             #expect(roster.currentByApp.isEmpty)
+        }
+
+        /// F3: a retiring tap that fails takes only itself. Chrome plays through A at 50 %; B replaced it, then C replaced
+        /// B while C is still being built; B fails. A keeps Chrome at 50 % until C starts, instead of Chrome being heard
+        /// unattenuated meanwhile. Nothing is stranded: C's start, C's failure or Chrome's release takes A.
+        @Test func aFailedRetiringTapReleasesOnlyItself() {
+            func chain() -> TapRoster<String> {
+                var roster = TapRoster<String>()
+                roster.install("A", for: "chrome")
+                _ = roster.started("A", for: "chrome")
+                roster.install("B", for: "chrome")
+                roster.install("C", for: "chrome")
+                return roster
+            }
+            var roster = chain()
+            let b = roster.failed("B", for: "chrome")
+            #expect(!b.contains("A"))
+            #expect(Set(roster.all) == ["A", "C"])
+            #expect(roster.current(for: "chrome") == "C")
+            let c = roster.started("C", for: "chrome")
+            #expect(c == ["A"])
+            #expect(roster.all == ["C"])
+            var failing = chain()
+            _ = failing.failed("B", for: "chrome")
+            let cFailed = failing.failed("C", for: "chrome")
+            #expect(Set(cFailed) == ["A", "C"])
+            #expect(failing.isEmpty)
+            var reset = chain()
+            _ = reset.failed("B", for: "chrome")
+            let released = reset.release("chrome")
+            #expect(Set(released) == ["A", "C"])
+            #expect(reset.isEmpty)
         }
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
