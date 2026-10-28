@@ -291,6 +291,139 @@ import Testing
 }
 
 extension SoundTests {
+    /// The shared mic mute (Review Focus 6): Orbit remembers what it changed and puts back exactly that,
+    /// never "restoring" a mute it did not apply.
+    @Suite struct MicMuteStateTests {
+        let headset = MicDeviceReading(deviceUID: "Headset", canSetMute: true, isMuted: false, canSetVolume: true, volume: 0.8)
+
+        @Test func restoresPreviousState() {
+            var state = MicMuteState()
+            #expect(!state.isMuted)
+            let r1 = state.mute(headset); #expect(r1 == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.isMuted)
+            #expect(state.deviceUID == "Headset")
+            // Muting again changes nothing and keeps the first record.
+            let r2 = state.mute(headset); #expect(r2 == [])
+            let r3 = state.restore(); #expect(r3 == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(!state.isMuted)
+            // Nothing left to restore (a second quit, or unmute after unmute).
+            let r4 = state.restore(); #expect(r4 == [])
+        }
+
+        /// A device without a mute control is muted by turning its input volume to 0, and the volume it had
+        /// comes back on unmute.
+        @Test func volumeFallbackRestoresVolume() {
+            var state = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            let r5 = state.mute(noMute); #expect(r5 == [.setVolume(deviceUID: "USB", volume: 0)])
+            #expect(state.isMuted)
+            let r6 = state.restore(); #expect(r6 == [.setVolume(deviceUID: "USB", volume: 0.62)])
+            #expect(!state.isMuted)
+            // A mic that has neither control can't be muted.
+            let fixed = MicDeviceReading(deviceUID: "Fixed", canSetMute: false, isMuted: false, canSetVolume: false, volume: nil)
+            let r7 = state.mute(fixed); #expect(r7 == nil)
+            #expect(!state.isMuted)
+            let r8 = state.mute(MicDeviceReading(deviceUID: "X", canSetMute: false, isMuted: false, canSetVolume: true, volume: nil)); #expect(r8 == nil)
+        }
+
+        /// The mic was already muted (by the user, in Sound settings or on the headset) when Orbit's mute was
+        /// pressed: Orbit's unmute and quit leave it muted.
+        @Test func doesNotUnmuteUserMute() {
+            var state = MicMuteState()
+            var userMuted = headset
+            userMuted.isMuted = true
+            let r9 = state.mute(userMuted); #expect(r9 == [])
+            #expect(state.isMuted)
+            let r10 = state.restore(); #expect(r10 == [])
+            #expect(!state.isMuted)
+            // Same for a volume the user had at zero.
+            let zero = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0)
+            let r11 = state.mute(zero); #expect(r11 == [])
+            let r12 = state.restore(); #expect(r12 == [])
+        }
+
+        /// macOS switched the input while muted: the old mic is put back, the new one is muted.
+        @Test func followsInputChange() {
+            var state = MicMuteState()
+            _ = state.mute(headset)
+            let builtIn = MicDeviceReading(deviceUID: "BuiltIn", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
+            let r13 = state.retarget(to: builtIn); #expect(r13 == [.setMute(deviceUID: "Headset", muted: false), .setMute(deviceUID: "BuiltIn", muted: true)])
+            #expect(state.deviceUID == "BuiltIn")
+            // To a device Orbit can't mute: the old one is restored and the mute ends.
+            let fixed = MicDeviceReading(deviceUID: "Fixed", canSetMute: false, isMuted: false, canSetVolume: false, volume: nil)
+            let r14 = state.retarget(to: fixed); #expect(r14 == [.setMute(deviceUID: "BuiltIn", muted: false)])
+            #expect(!state.isMuted)
+            // Not muted: following the input does nothing.
+            let r15 = state.retarget(to: headset); #expect(r15 == [])
+            #expect(!state.isMuted)
+            // To no device at all.
+            _ = state.mute(headset)
+            let r16 = state.retarget(to: nil); #expect(r16 == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(!state.isMuted)
+            // Same device again (a spurious notification): nothing to do.
+            _ = state.mute(headset)
+            let r17 = state.retarget(to: headset); #expect(r17 == [])
+            #expect(state.isMuted)
+        }
+
+        /// The user unmuted the mic outside Orbit: Orbit stops holding the mute and has nothing to restore.
+        @Test func externalUnmuteClearsState() {
+            var state = MicMuteState()
+            _ = state.mute(headset)
+            var stillMuted = headset
+            stillMuted.isMuted = true
+            let r18 = state.deviceChanged(stillMuted); #expect(r18)
+            var other = headset
+            other.deviceUID = "Other"
+            let r19 = state.deviceChanged(other); #expect(r19)            // another device: ignored
+            let r20 = state.deviceChanged(headset); #expect(!r20)         // unmuted elsewhere
+            #expect(!state.isMuted)
+            let r21 = state.restore(); #expect(r21 == [])
+
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            _ = state.mute(noMute)
+            var atZero = noMute
+            atZero.volume = 0
+            let r22 = state.deviceChanged(atZero); #expect(r22)
+            var raised = noMute
+            raised.volume = 0.4
+            let r23 = state.deviceChanged(raised); #expect(!r23)
+            let r24 = state.restore(); #expect(r24 == [])
+        }
+
+        /// After a crash, the next launch undoes a mute the previous run left, but only while the mic is still
+        /// exactly as Orbit left it.
+        @Test func crashRecoveryRestoresOnlyIfUnchanged() throws {
+            var state = MicMuteState()
+            _ = state.mute(headset)
+            let record = try JSONDecoder().decode(MicMuteState.self, from: JSONEncoder().encode(state))
+            #expect(record == state)
+            var mutedNow = headset
+            mutedNow.isMuted = true
+            #expect(MicMuteState.recoveryActions(for: record, current: mutedNow) == [.setMute(deviceUID: "Headset", muted: false)])
+            #expect(MicMuteState.recoveryActions(for: record, current: headset) == [])
+            #expect(MicMuteState.recoveryActions(for: record, current: nil) == [])
+            var other = mutedNow
+            other.deviceUID = "Other"
+            #expect(MicMuteState.recoveryActions(for: record, current: other) == [])
+            #expect(MicMuteState.recoveryActions(for: MicMuteState(), current: mutedNow) == [])
+
+            var volumeState = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            _ = volumeState.mute(noMute)
+            var atZero = noMute
+            atZero.volume = 0
+            #expect(MicMuteState.recoveryActions(for: volumeState, current: atZero) == [.setVolume(deviceUID: "USB", volume: 0.62)])
+            #expect(MicMuteState.recoveryActions(for: volumeState, current: noMute) == [])
+            // A user mute that was already there before Orbit is never undone.
+            var userMuted = MicMuteState()
+            _ = userMuted.mute(mutedNow)
+            #expect(MicMuteState.recoveryActions(for: userMuted, current: mutedNow) == [])
+        }
+    }
+}
+
+extension SoundTests {
     /// When an app gets a process tap (Review Focus 1): only when it is not at 100 %, unmuted, on the
     /// output it would use anyway, and only when there is a device to play on.
     @Suite struct TapPlanTests {
