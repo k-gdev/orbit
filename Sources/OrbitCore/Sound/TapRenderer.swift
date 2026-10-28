@@ -5,20 +5,24 @@ import Foundation
 public enum TapStreamLayout {
     /// The buffers holding the tap, given the channels per input stream of the aggregate and of its output
     /// device: after the device's own input streams (the usual layout) or before them, as long as the
-    /// leftover streams carry exactly `tapChannels` channels. Nil for any other layout, so a microphone
+    /// leftover streams carry exactly `tapChannels` channels. Nil for any other layout, and nil when both
+    /// orders fit but point at different buffers (a device input shaped like the tap), so a microphone
     /// stream is never mistaken for the tap.
     public static func tapBuffers(aggregateInputs: [Int], deviceInputs: [Int], tapChannels: Int) -> Range<Int>? {
         let tapStreams = aggregateInputs.count - deviceInputs.count
         guard tapStreams >= 1 else { return nil }
-        if Array(aggregateInputs.prefix(deviceInputs.count)) == deviceInputs,
-           aggregateInputs.suffix(tapStreams).reduce(0, +) == tapChannels {
-            return deviceInputs.count..<aggregateInputs.count
+        let tapLast = Array(aggregateInputs.prefix(deviceInputs.count)) == deviceInputs
+            && aggregateInputs.suffix(tapStreams).reduce(0, +) == tapChannels
+        let tapFirst = Array(aggregateInputs.suffix(deviceInputs.count)) == deviceInputs
+            && aggregateInputs.prefix(tapStreams).reduce(0, +) == tapChannels
+        let last = deviceInputs.count..<aggregateInputs.count
+        let first = 0..<tapStreams
+        switch (tapLast, tapFirst) {
+        case (true, true): return last == first ? last : nil
+        case (true, false): return last
+        case (false, true): return first
+        case (false, false): return nil
         }
-        if Array(aggregateInputs.suffix(deviceInputs.count)) == deviceInputs,
-           aggregateInputs.prefix(tapStreams).reduce(0, +) == tapChannels {
-            return 0..<tapStreams
-        }
-        return nil
     }
 }
 
