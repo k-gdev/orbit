@@ -163,6 +163,9 @@ final class SamplingEngine: @unchecked Sendable {
             if SamplingPlan.isGap(since: lastCPU, now: now, interval: plan.interval) { cpu.reset() }
             sample.cpu = cpu.sample()
             lastCPU = now
+            // That was only a baseline: take the first real reading half a second later rather than a whole
+            // interval later (2 s for the readout).
+            if sample.cpu == nil { scheduleFirstCPUReading() }
         }
         if plan.metrics.contains(.gpu) { sample.gpu = gpu.sample() }
         if plan.metrics.contains(.memory) { sample.memory = memory.sample() }
@@ -173,5 +176,15 @@ final class SamplingEngine: @unchecked Sendable {
             lastBatteryRefresh = now
         }
         deliver(sample, now, plan.interval)
+    }
+
+    private func scheduleFirstCPUReading() {
+        guard let interval = plan?.interval else { return }
+        queue.asyncAfter(deadline: .now() + min(0.5, interval / 2)) { [weak self] in
+            guard let self, let plan = self.plan, plan.metrics.contains(.cpu), let load = self.cpu.sample() else { return }
+            let now = Date()
+            self.lastCPU = now
+            self.deliver(SystemSample(cpu: load), now, plan.interval)
+        }
     }
 }

@@ -12,6 +12,8 @@ import OrbitCore
 final class SMCReader {
     private var connection: io_connect_t = 0
     private var failed = false
+    /// This reader's keys (discovery is tried once per reader, even when it finds none).
+    private var keys: [Key]?
 
     /// The temperature keys found by the first discovery, shared by every reader in the process.
     private static let lock = NSLock()
@@ -29,7 +31,8 @@ final class SMCReader {
     /// Every known temperature key's reading, or nil when the SMC can't be opened.
     func readTemperatures() -> [SensorReading]? {
         guard open() else { return nil }
-        let keys = Self.cachedKeys() ?? discoverKeys()
+        let keys = self.keys ?? Self.cachedKeys() ?? discoverKeys()
+        self.keys = keys
         return keys.compactMap { key in
             guard let bytes = read(key), let celsius = SMCCode.celsius(type: key.type, bytes: bytes) else { return nil }
             return SensorReading(name: key.name, celsius: celsius)
@@ -77,9 +80,12 @@ final class SMCReader {
                 keys.append(Key(name: name, code: code, size: info.dataSize, type: type))
             }
         }
-        Self.lock.lock()
-        Self.discovered = keys
-        Self.lock.unlock()
+        // An empty result (the SMC refused the listing) is not cached, so a later reader tries again.
+        if !keys.isEmpty {
+            Self.lock.lock()
+            Self.discovered = keys
+            Self.lock.unlock()
+        }
         Log.info("system: \(keys.count) SMC temperature keys")
         return keys
     }
