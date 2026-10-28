@@ -110,7 +110,8 @@ final class SystemMonitor: ObservableObject {
 /// that queue. `stop()` cancels the timer and closes the sensor client and SMC connection.
 final class SamplingEngine: @unchecked Sendable {
     let layout: ClusterLayout
-    private let queue = DispatchQueue(label: "com.kevo.orbit.system.sampling", qos: .utility)
+    /// `.workItem` drains the autorelease pool after every tick (the CF/IOKit copies are bridged objects).
+    private let queue = DispatchQueue(label: "com.kevo.orbit.system.sampling", qos: .utility, autoreleaseFrequency: .workItem)
     private let deliver: @Sendable (SystemSample, Date, TimeInterval) -> Void
 
     // Queue-confined state.
@@ -131,10 +132,13 @@ final class SamplingEngine: @unchecked Sendable {
 
     deinit { timer?.cancel() }
 
-    /// Starts sampling under `plan` (first tick at once), or switches to it.
+    /// Starts sampling under `plan` (first tick at once), or switches to it. Samplers whose metric left the
+    /// plan let go of what they hold (closing the tab with the CPU readout on closes the IOHID client, the SMC
+    /// connection and the accelerator service).
     func run(_ plan: SamplingPlan) {
         queue.async { [self] in
             guard plan != self.plan else { return }
+            release(SamplingPlan.droppedMetrics(from: self.plan, to: plan))
             self.plan = plan
             timer?.cancel()
             let source = DispatchSource.makeTimerSource(queue: queue)
@@ -149,10 +153,20 @@ final class SamplingEngine: @unchecked Sendable {
         queue.async { [self] in
             timer?.cancel()
             timer = nil
+            release(SamplingPlan.droppedMetrics(from: plan, to: nil))
             plan = nil
+            // Whatever the last plan was, nothing stays open once stopped.
             thermal.close()
             gpu.close()
         }
+    }
+
+    /// Closes what the samplers of `metrics` hold open; they reopen on their next sample.
+    private func release(_ metrics: Set<SystemMetric>) {
+        if metrics.contains(.temperature) { thermal.close() }
+        if metrics.contains(.gpu) { gpu.close() }
+        if metrics.contains(.cpu) { cpu.reset() }
+        if metrics.contains(.batteries) { lastBatteryRefresh = nil }
     }
 
     private func tick() {

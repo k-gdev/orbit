@@ -28,6 +28,12 @@ public struct SamplingPlan: Equatable, Sendable {
         return SamplingPlan(interval: readoutInterval, metrics: readout.metrics)
     }
 
+    /// The metrics `old` sampled and `new` doesn't: their samplers should let go of what they hold (the IOHID
+    /// client and SMC connection for temperature, the accelerator service for the GPU).
+    public static func droppedMetrics(from old: SamplingPlan?, to new: SamplingPlan?) -> Set<SystemMetric> {
+        (old?.metrics ?? []).subtracting(new?.metrics ?? [])
+    }
+
     /// Whether batteries should be re-read now.
     public static func isBatteryRefreshDue(lastRefresh: Date?, now: Date) -> Bool {
         guard let lastRefresh else { return true }
