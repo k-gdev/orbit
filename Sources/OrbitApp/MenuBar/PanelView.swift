@@ -150,7 +150,7 @@ private struct PanelTabRow: View {
 
     var body: some View {
         let dark = colorScheme == .dark
-        HStack(spacing: 1) {
+        HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { id in
                 let isOn = id == selected
                 Button { select(id) } label: {
@@ -158,13 +158,15 @@ private struct PanelTabRow: View {
                         Image(systemName: id.symbol)
                             .font(.system(size: 14, weight: .medium))
                             .frame(height: 17)
+                        // Eight tabs share 364 pt, so labels are small and slightly tight; with fewer
+                        // tabs enabled the same size simply gets more room.
                         Text(id.title)
-                            .font(.system(size: 10, weight: isOn ? .semibold : .medium))
-                            .tracking(-0.2)
+                            .font(.system(size: 9.5, weight: isOn ? .semibold : .medium))
+                            .tracking(-0.25)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.85)
                     }
-                    .foregroundStyle(isOn ? OrbitTheme.accent : PanelStyle.colors(for: colorScheme).secondaryInk)
+                    .foregroundStyle(isOn ? PanelStyle.accent(for: colorScheme) : PanelStyle.colors(for: colorScheme).secondaryInk)
                     .padding(.top, 7).padding(.bottom, 6)
                     .frame(maxWidth: .infinity)
                     .background {

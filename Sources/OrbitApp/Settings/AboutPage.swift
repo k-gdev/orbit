@@ -9,8 +9,7 @@ struct AboutPage: View {
     var body: some View {
         SettingsPageScroll(title: "About") {
             HStack(spacing: 14) {
-                Image(nsImage: NSApp.applicationIconImage ?? NSImage())
-                    .resizable().frame(width: 64, height: 64)
+                appIcon.frame(width: 64, height: 64)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Orbit").font(.system(size: 18, weight: .semibold))
                     Text(Self.versionText).foregroundStyle(.secondary).textSelection(.enabled)
@@ -34,6 +33,23 @@ struct AboutPage: View {
                 Text("Attach this file when you report a problem.").font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The bundle's icon; an unbundled development build (no icon) shows the menu bar glyph instead.
+    @ViewBuilder private var appIcon: some View {
+        if Bundle.main.infoDictionary?["CFBundleIconFile"] != nil, let icon = NSApp.applicationIconImage {
+            Image(nsImage: icon).resizable()
+        } else {
+            Image(nsImage: Self.glyph).resizable().renderingMode(.template).foregroundStyle(OrbitTheme.accent)
+                .padding(8)
+        }
+    }
+
+    private static var glyph: NSImage {
+        let image = NSImage(size: NSSize(width: OrbitGlyph.side, height: OrbitGlyph.side))
+        if let rep = OrbitGlyph.bitmap(busy: false, scale: 8) { image.addRepresentation(rep) }
+        image.isTemplate = true
+        return image
     }
 
     /// "Version 1.1.0 (110)" from the bundle, or a note for an unbundled development build.

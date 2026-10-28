@@ -22,6 +22,15 @@ struct PanelStyle {
         scheme == .dark ? dark : light
     }
 
+    /// The accent for text and icons on the panel: `OrbitTheme.accent` in light; in dark, the same hue
+    /// lifted 50 % towards white so it stays readable on dark glass.
+    @MainActor static func accent(for scheme: ColorScheme) -> Color {
+        guard scheme == .dark else { return OrbitTheme.accent }
+        let c = OrbitTheme.accentRGBA
+        func lift(_ v: Double) -> Double { v + (1 - v) * 0.5 }
+        return Color(.sRGB, red: lift(c.r), green: lift(c.g), blue: lift(c.b), opacity: 1)
+    }
+
     static let light = PanelStyle(
         tileFill: Color.white.opacity(0.72), tileStroke: Color.black.opacity(0.06),
         trackFill: Color.black.opacity(0.08), pillFill: .white,
@@ -101,6 +110,8 @@ struct PanelLinkButton: View {
     var systemImage: String?
     let action: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
     init(_ title: String, systemImage: String? = nil, action: @escaping () -> Void) {
         self.title = title
         self.systemImage = systemImage
@@ -113,7 +124,7 @@ struct PanelLinkButton: View {
                 if let systemImage { Image(systemName: systemImage).font(.system(size: 10, weight: .semibold)) }
                 Text(title).font(.system(size: 12, weight: .medium))
             }
-            .foregroundStyle(OrbitTheme.accent)
+            .foregroundStyle(PanelStyle.accent(for: colorScheme))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

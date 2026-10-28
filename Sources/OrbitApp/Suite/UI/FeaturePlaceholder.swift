@@ -29,13 +29,9 @@ struct FeaturePlaceholderSettings: View {
     let feature: FeatureID
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Settings").font(.headline)
+        SettingsSection("Settings") {
             Text("\(feature.title) settings arrive with the feature in this build.")
                 .foregroundStyle(.secondary)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
         }
     }
 }

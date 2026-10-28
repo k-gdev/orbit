@@ -136,11 +136,16 @@ struct PillSlider: View {
             Text(valueText(value))
                 .font(.system(size: 12, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(scale.isBoosted(value) ? OrbitTheme.accent : ink)
+                .foregroundStyle(scale.isBoosted(value) ? boostedInk(onFill: ink == PanelStyle.colors(for: colorScheme).inkOnFill) : ink)
                 .padding(.trailing, height * 0.38)
         }
         .foregroundStyle(ink)
         .opacity(isDimmed ? 0.55 : 1)
+    }
+
+    /// Boosted value text: the accent, lifted for dark mode where it sits on the dark track.
+    private func boostedInk(onFill: Bool) -> Color {
+        onFill ? OrbitTheme.accent : PanelStyle.accent(for: colorScheme)
     }
 
     @ViewBuilder private func leadingView(interactive: Bool) -> some View {

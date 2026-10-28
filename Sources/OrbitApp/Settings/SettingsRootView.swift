@@ -26,7 +26,8 @@ struct SettingsDependencies {
 }
 
 /// The Settings window: a side rail (General, Wheel, Features, one page per feature, About) and the
-/// selected page. 760 × 560 by default.
+/// selected page. 760 × 560 by default; the window uses a full-size content view with a transparent
+/// title bar, so the rail runs to the top edge.
 struct SettingsRootView: View {
     @ObservedObject var navigation: SettingsNavigation
     @ObservedObject var suite: SuiteSettings
@@ -41,7 +42,10 @@ struct SettingsRootView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        // A plain sidebar list beside the page rather than NavigationSplitView: macOS 26 draws that
+        // sidebar as floating glass, which offscreen snapshots can't capture, and this rail needs no
+        // collapsing. The top inset clears the window's traffic lights (full-size content view).
+        HStack(spacing: 0) {
             List(selection: selection) {
                 Section {
                     ForEach([SettingsPage.general, .wheel, .features], id: \.self) { railRow($0) }
@@ -54,16 +58,22 @@ struct SettingsRootView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 196, max: 240)
-            .toolbar(removing: .sidebarToggle)
-        } detail: {
+            .scrollContentBackground(.hidden)
+            .padding(.top, Self.titlebarInset)
+            .frame(width: Self.railWidth)
+            .background(.regularMaterial)
+            Divider()
             page(navigation.page)
                 .id(navigation.page)
+                .padding(.top, Self.titlebarInset - 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 640, minHeight: 420)
+        .ignoresSafeArea(.container, edges: .top)
     }
+
+    static let railWidth: CGFloat = 200
+    static let titlebarInset: CGFloat = 30
 
     private var selection: Binding<SettingsPage?> {
         Binding(get: { navigation.page }, set: { if let page = $0 { navigation.page = page } })

@@ -67,8 +67,8 @@ protocol SuiteFeature: AnyObject {
 
     /// When true the panel does not wrap `makePanelView()` in a scroll view: the view gets a frame of at
     /// most `\.panelContentMaxHeight` and scrolls itself (for example a pinned search field above a
-    /// scrolling list). Default: false.
-    var managesOwnScrolling: Bool { get }
+    /// scrolling list). Default: false. Static so snapshots honour it too.
+    static var managesOwnScrolling: Bool { get }
 
     /// The panel and settings views over fixture data, for the headless snapshot CLI.
     static func snapshotViews() -> FeatureSnapshotViews
@@ -77,7 +77,7 @@ protocol SuiteFeature: AnyObject {
 extension SuiteFeature {
     func panelDidAppear() {}
     func panelDidDisappear() {}
-    var managesOwnScrolling: Bool { false }
+    static var managesOwnScrolling: Bool { false }
 }
 
 /// What `SuiteFeature.snapshotViews()` returns: the panel tab content and the settings page content.

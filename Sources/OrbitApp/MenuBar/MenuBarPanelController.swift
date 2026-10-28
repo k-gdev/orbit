@@ -31,7 +31,7 @@ final class MenuBarPanelController {
         self.settings = settings
         model.pageProvider = { [registry] id in
             let feature = registry.feature(id)
-            return (feature.makePanelView(), feature.managesOwnScrolling)
+            return (feature.makePanelView(), type(of: feature).managesOwnScrolling)
         }
         model.onSelectionChange = { [weak self] old, new in self?.selectionChanged(from: old, to: new) }
         registry.context.suite.$enabledFeatures

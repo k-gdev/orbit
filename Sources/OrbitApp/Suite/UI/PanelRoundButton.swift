@@ -20,7 +20,8 @@ struct PanelRoundButton: View {
 
     var body: some View {
         Button(action: action) {
-            PanelRoundFace(systemImage: systemImage, isOn: isOn, isHighlighted: false, size: size, style: PanelStyle.colors(for: colorScheme))
+            PanelRoundFace(systemImage: systemImage, isOn: isOn, isHighlighted: false, size: size,
+                           style: PanelStyle.colors(for: colorScheme), accentInk: PanelStyle.accent(for: colorScheme))
                 .opacity(isEnabled ? 1 : 0.45)
         }
         .buttonStyle(.plain)
@@ -49,7 +50,7 @@ struct PanelRoundMenu<MenuContent: View>: View {
             content()
         } label: {
             PanelRoundFace(systemImage: systemImage, isOn: false, isHighlighted: isHighlighted, size: size,
-                           style: PanelStyle.colors(for: colorScheme))
+                           style: PanelStyle.colors(for: colorScheme), accentInk: PanelStyle.accent(for: colorScheme))
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -64,14 +65,15 @@ private struct PanelRoundFace: View {
     let isHighlighted: Bool
     let size: CGFloat
     let style: PanelStyle
+    let accentInk: Color
 
     var body: some View {
         Image(systemName: systemImage)
             .font(.system(size: size * 0.42, weight: .semibold))
-            .foregroundStyle(isOn ? Color.white : (isHighlighted ? OrbitTheme.accent : style.inkOnTrack))
+            .foregroundStyle(isOn ? Color.white : (isHighlighted ? accentInk : style.inkOnTrack))
             .frame(width: size, height: size)
             .background(Circle().fill(isOn ? OrbitTheme.accent : style.trackFill))
-            .overlay(Circle().strokeBorder(OrbitTheme.accent, lineWidth: isHighlighted ? 1.5 : 0))
+            .overlay(Circle().strokeBorder(accentInk, lineWidth: isHighlighted ? 1.5 : 0))
             .contentShape(Circle())
     }
 }
