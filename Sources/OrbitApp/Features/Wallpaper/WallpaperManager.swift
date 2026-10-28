@@ -112,10 +112,12 @@ final class WallpaperManager {
             if ledger != settings.desktopPictures { settings.desktopPictures = ledger }
             Log.info("wallpaper: \(move.to) took over the wallpaper saved for \(move.from)")
         }
-        // "Same on all displays": a display that differs (or was just connected) takes the main display's wallpaper.
+        // "Same on all displays": a display without a wallpaper (one just connected) takes the shared one. One that
+        // shows a different wallpaper keeps it here: only turning the setting on, or choosing while it is on,
+        // replaces wallpapers, so a launch can't overwrite per-display choices for good.
         if settings.syncDisplays {
             let live = WallpaperModel.liveDisplays()
-            assignments.syncDisplays(screens: live.map(\.ref), mainKey: live.first(where: \.isMain)?.key)
+            assignments.syncDisplays(screens: live.map(\.ref), mainKey: live.first(where: \.isMain)?.key, replacing: false)
         }
         // A newly downloaded aerial isn't in the catalog yet: read the manifest again once.
         let assignedAerials = refs.compactMap { assignments[$0.key]?.source.aerialID }

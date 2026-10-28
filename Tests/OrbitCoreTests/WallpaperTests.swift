@@ -422,6 +422,22 @@ enum WallpaperFixtures {
                 == WallpaperSync.Plan(source: tahoe, displays: [right]))
     }
 
+    /// At launch and on hot-plug Orbit only fills displays that have no wallpaper: a display that already shows
+    /// a different one keeps it, so an upgrade (or a relaunch) never overwrites per-display choices for good.
+    @Test func fillingLeavesDisplaysThatHaveAWallpaper() {
+        let all = assignments([(left, oregon), (main, tahoe)])
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: all, replacing: false)
+                == WallpaperSync.Plan(source: tahoe, displays: [right]))
+        var filled = all
+        let changed = filled.syncDisplays(screens: screens, mainKey: main.key, replacing: false)
+        #expect(changed)
+        #expect(filled[left.key]?.source == oregon)
+        #expect(filled[right.key]?.source == tahoe)
+        // Every display has one already: nothing to fill, even though they differ.
+        let full = assignments([(left, oregon), (main, tahoe), (right, oregon)])
+        #expect(WallpaperSync.plan(screens: screens, mainKey: main.key, assignments: full, replacing: false) == nil)
+    }
+
     @Test func unpluggedDisplaysAreLeftAlone() {
         // The unplugged "R" keeps its wallpaper, and does not count as the first display that has one.
         let all = assignments([(right, oregon)])
