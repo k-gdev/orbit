@@ -38,6 +38,38 @@ public enum MicMutePresentation: Equatable, Sendable {
     case mutedElsewhere
 }
 
+/// Keeps Orbit's own mute write from being mistaken for the user unmuting elsewhere.
+///
+/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after Orbit's write
+/// can still show the device unmuted. After `wrote(at:)`, readings that don't show Orbit's mute are ignored
+/// (not concluded from) until one confirms it, or `timeout` passes (then the write evidently didn't take,
+/// and readings count again).
+public struct MicWriteConfirmation: Equatable, Sendable {
+    public static let timeout: TimeInterval = 2
+
+    private var since: Date?
+
+    public init() {}
+
+    /// A write of Orbit's is waiting to be confirmed.
+    public var isWaiting: Bool { since != nil }
+
+    /// Orbit just wrote its mute to the device.
+    public mutating func wrote(at now: Date) {
+        since = now
+    }
+
+    /// Whether `reading` may be taken at face value (and fed to `MicMuteState.deviceChanged`). A reading that
+    /// shows Orbit's mute confirms the write and ends the wait; any other reading is ignored until `timeout`
+    /// after the write.
+    public mutating func mayConclude(from reading: MicDeviceReading, state: MicMuteState, now: Date) -> Bool {
+        guard let since else { return true }
+        guard state.reflects(reading) || now.timeIntervalSince(since) >= Self.timeout else { return false }
+        self.since = nil
+        return true
+    }
+}
+
 /// The logic of the shared mic mute (Sound and Controls, spec §8.3), free of Core Audio so it can be tested.
 ///
 /// Muting uses the device's mute control when it has one, otherwise turns its input volume to 0. Either way
@@ -202,6 +234,16 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         if let applied, reading == nil || reading?.deviceUID == applied.deviceUID { return .mutedByOrbit }
         guard let reading, reading.canSetMute || reading.canSetVolume else { return .unavailable }
         return reading.canSetMute && reading.isMuted ? .mutedElsewhere : .unmuted
+    }
+
+    /// Whether `reading` shows Orbit's mute in effect on its device: the mute control on, or (volume mute) the
+    /// volume at 0. False for another device, or when Orbit's mute is not in effect.
+    public func reflects(_ reading: MicDeviceReading) -> Bool {
+        guard let applied, applied.deviceUID == reading.deviceUID else { return false }
+        switch applied.method {
+        case .muteFlag: return reading.isMuted
+        case .volume: return (reading.volume ?? 1) <= Self.silent
+        }
     }
 
     /// The user asked to unmute a mic that was muted outside Orbit: switch its mute control off (a direct user

@@ -483,6 +483,57 @@ extension SoundTests {
             #expect(state.restoreActions() == [.setMute(deviceUID: "Headset", muted: false)])
         }
 
+        /// N1: a write can take effect asynchronously, so a reading taken right after Orbit's own mute may still say
+        /// "unmuted". That must not be taken for the user unmuting elsewhere: readings are ignored until one
+        /// confirms Orbit's write, or `timeout` passes.
+        @Test func ownWriteIsNotMistakenForOutsideUnmute() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 2000)
+            var state = MicMuteState()
+            var guardian = MicWriteConfirmation()
+            let e1 = guardian.mayConclude(from: headset, state: state, now: t0); #expect(e1)   // nothing written: no wait
+            _ = state.mute(headset)
+            guardian.wrote(at: t0)
+            #expect(guardian.isWaiting)
+            // Still reads unmuted a moment later: ignored, Orbit's mute stays.
+            let e2 = guardian.mayConclude(from: headset, state: state, now: t0.addingTimeInterval(0.02)); #expect(!e2)
+            #expect(state.isMuted)
+            // The write lands: confirmed, the wait ends.
+            var muted = headset
+            muted.isMuted = true
+            let e3 = guardian.mayConclude(from: muted, state: state, now: t0.addingTimeInterval(0.05)); #expect(e3)
+            #expect(!guardian.isWaiting)
+            let stillMuted = state.deviceChanged(muted)
+            #expect(stillMuted)
+            // Later the user really unmutes elsewhere: concluded, Orbit lets go.
+            let e4 = guardian.mayConclude(from: headset, state: state, now: t0.addingTimeInterval(9)); #expect(e4)
+            let after = state.deviceChanged(headset)
+            #expect(!after)
+            // A write that never shows up: after the timeout readings count again (the mute didn't take).
+            _ = state.mute(headset)
+            guardian.wrote(at: t0)
+            let e5 = guardian.mayConclude(from: headset, state: state, now: t0.addingTimeInterval(MicWriteConfirmation.timeout - 0.1))
+            #expect(!e5)
+            let e6 = guardian.mayConclude(from: headset, state: state, now: t0.addingTimeInterval(MicWriteConfirmation.timeout))
+            #expect(e6)
+            #expect(!guardian.isWaiting)
+            // Volume-muted: confirmed once the volume reads 0.
+            var volumeState = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            _ = volumeState.mute(noMute)
+            guardian.wrote(at: t0)
+            let e7 = guardian.mayConclude(from: noMute, state: volumeState, now: t0.addingTimeInterval(0.01)); #expect(!e7)
+            var atZero = noMute
+            atZero.volume = 0
+            let e8 = guardian.mayConclude(from: atZero, state: volumeState, now: t0.addingTimeInterval(0.02)); #expect(e8)
+            #expect(volumeState.reflects(atZero))
+            #expect(!volumeState.reflects(noMute))
+            // A reading of another device says nothing about Orbit's write: ignored while waiting.
+            guardian.wrote(at: t0)
+            var other = headset
+            other.deviceUID = "Other"
+            let e9 = guardian.mayConclude(from: other, state: state, now: t0.addingTimeInterval(0.01)); #expect(!e9)
+        }
+
         /// M2: the mic's live state, whoever muted it. A mute made outside Orbit shows as such; a direct unmute
         /// clears it, and Orbit never "restores" it on its own.
         @Test func liveStateShowsOutsideMute() {

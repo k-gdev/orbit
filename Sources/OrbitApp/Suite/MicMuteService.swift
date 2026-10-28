@@ -38,6 +38,8 @@ final class MicMuteService: NSObject, ObservableObject {
     private var shortcutSubscription: AnyCancellable?
     /// What Orbit's mute changed, and mutes still to undo on devices that went away (`MicMuteState`).
     private var state = MicMuteState()
+    /// Keeps a reading taken before Orbit's own write has landed from being read as an outside unmute.
+    private var confirmation = MicWriteConfirmation()
     /// Where that record survives a crash or a failed quit (nil for the fixture).
     private let restoreDefaults: UserDefaults?
     private var didRecover = false
@@ -209,7 +211,10 @@ final class MicMuteService: NSObject, ObservableObject {
         guard !isFixture else { return }
         let device = MicHAL.defaultInputDevice()
         let reading = MicHAL.reading(for: device)
-        if let reading, state.isMuted, !state.deviceChanged(reading) {
+        // A write can take effect asynchronously: right after Orbit's own mute the device may still read unmuted.
+        // Only conclude "unmuted outside Orbit" once the write was confirmed (or evidently didn't take).
+        if let reading, state.isMuted, confirmation.mayConclude(from: reading, state: state, now: Date()),
+           !state.deviceChanged(reading) {
             Log.info("mic mute: \(reading.deviceUID) was unmuted outside Orbit")
             saveRecord()
         }
@@ -236,6 +241,7 @@ final class MicMuteService: NSObject, ObservableObject {
             updateSystemListening()
             return false
         }
+        if !actions.isEmpty { confirmation.wrote(at: Date()) }
         saveRecord()
         return true
     }
