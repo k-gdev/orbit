@@ -160,12 +160,17 @@ public struct TapLifecycle: Equatable, Sendable {
 /// no retired tap outlives that: a start releases every tap built before it, a failure of the current tap
 /// releases it and every older one (a failed retiring tap takes only itself), and releasing an app releases its
 /// current tap and all its predecessors (a tap released before it got going reports nothing, so its
-/// predecessors can't wait for its report). Pure bookkeeping; the engine invalidates what the calls return.
+/// predecessors can't wait for its report). Only a tap that has started can be playing the app, so a new tap
+/// keeps just the newest such predecessor and releases the others at once: a quiet app rebuilt again and again
+/// (an output flapping, its processes churning) never piles up replaced taps. Pure bookkeeping; the engine
+/// invalidates what the calls return.
 public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     /// Each app's current tap.
     public private(set) var currentByApp: [String: ID] = [:]
-    /// Each app's replaced taps still alive, oldest first.
+    /// Each app's replaced taps still alive, oldest first (after an install, at most one: one that has started).
     private var retiringByApp: [String: [ID]] = [:]
+    /// The live taps that have started (their IO has run, so they may be playing, or paused and re-armed).
+    private var startedTaps: Set<ID> = []
 
     public init() {}
 
@@ -175,16 +180,29 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     public var all: [ID] { Array(currentByApp.values) + retiringByApp.values.flatMap { $0 } }
     public var isEmpty: Bool { currentByApp.isEmpty && retiringByApp.isEmpty }
 
-    /// `tap` becomes the app's current tap; the one it replaces (if any) retires.
-    public mutating func install(_ tap: ID, for app: String) {
-        if let old = currentByApp[app] { retiringByApp[app, default: []].append(old) }
+    /// `tap` becomes the app's current tap. Of the taps it replaces, only the newest one that has started stays
+    /// (it may be playing the app at its setting) until `tap` starts. The others never started: their start still
+    /// waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would hold a
+    /// process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
+    /// sound at stale gains and devices. Returns those to release.
+    @discardableResult
+    public mutating func install(_ tap: ID, for app: String) -> [ID] {
+        var replaced = retiringByApp.removeValue(forKey: app) ?? []
+        if let old = currentByApp[app] { replaced.append(old) }
         currentByApp[app] = tap
+        let kept = replaced.last(where: startedTaps.contains)
+        if let kept { retiringByApp[app] = [kept] }
+        return forget(replaced.filter { $0 != kept })
     }
 
     /// `tap` has started: every tap of the app built before it is done. Returns those to release.
     public mutating func started(_ tap: ID, for app: String) -> [ID] {
-        if currentByApp[app] == tap { return removeRetiring(app, upTo: nil) }
+        if currentByApp[app] == tap {
+            startedTaps.insert(tap)
+            return removeRetiring(app, upTo: nil)
+        }
         guard let index = retiringByApp[app]?.firstIndex(of: tap) else { return [] }
+        startedTaps.insert(tap)
         return removeRetiring(app, upTo: index)
     }
 
@@ -196,12 +214,12 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
     public mutating func failed(_ tap: ID, for app: String) -> [ID] {
         if currentByApp[app] == tap {
             currentByApp[app] = nil
-            return removeRetiring(app, upTo: nil) + [tap]
+            return removeRetiring(app, upTo: nil) + forget([tap])
         }
         guard var list = retiringByApp[app], let index = list.firstIndex(of: tap) else { return [] }
         list.remove(at: index)
         retiringByApp[app] = list.isEmpty ? nil : list
-        return [tap]
+        return forget([tap])
     }
 
     /// The app needs no tap any more: its current tap and every predecessor. Returns those to release.
@@ -209,7 +227,7 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
         var released: [ID] = []
         if let current = currentByApp.removeValue(forKey: app) { released.append(current) }
         released += retiringByApp.removeValue(forKey: app) ?? []
-        return released
+        return forget(released)
     }
 
     /// Everything (the feature is turned off, Orbit quits).
@@ -217,6 +235,7 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
         let everything = all
         currentByApp = [:]
         retiringByApp = [:]
+        startedTaps = []
         return everything
     }
 
@@ -227,7 +246,13 @@ public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
         let removed = Array(list.prefix(count))
         list.removeFirst(count)
         retiringByApp[app] = list.isEmpty ? nil : list
-        return removed
+        return forget(removed)
+    }
+
+    /// Released taps are no longer tracked as started; returns them.
+    private mutating func forget(_ released: [ID]) -> [ID] {
+        released.forEach { startedTaps.remove($0) }
+        return released
     }
 }
 

@@ -1009,10 +1009,11 @@ extension SoundTests {
             let lateA = roster.failed("A", for: "chrome"); #expect(lateA.isEmpty)
         }
 
-        /// Scenario 2: released while B is still being built (no start yet): same rule, A goes with it.
+        /// Scenario 2: released while B is still being built (no start yet): same rule, A (playing) goes with it.
         @Test func releasingDuringCreationReleasesThePredecessor() {
             var roster = TapRoster<String>()
             roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
             roster.install("B", for: "chrome")                    // B is still being created
             #expect(Set(roster.release("chrome")) == ["A", "B"])
             #expect(roster.current(for: "chrome") == nil)
@@ -1024,26 +1025,32 @@ extension SoundTests {
             #expect(roster.current(for: "discord") == "X")
         }
 
-        /// Scenario 3: a chain A → B → C where C starts before B did. C's start releases every tap built before it
-        /// (A and B), so A can't keep playing alongside C. A start of B arriving after C was built releases only
-        /// what came before B.
+        /// Scenario 3: a chain A → B → C where C starts before B did. C's start releases every tap built before it, so A
+        /// (playing) can't keep playing alongside C; B, which never started, already went when C replaced it. A start
+        /// of B reported after C replaced it changes nothing. A B that did start before C was built is the one kept.
         @Test func aStartReleasesEveryOlderTap() {
             var roster = TapRoster<String>()
             roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
             roster.install("B", for: "chrome")
-            roster.install("C", for: "chrome")
-            #expect(roster.retiring(for: "chrome") == ["A", "B"])
+            let replaced = roster.install("C", for: "chrome")
+            #expect(replaced == ["B"])
+            #expect(roster.retiring(for: "chrome") == ["A"])
+            let lateB = roster.started("B", for: "chrome")
+            #expect(lateB.isEmpty)
             let c = roster.started("C", for: "chrome")
-            #expect(Set(c) == ["A", "B"])
+            #expect(c == ["A"])
             #expect(roster.retiring(for: "chrome").isEmpty)
             #expect(roster.current(for: "chrome") == "C")
 
             var other = TapRoster<String>()
             other.install("A", for: "chrome")
+            _ = other.started("A", for: "chrome")
             other.install("B", for: "chrome")
-            other.install("C", for: "chrome")
-            let b = other.started("B", for: "chrome")            // B started, but C is already current
+            let b = other.started("B", for: "chrome")
             #expect(b == ["A"])
+            let none = other.install("C", for: "chrome")
+            #expect(none.isEmpty)
             #expect(other.retiring(for: "chrome") == ["B"])
             let c2 = other.started("C", for: "chrome")
             #expect(c2 == ["B"])
@@ -1055,9 +1062,9 @@ extension SoundTests {
         @Test func aFailureReleasesItAndOlderTaps() {
             var roster = TapRoster<String>()
             roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
             roster.install("B", for: "chrome")
-            roster.install("C", for: "chrome")
-            #expect(Set(roster.failed("C", for: "chrome")) == ["A", "B", "C"])
+            #expect(Set(roster.failed("B", for: "chrome")) == ["A", "B"])
             #expect(roster.isEmpty)
             roster.install("C", for: "chrome")
             roster.install("X", for: "discord")
@@ -1096,6 +1103,78 @@ extension SoundTests {
             let released = reset.release("chrome")
             #expect(Set(released) == ["A", "C"])
             #expect(reset.isEmpty)
+        }
+
+        /// F2: a quiet app with a remembered setting, rebuilt again and again while none of its taps starts (AirPods
+        /// flapping between outputs, process-list churn). Each rebuild releases the replaced taps that never started:
+        /// they aren't playing, so that is silent, and they can't pile up, each holding a process tap, an aggregate and
+        /// a thread blocked in its start, to all start at the app's first sound at stale gains and devices. A tap that
+        /// has started (playing, or paused and re-armed) stays until its successor starts, but only the newest one.
+        @Test func rebuildsOfAQuietAppDoNotPileUp() {
+            var slack = TapRoster<Int>()
+            let first = slack.install(1, for: "slack")
+            #expect(first.isEmpty)
+            for serial in 2...20 {
+                let released = slack.install(serial, for: "slack")
+                #expect(released == [serial - 1])
+            }
+            #expect(slack.all == [20])
+            #expect(slack.retiring(for: "slack").isEmpty)
+
+            // Chrome played through A, then is rebuilt on and on while quiet: only A is kept, for when it plays again.
+            var chrome = TapRoster<String>()
+            chrome.install("A", for: "chrome")
+            _ = chrome.started("A", for: "chrome")
+            let b = chrome.install("B", for: "chrome")
+            #expect(b.isEmpty)                                       // A may be playing: it waits for B's start
+            let c = chrome.install("C", for: "chrome")
+            #expect(c == ["B"])                                      // B never started
+            let d = chrome.install("D", for: "chrome")
+            #expect(d == ["C"])
+            #expect(chrome.retiring(for: "chrome") == ["A"])
+            // Late reports from the released ones change nothing.
+            let lateB = chrome.started("B", for: "chrome")
+            let lateC = chrome.failed("C", for: "chrome")
+            #expect(lateB.isEmpty && lateC.isEmpty)
+            #expect(Set(chrome.all) == ["A", "D"])
+            // D starts: A goes. D is then the newest tap that started, and the one kept through the next rebuilds.
+            let dStarted = chrome.started("D", for: "chrome")
+            #expect(dStarted == ["A"])
+            let e = chrome.install("E", for: "chrome")
+            let f = chrome.install("F", for: "chrome")
+            #expect(e.isEmpty && f == ["E"])
+            #expect(chrome.retiring(for: "chrome") == ["D"])
+            // The kept tap failing takes only itself; the app's release takes the rest.
+            let dFailed = chrome.failed("D", for: "chrome")
+            #expect(dFailed == ["D"])
+            #expect(chrome.release("chrome") == ["F"])
+            #expect(chrome.isEmpty)
+
+            // Any mix of rebuilds, starts and failures: at most one replaced tap stays, and only one that started.
+            var roster = TapRoster<Int>()
+            var started: Set<Int> = []
+            var seed: UInt64 = 7
+            func next(_ bound: Int) -> Int {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return Int((seed >> 33) % UInt64(bound))
+            }
+            var serial = 0
+            for _ in 0..<500 {
+                switch next(4) {
+                case 0, 1:
+                    serial += 1
+                    _ = roster.install(serial, for: "app")
+                case 2:
+                    let tap = next(serial + 1)
+                    if roster.all.contains(tap) { started.insert(tap) }
+                    _ = roster.started(tap, for: "app")
+                default:
+                    _ = roster.failed(next(serial + 1), for: "app")
+                }
+                let retiring = roster.retiring(for: "app")
+                #expect(retiring.count <= 1)
+                #expect(retiring.allSatisfy(started.contains))
+            }
         }
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).

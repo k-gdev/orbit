@@ -15,6 +15,8 @@ import OrbitCore
 ///   is never heard unattenuated in between. `TapRoster` keeps that bookkeeping: a start releases every older
 ///   tap of the app, a failure of the current tap releases it and every older one (a failed replaced tap takes
 ///   only itself), and releasing an app releases all its taps, so no replaced tap can outlive its app's release.
+///   Only the newest replaced tap that has started is kept that way; replaced taps that never started (a quiet
+///   app rebuilt as its output flaps) are released at once, so they can't pile up.
 /// - A tap that fails to build is not retried with the same app, device and processes (no retry loop).
 /// - When a tapped app has been quiet for `TapActivity.idleDelay`, its aggregate's IO is stopped and re-armed
 ///   to restart with the app's next audio (no IO wakeups, no streaming, no sleep assertion while idle).
@@ -250,12 +252,14 @@ final class SoundEngine {
         lastSystemOutput = current
     }
 
-    /// Builds a new current tap for the app; the one it replaces retires until the new one has started
-    /// (`TapRoster`): its start releases every older tap, its failure (while current) releases it and every older
+    /// Builds a new current tap for the app (`TapRoster`). Of the taps it replaces, the newest one that has started
+    /// retires until the new one has started; the others never started (they aren't playing) and are released at
+    /// once. The new tap's start releases every older tap, its failure (while current) releases it and every older
     /// tap.
     private func build(_ bundleID: String, key: TapKey, gain: Float) {
         let serial = nextSerial
         nextSerial += 1
+        noteStarts(of: bundleID)
         let tap = AppAudioTap(bundleID: bundleID, processes: key.processes, destinationUID: key.destination, gain: gain,
                               onStarted: { [weak self] in
                                   guard let self else { return }
@@ -271,9 +275,19 @@ final class SoundEngine {
                                   self.onAppsChanged?()
                               })
         alive[serial] = tap
-        roster.install(serial, for: bundleID)
+        releaseTaps(roster.install(serial, for: bundleID))
         activity[bundleID] = TapActivity(now: Date(), isPlaying: monitor.apps()[bundleID]?.isPlaying ?? false)
         onAppsChanged?()
+    }
+
+    /// Passes on to the roster the starts of the app's taps that have returned but whose `onStarted` report still
+    /// waits on the main queue, so a tap that has just begun to play isn't taken for one that never started (and
+    /// released while it plays) when it is replaced.
+    private func noteStarts(of bundleID: String) {
+        let serials = [roster.current(for: bundleID)].compactMap { $0 } + roster.retiring(for: bundleID)
+        for serial in serials where alive[serial]?.hasStarted == true {
+            releaseTaps(roster.started(serial, for: bundleID))
+        }
     }
 
     /// The app needs no tap: its current tap and every tap it replaced go (a tap released before it got going
