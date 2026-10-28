@@ -333,7 +333,7 @@ import Testing
             "Power Source State": "Battery Power", "Transport Type": "Bluetooth LE",
         ]
         let airpodsCase: [String: Any] = [
-            "Type": "Accessory Source", "Name": "Kevo’s AirPods Case", "Accessory Category": "Audio Battery Case",
+            "Type": "Accessory Source", "Name": "AirPods Case", "Accessory Category": "Audio Battery Case",
             "Accessory Identifier": "7EEB8E78", "Group Identifier": "G1", "Part Identifier": "Case",
             "Current Capacity": 35, "Max Capacity": 100, "Is Charging": false, "Is Present": true,
         ]
@@ -341,7 +341,7 @@ import Testing
             ["Part Identifier": side, "Current Capacity": level, "Max Capacity": 100, "Is Charging": true]
         }
         let airpods: [String: Any] = [
-            "Type": "Accessory Source", "Name": "Kevo’s AirPods", "Accessory Category": "Headset",
+            "Type": "Accessory Source", "Name": "AirPods", "Accessory Category": "Headset",
             "Accessory Identifier": "D3EDA881", "Group Identifier": "G1", "Part Identifier": "Combined",
             "Current Capacity": 90, "Max Capacity": 100, "Is Charging": true, "Is Present": true,
             "Combined Parts": [part("Left", 100), part("Right", 90)],
@@ -358,7 +358,7 @@ import Testing
         let all = BatteryParser.readings(powerSources: [keyboard, airpodsCase, Self.internalBattery, airpods], registry: registry)
         // The Mac first, then devices by name; the case folds into its AirPods; the registry keyboard and the
         // repeated mouse are dropped.
-        #expect(all.map(\.name) == ["This Mac", "Kevo’s AirPods", "Magic Mouse", "Magic Trackpad", "MX KEYS S"])
+        #expect(all.map(\.name) == ["This Mac", "AirPods", "Magic Mouse", "Magic Trackpad", "MX KEYS S"])
         #expect(all.map(\.kind) == [.mac, .headphones, .mouse, .trackpad, .keyboard])
 
         let pods = all[1]
@@ -376,7 +376,7 @@ import Testing
 
         // A case whose earbuds aren't connected stays on its own row.
         let lonelyCase = BatteryParser.powerSources([airpodsCase])
-        #expect(lonelyCase.map(\.name) == ["Kevo’s AirPods Case"])
+        #expect(lonelyCase.map(\.name) == ["AirPods Case"])
         #expect(lonelyCase.first?.kind == .headphones)
         // A charging device says so.
         var chargingMouse = keyboard
@@ -392,15 +392,15 @@ import Testing
         // Cross-source de-dup is an exact (case- and apostrophe-insensitive) name match only: a registry device
         // whose name is merely part of a power source's name stays, and so does one with no name.
         let magicKeyboardSource: [String: Any] = [
-            "Type": "Accessory Source", "Name": "Kevo’s Magic Keyboard", "Accessory Category": "Keyboard",
+            "Type": "Accessory Source", "Name": "Office’s Magic Keyboard", "Accessory Category": "Keyboard",
             "Accessory Identifier": "AB12", "Current Capacity": 80, "Max Capacity": 100,
         ]
         let loose = BatteryParser.readings(powerSources: [magicKeyboardSource], registry: [
             ["Product": "Magic Keyboard", "BatteryPercent": 79, "DeviceAddress": "aa-bb-cc-dd-ee-01"],
             ["Product": "", "BatteryPercent": 40, "DeviceAddress": "aa-bb-cc-dd-ee-02"],
-            ["Product": "kevo's magic keyboard", "BatteryPercent": 80, "DeviceAddress": "aa-bb-cc-dd-ee-03"],
+            ["Product": "office's magic keyboard", "BatteryPercent": 80, "DeviceAddress": "aa-bb-cc-dd-ee-03"],
         ])
-        #expect(loose.map(\.name) == ["Bluetooth Device", "Kevo’s Magic Keyboard", "Magic Keyboard"])
+        #expect(loose.map(\.name) == ["Bluetooth Device", "Magic Keyboard", "Office’s Magic Keyboard"])
         #expect(loose.first?.id == "bt:aa:bb:cc:dd:ee:02")
     }
 

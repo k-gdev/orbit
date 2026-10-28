@@ -116,7 +116,7 @@ enum SystemFixtures {
                                    soc: SensorGroupStats(average: 53.4, maximum: 54.9, count: 42))
         let batteries = [
             BatteryReading(id: "internal", name: "This Mac", kind: .mac, percent: 100, isCharged: true, onPowerAdapter: true),
-            BatteryReading(id: "airpods", name: "Kevo’s AirPods Pro", kind: .headphones, percent: 90, isCharging: false,
+            BatteryReading(id: "airpods", name: "AirPods Pro", kind: .headphones, percent: 90, isCharging: false,
                            parts: [.init(name: "L", percent: 100), .init(name: "R", percent: 90), .init(name: "Case", percent: 35)]),
             BatteryReading(id: "bt:mouse", name: "Magic Mouse", kind: .mouse, percent: 64),
             BatteryReading(id: "mxkeys", name: "MX KEYS S", kind: .keyboard, percent: 10, lowWarnLevel: 20),
