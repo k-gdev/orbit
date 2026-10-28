@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import OrbitCore
 
 /// The app a copy came from.
@@ -8,10 +7,10 @@ struct ClipboardSourceApp: Equatable {
     var name: String?
 }
 
-/// What the user's rules say about a copy: apps to ignore and the biggest copy to store.
+/// What the user's rules say about a copy: apps to ignore and the size limits.
 struct PasteboardPolicy {
     var ignoredBundleIDs: [String]
-    var maxItemBytes: Int
+    var limits: ClipboardLimits
 }
 
 /// What reading the pasteboard produced.
@@ -20,67 +19,82 @@ enum PasteboardRead {
     case nothing
     /// Deliberately not recorded, with the reason (for the debug check and the log).
     case skipped(String)
-    case capture(ClipboardCapture)
+    /// The raw bytes of a copy. Decoding, converting and hashing them is `RawPasteboardCopy.makeCapture`'s
+    /// job, run off the main thread.
+    case copy(RawPasteboardCopy)
 }
 
-/// Turns the contents of a pasteboard into a `ClipboardCapture`: file copies, then text (rich text when
-/// RTF came along), then images. Takes any `NSPasteboard`, so `--check-clipboard` can exercise it on a
+/// Reads what is on a pasteboard into a `RawPasteboardCopy`: file copies, then text (rich text when RTF
+/// came along), then images. Takes any `NSPasteboard`, so `--check-clipboard` can exercise it on a
 /// private named pasteboard instead of the user's real one.
+///
+/// This runs on the main thread inside the poll, so it only fetches bytes and checks their size: no
+/// decoding, parsing, image conversion or hashing happens here.
 enum PasteboardReader {
     /// nspasteboard.org: apps may name themselves here (more accurate than "whoever is frontmost").
     static let sourceType = NSPasteboard.PasteboardType("org.nspasteboard.source")
 
+    /// `afterTypes` is called once the marker types have been read and checked, before any content is
+    /// read (a test hook: `--check-clipboard` changes the pasteboard there to prove a mid-read change is caught).
     @MainActor
-    static func read(_ pasteboard: NSPasteboard, policy: PasteboardPolicy, frontmost: ClipboardSourceApp?, now: Date) -> PasteboardRead {
+    static func read(_ pasteboard: NSPasteboard, policy: PasteboardPolicy, frontmost: ClipboardSourceApp?, now: Date,
+                     afterTypes: (() -> Void)? = nil) -> PasteboardRead {
+        // The marker types and the content are read in separate calls. If the pasteboard changes in
+        // between (a password manager copying right after another app), the markers checked belong to
+        // the OLD content and the data read to the NEW: so the change count is compared before and after
+        // and the whole read is discarded when it moved. The next poll sees the new count and reads again.
+        let before = pasteboard.changeCount
         let types = (pasteboard.types ?? []).map(\.rawValue)
         let source = sourceApp(of: pasteboard, frontmost: frontmost)
         guard PasteboardFilter.shouldRecord(types: types, sourceBundleID: source.bundleID, ignoredBundleIDs: policy.ignoredBundleIDs) else {
             return .skipped("marked concealed or from an ignored app")
         }
+        afterTypes?()
+        let result = readContents(pasteboard, policy: policy, source: source, now: now)
+        guard pasteboard.changeCount == before else { return .skipped("the pasteboard changed while it was being read") }
+        return result
+    }
+
+    @MainActor
+    private static func readContents(_ pasteboard: NSPasteboard, policy: PasteboardPolicy, source: ClipboardSourceApp, now: Date) -> PasteboardRead {
+        func raw(_ content: RawPasteboardCopy.Content) -> PasteboardRead {
+            .copy(RawPasteboardCopy(content: content, sourceBundleID: source.bundleID, sourceName: source.name, date: now))
+        }
+        let maxBytes = policy.limits.maxItemBytes
 
         // Files copied in Finder: the paths, whatever text or icon image came along with them.
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            let capture = ClipboardCapture.files(paths: urls.map(\.path), sourceBundleID: source.bundleID, sourceName: source.name, date: now)
-            return admit(capture, policy: policy)
+            return raw(.files(urls.map(\.path)))
         }
 
-        // Text, rich when the source also offered RTF.
-        let string = pasteboard.string(forType: .string)
-        let rtf = pasteboard.data(forType: .rtf)
-        if let rtf, rtf.count <= policy.maxItemBytes {
-            let plain = string ?? NSAttributedString(rtf: rtf, documentAttributes: nil)?.string ?? ""
-            if !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return admit(.richText(rtf: rtf, plain: plain, sourceBundleID: source.bundleID, sourceName: source.name, date: now), policy: policy)
-            }
+        // Text, rich when the source also offered RTF. The size is checked on the bytes, before any
+        // String is made from them.
+        let text = textData(pasteboard)
+        if let rtf = pasteboard.data(forType: .rtf), rtf.count <= maxBytes {
+            return raw(.richText(rtf: rtf, plain: text.flatMap { $0.count <= maxBytes ? $0 : nil }))
         }
-        if let string {
-            guard !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .skipped("only whitespace") }
-            return admit(.text(string, sourceBundleID: source.bundleID, sourceName: source.name, date: now), policy: policy)
+        if let text {
+            return text.count <= maxBytes ? raw(.text(text)) : .skipped("larger than the per-copy limit")
         }
 
-        // Images (a screenshot is PNG already; most other apps offer TIFF, which is stored as PNG).
+        // Images. A PNG (a screenshot) is stored as it is, so it is judged by its own size. Anything else
+        // (TIFF, usually) is converted to PNG later and judged by the PNG it becomes; here it only has to
+        // be small enough to be worth converting.
         if let png = pasteboard.data(forType: .png) {
-            return image(png, policy: policy, source: source, now: now)
+            return png.count <= maxBytes ? raw(.image(png)) : .skipped("larger than the per-copy limit")
         }
         if let tiff = pasteboard.data(forType: .tiff) {
-            guard policy.maxItemBytes >= tiff.count else { return .skipped("image is larger than the per-copy limit") }
-            guard let converted = pngData(fromImageData: tiff) else { return .skipped("image could not be read") }
-            return image(converted, policy: policy, source: source, now: now)
+            return tiff.count <= policy.limits.maxRawImageBytes ? raw(.image(tiff)) : .skipped("image is far larger than the per-copy limit")
         }
         return .nothing
     }
 
-    // MARK: Pieces
-
+    /// The text as UTF-8 bytes. `data(forType:)` hands over the bytes without making a String; only a
+    /// pasteboard that offers some other text encoding needs the String conversion.
     @MainActor
-    private static func image(_ png: Data, policy: PasteboardPolicy, source: ClipboardSourceApp, now: Date) -> PasteboardRead {
-        guard let size = pixelSize(of: png) else { return .skipped("image could not be read") }
-        return admit(.image(png: png, width: size.width, height: size.height,
-                            sourceBundleID: source.bundleID, sourceName: source.name, date: now), policy: policy)
-    }
-
-    private static func admit(_ capture: ClipboardCapture, policy: PasteboardPolicy) -> PasteboardRead {
-        capture.payload.count <= policy.maxItemBytes ? .capture(capture) : .skipped("larger than the per-copy limit")
+    private static func textData(_ pasteboard: NSPasteboard) -> Data? {
+        if let data = pasteboard.data(forType: .string) { return data }
+        return pasteboard.string(forType: .string).map { Data($0.utf8) }
     }
 
     /// The app named by the pasteboard's own source marker, else whoever is frontmost.
@@ -90,21 +104,6 @@ enum PasteboardReader {
             return ClipboardSourceApp(bundleID: id, name: AppLookup.name(forBundleID: id) ?? frontmost?.name)
         }
         return frontmost ?? ClipboardSourceApp(bundleID: nil, name: nil)
-    }
-
-    static func pixelSize(of imageData: Data) -> (width: Int, height: Int)? {
-        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0 else { return nil }
-        return (width, height)
-    }
-
-    /// PNG bytes for any image data the system can decode (TIFF from the pasteboard, usually).
-    static func pngData(fromImageData data: Data) -> Data? {
-        guard let rep = NSBitmapImageRep(data: data) else { return nil }
-        return rep.representation(using: .png, properties: [:])
     }
 }
 

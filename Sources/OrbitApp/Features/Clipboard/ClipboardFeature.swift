@@ -43,9 +43,9 @@ final class ClipboardFeature: SuiteFeature {
         model.loadIfNeeded()
         watcher.start(
             policy: { [settings] in
-                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, maxItemBytes: settings.limits.maxItemBytes)
+                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, limits: settings.limits)
             },
-            onCapture: { [weak self] capture in self?.model.record(capture) })
+            onCapture: { [weak self] copy in self?.model.ingest(copy) })
         registerHotKey(settings.popupShortcut)
         // Re-register when the shortcut is changed in Settings. `$popupShortcut` fires before the value
         // is stored, so use the value it delivers.
@@ -60,6 +60,7 @@ final class ClipboardFeature: SuiteFeature {
         isRunning = false
         shortcutSubscription = nil
         watcher.stop()
+        model.cancelIngest()
         context.hotKeys.unregister(id: Self.hotKeyID)
         shortcutProblem = nil
         popup.hide(restoreFocus: false)

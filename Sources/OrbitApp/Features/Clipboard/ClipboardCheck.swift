@@ -18,23 +18,35 @@ enum ClipboardCheck {
 
     @MainActor
     private static func run() -> Bool {
-        var failures = 0
+        let tally = Tally()
         func check(_ name: String, _ passed: Bool, _ detail: @autoclosure () -> String = "") {
             print("\(passed ? "PASS" : "FAIL")  \(name)\(passed ? "" : "  \(detail())")")
-            if !passed { failures += 1 }
+            if !passed { tally.failures += 1 }
         }
 
-        let policy = PasteboardPolicy(ignoredBundleIDs: ["com.example.ignored"], maxItemBytes: 1_000_000)
+        let policy = PasteboardPolicy(ignoredBundleIDs: ["com.example.ignored"],
+                                      limits: ClipboardLimits(maxItems: 100, maxAge: 86_400, maxTotalBytes: 100_000_000, maxItemBytes: 1_000_000))
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let frontmost = ClipboardSourceApp(bundleID: "com.example.front", name: "Front")
         func makeBoard() -> NSPasteboard {
             NSPasteboard(name: NSPasteboard.Name("com.kevo.orbit.check.\(UUID().uuidString)"))
         }
-        func capture(from board: NSPasteboard, policy: PasteboardPolicy = policy) -> PasteboardRead {
-            PasteboardReader.read(board, policy: policy, frontmost: frontmost, now: now)
+        /// What the app ends up with: the reader's raw bytes taken through `makeCapture`, the same two
+        /// steps the app runs (the second one on a background queue).
+        enum Checked { case nothing, skipped(String), capture(ClipboardCapture) }
+        func capture(from board: NSPasteboard, policy: PasteboardPolicy = policy, afterTypes: (() -> Void)? = nil) -> Checked {
+            switch PasteboardReader.read(board, policy: policy, frontmost: frontmost, now: now, afterTypes: afterTypes) {
+            case .nothing: return .nothing
+            case .skipped(let reason): return .skipped(reason)
+            case .copy(let raw):
+                switch raw.makeCapture(maxItemBytes: policy.limits.maxItemBytes) {
+                case .capture(let c): return .capture(c)
+                case .skipped(let reason): return .skipped(reason)
+                }
+            }
         }
-        func skipped(_ read: PasteboardRead) -> Bool { if case .skipped = read { return true } else { return false } }
-        func isNothing(_ read: PasteboardRead) -> Bool { if case .nothing = read { return true } else { return false } }
+        func skipped(_ read: Checked) -> Bool { if case .skipped = read { return true } else { return false } }
+        func isNothing(_ read: Checked) -> Bool { if case .nothing = read { return true } else { return false } }
 
         // Plain text, with the frontmost app as the source.
         do {
@@ -139,6 +151,43 @@ enum ClipboardCheck {
             } else { check("copied files are captured by path", false) }
         }
 
+        // An image is judged by the PNG that is stored, not by the (uncompressed) TIFF it arrived as.
+        do {
+            let side = 500
+            let flat = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+                                        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            if let pixels = flat.bitmapData { for i in 0..<(flat.bytesPerRow * side) { pixels[i] = 180 } }
+            let flatTIFF = flat.representation(using: .tiff, properties: [:]) ?? Data()
+            var tight = policy
+            tight.limits.maxItemBytes = 200_000
+            check("(setup) the TIFF is over the per-copy limit", flatTIFF.count > tight.limits.maxItemBytes, "\(flatTIFF.count) bytes")
+            let board = makeBoard(); defer { board.releaseGlobally() }
+            board.clearContents(); board.setData(flatTIFF, forType: .tiff)
+            if case .capture(let c) = capture(from: board, policy: tight) {
+                check("a TIFF whose PNG fits is captured although the TIFF is over the limit",
+                      c.kind == .image && c.payload.count <= tight.limits.maxItemBytes && c.payload.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]),
+                      "\(c.payload.count) bytes")
+            } else { check("a TIFF whose PNG fits is captured although the TIFF is over the limit", false) }
+            var tiny = policy
+            tiny.limits.maxItemBytes = flatTIFF.count / 20   // the TIFF is beyond ten times this
+            check("a TIFF far beyond the limit is not even converted", skipped(capture(from: board, policy: tiny)))
+        }
+
+        // A change between the marker check and the content read is caught (the markers may belong to
+        // other content), so neither the old nor the new content is recorded from that read.
+        do {
+            let board = makeBoard(); defer { board.releaseGlobally() }
+            board.clearContents(); board.setString("an ordinary copy", forType: .string)
+            let result = capture(from: board, afterTypes: {
+                board.clearContents()
+                board.declareTypes([.string, NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")], owner: nil)
+                board.setString("a password that arrived just after", forType: .string)
+            })
+            check("a pasteboard that changes mid-read is discarded", skipped(result), "\(result)")
+            // Read again (the next poll does): now the markers are seen and the secret is refused too.
+            check("... and the secret is refused on the re-read", skipped(capture(from: board)))
+        }
+
         // Size limit, whitespace-only text and an empty pasteboard.
         do {
             let board = makeBoard(); defer { board.releaseGlobally() }
@@ -150,7 +199,13 @@ enum ClipboardCheck {
             check("an empty pasteboard gives nothing", isNothing(capture(from: board)))
         }
 
-        print(failures == 0 ? "all clipboard checks passed" : "\(failures) clipboard check(s) failed")
-        return failures == 0
+        let failed = tally.failures
+        if failed == 0 { print("all clipboard checks passed") } else { print("\(failed) clipboard check(s) failed") }
+        return failed == 0
     }
+}
+
+/// The number of failed checks (a class so the nested `check` function can bump it).
+private final class Tally {
+    var failures = 0
 }
