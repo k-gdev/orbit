@@ -93,9 +93,7 @@ private struct KeepAwakeTile: View {
     }
 
     private func statusLine(now: Date) -> String {
-        guard let session = keepAwake.session else { return "Off · your Mac sleeps as usual" }
-        let label = session.label(now: now)
-        return session.keepDisplayAwake ? label + " · display stays on" : label
+        KeepAwakeFormat.status(keepAwake.session, now: now, displayHeld: keepAwake.displayHeld)
     }
 
     /// The running mode, or what the switch would start.
@@ -132,6 +130,7 @@ private struct KeepAwakeTile: View {
             }
         }
         Button { keepAwake.start(.whileDownloading) } label: { check("While Downloading", current == .whileDownloading) }
+        Text("macOS may ask to let Orbit see your Downloads folder")
         if keepAwake.isActive {
             Divider()
             Button("Turn Off") { keepAwake.stop() }
