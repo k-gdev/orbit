@@ -207,9 +207,63 @@ enum ShelfCheck {
         watcher.start()
         watcher.start()
         check("start installs one monitor (idempotent)", watcher.isRunning)
+        check("an idle watcher has no timer (nothing polls until a button is pressed)", !watcher.isPolling)
         watcher.stop()
         watcher.stop()
-        check("stop removes it (idempotent)", !watcher.isRunning)
+        check("stop removes it (idempotent)", !watcher.isRunning && !watcher.isPolling)
+
+        // Polling glue with a scripted mouse and pasteboard (no real drag): a press starts a timer, a text drag is
+        // never a shake, a file drag shaken is one shake, and releasing the button stops the timer.
+        final class ScriptedMouse {
+            var down = true
+            var changeCount = 10
+            var holdsFiles = false
+            var point = CGPoint(x: 600, y: 400)
+            var time: TimeInterval = 100
+        }
+        let mouse = ScriptedMouse()
+        let scripted = ShakeWatcher(inputs: .init(buttonDown: { mouse.down }, changeCount: { mouse.changeCount },
+                                                  holdsFiles: { mouse.holdsFiles }, location: { mouse.point }, now: { mouse.time }))
+        var shakes: [CGPoint] = []
+        scripted.onShake = { shakes.append($0) }
+        /// Six 100 pt legs, six samples each, at 60 Hz.
+        func shakeTheMouse() {
+            var sign = 1.0
+            for _ in 0..<6 {
+                for _ in 0..<6 {
+                    mouse.point.x += sign * 100 / 6
+                    mouse.time += 1.0 / 60
+                    scripted.poll()
+                }
+                sign = -sign
+            }
+        }
+        scripted.pressBegan()
+        check("a press starts the timer, slowly", scripted.isPolling && !scripted.isTracking)
+        shakeTheMouse() // a file URL left from an earlier drag, nothing new dragged
+        mouse.holdsFiles = true
+        shakeTheMouse()
+        check("a stale file pasteboard never counts, however hard the mouse is shaken", shakes.isEmpty && !scripted.isTracking)
+        mouse.changeCount = 11 // a drag began and it holds files: now it is a file drag...
+        mouse.holdsFiles = false // ...no: this one is text
+        shakeTheMouse()
+        check("shaking a text drag does nothing", shakes.isEmpty && !scripted.isTracking)
+        mouse.down = false
+        scripted.poll()
+        check("releasing the button stops the timer", !scripted.isPolling)
+
+        mouse.down = true
+        mouse.changeCount = 20
+        scripted.pressBegan()
+        mouse.changeCount = 21
+        mouse.holdsFiles = true
+        shakeTheMouse()
+        check("shaking a file drag opens the shelf, once", shakes.count == 1)
+        check("and the timer is at the fast rate while the file drag lasts", scripted.isPolling && scripted.isTracking)
+        mouse.down = false
+        scripted.poll()
+        check("the timer stops when the button is released", !scripted.isPolling && !scripted.isTracking)
+        scripted.stop()
 
         let context = SuiteContext(settings: SettingsStore(defaults: defaults), suite: SuiteSettings(defaults: defaults), defaults: defaults,
                                    hotKeys: HotKeyCenter(), permissions: PermissionCenter(live: false, fixed: [:]),
