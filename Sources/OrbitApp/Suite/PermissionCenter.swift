@@ -150,7 +150,9 @@ enum AudioCaptureTCC {
     private static let service = "kTCCServiceAudioCapture" as CFString
 
     private typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int
-    private typealias Request = @convention(c) (CFString, CFDictionary?, @convention(block) (Bool) -> Void) -> Void
+    // TCC keeps the block and calls it once the prompt is answered, so it must be @escaping: a non-escaping
+    // block that outlives the call traps ("non-escaping closure has escaped"), which crashed turning Sound on.
+    private typealias Request = @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
 
     /// 0 = granted, 1 = denied; anything else (not yet asked, or a missing symbol) is unknown.
     static func preflight() -> PermissionStatus {
