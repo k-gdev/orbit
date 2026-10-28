@@ -217,3 +217,114 @@ The tab follows the gallery's look: translucent 12 pt tiles, round accent glyphs
 - There's no notification-centre banner when a session ends, only Orbit's toast.
 - Grab Text selects within a single display (no drag across displays).
 - The Settings snapshot is clipped at the window height, so its lower sections were checked through a temporary reorder rather than a scroll.
+
+---
+
+## Fix round 1 (task review)
+
+Branch `suite/controls`, 4 new commits on top of `9b2bf06`, not pushed:
+
+| Commit | Subject | Review items |
+|---|---|---|
+| `70252ea` | fix(controls): core decisions for the review fixes | Core + tests for every item below |
+| `5e3b582` | fix(controls): Grab Text keeps the user's app focused | I1 |
+| `5658dcf` | fix(controls): Keep Awake re-arms its timer, reads Downloads off main, admits a refused display assertion | M1, M8, M9 |
+| `4c9352e` | fix(controls): quick toggles restore exactly and never block the panel | M2, M3/M4, M6, M7, M13 |
+
+M1/M8/M9 share `KeepAwakeController.swift`, and M2/M3/M6/M7/M13 share `ControlsModel.swift` and `QuickToggleService.swift`. Each of those two commits therefore covers several items, and its message lists them one by one. No partial staging was available non-interactively.
+
+(c) Quick toggles are not reverted on disable or quit. This is unchanged, per the controller's ruling (builder's call #3 stands).
+
+### What changed
+
+**I1, Grab Text focus.**
+- The crosshair windows are now `NSPanel`s with `[.borderless, .nonactivatingPanel]`, `becomesKeyOnlyIfNeeded = false`, `hidesOnDeactivate = false`, `canBecomeKey = true`, and are shown with `makeKeyAndOrderFront`.
+- `NSApp.activate(ignoringOtherApps:)` is **removed**. The panels take the keyboard without making Orbit the active app, so the user's app keeps focus and the next ⌘V lands there.
+- Esc cancels three ways: a local `keyDown` monitor (no permission needed; a global monitor would need Accessibility), the panel's `keyDown` / `cancelOperation`, and the view's `keyDown`.
+- A click without a drag, a right-click, another app activating (`didActivateApplicationNotification` for any app other than Orbit or the previous one) and Orbit resigning active all cancel.
+- In `finish()`, `GrabTextFocus.afterOverlay(previousWasOrbit:orbitIsActive:previousAvailable:)` decides what happens next:
+  - If Orbit did become active, the previous app is reactivated (`activate(options: [])`).
+  - If that app is gone, Orbit hides itself.
+  - If Orbit was already in front, for example with Settings open, it is left alone.
+
+**M1, timer re-arm.**
+- `KeepAwakeSession.nextCheck(now:)` returns the deadline while it is still ahead, and nil when the session is due or untimed.
+- When `check()` finds a timed session not yet expired (the timer fired early because the clock moved), it re-arms the single timer for `nextCheck`.
+- An `NSSystemClockDidChange` observer was added next to the wake observer, so a clock change re-checks at once.
+- Observers are now stored as center/observer pairs and all removed in `stopWatching()`.
+
+**M3/M4, no Finder restart for nothing.**
+- `setToggle` re-reads the live value. If it already matches the requested state, the model refreshes the button and returns: no write and no SIGTERM.
+- In Core, `change(on: false)` for an already-off setting returns the current value and drops any leftover record.
+- The panel footnote now reads "Hide Desktop and Hidden Files restart Finder, which stops any Finder copy in progress." The Settings footnote says the same.
+
+**M2, records with two toggles in flight.**
+- `QuickToggleRestoreBook.change(_:on:current:automatic:)` is pure: it returns `QuickToggleChange(write, automatic, record)` without touching the book.
+- After a successful write, `commit(_:_:)` stores the record into `settings.restoreBook` *as it is then*, a mutation in place on the published property. So a second toggle that finishes first is never overwritten.
+- On a failed write, nothing is committed. `turnOn`/`turnOff` remain as `change` + `commit` wrappers.
+
+**M13, Dark Mode and Auto.**
+- `QuickToggleRestore` gained `priorAutomatic: Bool?`. It is optional, so old records still decode; a test covers that.
+- Turning Dark Mode on while the appearance is on Auto plans `automatic: false`, records `priorAutomatic: true`, and turns Auto off first, as System Settings does when you pick Light or Dark, so the choice sticks.
+- Turning it off restores the prior theme, verifies it, then turns Auto back on (`automatic: true`).
+- Auto is read through SkyLight `SLSGetAppearanceThemeSwitchesAutomatically` (falling back to the `AppleInterfaceStyleSwitchesAutomatically` preference) and set through `SLSSetAppearanceThemeSwitchesAutomatically`, both via `PrivateSymbol`. A read-only probe confirmed both symbols exist on macOS 26.5; Auto is currently **off** on Kevo's Mac.
+- The button shows "On · Auto" or "Off · Auto" while Auto is on.
+
+**M6, volumes off main.**
+- `VolumeLister.ejectable()` is now `async` and runs in `Task.detached(priority: .utility)`.
+- It reads the kernel mount table with `getmntinfo_r_np(…, MNT_NOWAIT)`, which is cached, thread-safe and never waits on a server.
+- `EjectableVolumeFilter.worthInspecting([MountEntry])` (Core, tested) keeps only local `/Volumes/…` mounts *before* any `URLResourceValues` read. Network mounts are never statted.
+- The model's `refreshVolumes()` cancels a listing still running and replaces it. The live observers are split: theme changes refresh the toggles, mount/unmount refresh the volumes, and app launch/quit refresh the running-app list.
+- A read-only probe of the mount table on this Mac shows the autofs `home` flagged remote and no local `/Volumes` mounts, so the result is no drives, which is correct.
+
+**M8, Downloads.**
+- `~/Downloads` is listed in `Task.detached` both when a "While downloading" session starts and on each 10 s poll. The poll skips a run while one is still in flight, and ignores a result that arrives after the session changed.
+- The start path is asynchronous: `start(.whileDownloading)` returns at once, then starts the session or shows the "Nothing is downloading" toast when the listing returns.
+- The mode menu now has a line under "While Downloading": "macOS may ask to let Orbit see your Downloads folder".
+- **Shell change (allowed by the controller):** `Support/Info.plist` gains `NSDownloadsFolderUsageDescription` = "Orbit checks your Downloads folder for unfinished downloads while Keep Awake is set to “While downloading”." It sits alphabetically after `NSAudioCaptureUsageDescription`, and `plutil -lint` reports OK.
+
+**M7, Shortcut timeout.**
+- `FocusShortcut.timeout = 15` and `FocusShortcut.withTimeout(_:_:)` are in Core. The helper is a throwing task group racing the operation against a sleep. On timeout it throws `FocusShortcut.TimedOut` and cancels the operation; `ProcessRunner` then terminates the child.
+- `ShortcutsRunner.run` and `.list` use it. The button can no longer sit on "Working…" forever; a timeout shows "“X” took too long: Orbit stopped it after 15 seconds."
+
+**M9, refused display assertion.**
+- `KeepAwakeEngine.holdsDisplayAssertion` reports what macOS actually granted. `session.keepDisplayAwake` stays what the user asked for.
+- The controller publishes `displayHeld`. The tile uses `KeepAwakeFormat.status(_:now:displayHeld:)` (Core, tested), which says "· display can still sleep" instead of "· display stays on" when the display assertion was refused.
+
+### Tests (Core, `ControlsFixRound1Tests`, 9 new)
+- `rearmsWhenTimerFiresEarly`, `engineReportsRefusedDisplayAssertion`, `statusLineTellsTheTruth`.
+- `turnOffWhenAlreadyOffChangesNothing`, `concurrentChangesKeepBothRecords`, `darkModeRestoresAuto` (includes legacy-record decoding).
+- `skipsNetworkMountsBeforeReadingThem`.
+- `shortcutRunTimesOut`: the helper with `Task.sleep`, plus a real `/bin/sleep 30` process cut off at 0.3 s.
+- `focusGoesBackAfterOverlay`.
+
+`FakeAsserter` gained `refuseKinds` so that it can refuse just the display assertion.
+
+### Commands and output
+- RED: `swift build --build-tests` failed with `value of type 'KeepAwakeSession' has no member 'nextCheck'`, `value of type 'QuickToggleRestore' has no member 'priorAutomatic'`, `type 'FocusShortcut' has no member 'withTimeout'`, `type 'FocusShortcut' has no member 'TimedOut'`, `type 'EjectableVolumeFilter' has no member 'worthInspecting'` (and more of the same).
+- GREEN (Core, before the app changes): `swift test --filter ControlsTests` → `✔ Test run with 43 tests in 9 suites passed after 0.526 seconds.`
+- After all four commits, `swift test --filter Controls` → `✔ Suite ControlsFixRound1Tests passed after 0.528 seconds.` / `✔ Test run with 43 tests in 9 suites passed after 0.528 seconds.`
+- Full suite, once: `swift test` → `✔ Test run with 604 tests in 34 suites passed after 81.715 seconds.` This time no load flakes appeared.
+- `swift build` produced no warnings or errors at each commit.
+- Release: `swift build -c release --arch arm64 --arch x86_64` → `Build complete!` (exit 0); `lipo -info` reports `x86_64 arm64`. The new `getmntinfo_r_np` / `statfs` code compiles for x86_64.
+
+**Correction to the original report:** the baseline at `1a84988` was **561** tests, not 547 (the shell had added tests since the brief was written). So the original Controls work added **34** tests in 8 suites, not 48. With this round, Controls has **43 tests in 9 suites**, and the suite total is 604.
+
+### Snapshots (light and dark, checked)
+All four are in `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/snaps/`:
+- `controls-fix1-panel-light.png`
+- `controls-fix1-panel-dark.png`
+- `controls-fix1-settings-light.png`
+- `controls-fix1-settings-dark.png`
+
+The panel is unchanged apart from the two-line Finder footnote, which wraps cleanly. The tile still reads "1 h 12 m left · display stays on", because the fixture's display assertion is held.
+
+### Unattended rule
+Nothing was flipped, written, ejected, muted, asserted or overlaid. The new probes were read-only and used scratch binaries:
+- `controls-probe-auto` used `dlsym` and the Auto getter.
+- `controls-probe-mounts` read the mount table.
+
+### Still needs hardware verification (additions)
+- That the non-activating overlay panels take Esc and show the crosshair cursor while another app stays active, on all four displays.
+- That `SLSSetAppearanceThemeSwitchesAutomatically` turns Auto off and back on as System Settings does.
+- That a stale SMB share no longer stalls the panel (needs a real share).
