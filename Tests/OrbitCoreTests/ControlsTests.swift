@@ -236,3 +236,126 @@ extension ControlsTests.KeepAwakeTests {
         #expect(fake.held.isEmpty)
     }
 }
+
+// MARK: - Downloads
+
+extension ControlsTests {
+    @Suite struct DownloadActivityTests {
+        @Test func downloadSuffixes() {
+            #expect(DownloadActivity.partialSuffixes == [".download", ".crdownload", ".part", ".partial", ".opdownload"])
+            #expect(DownloadActivity.isActive(fileNames: ["movie.mp4.download"]))            // Safari (a bundle)
+            #expect(DownloadActivity.isActive(fileNames: ["Unconfirmed 812.crdownload"]))    // Chrome, Edge, Arc
+            #expect(DownloadActivity.isActive(fileNames: ["setup.dmg.part"]))                 // Firefox
+            #expect(DownloadActivity.isActive(fileNames: ["a.zip.partial"]))
+            #expect(DownloadActivity.isActive(fileNames: ["b.iso.opdownload"]))               // Opera
+            #expect(DownloadActivity.isActive(fileNames: ["Report.pdf", "IMG.HEIC", "big.ZIP.CRDOWNLOAD"]))  // any case
+            #expect(!DownloadActivity.isActive(fileNames: []))
+            #expect(!DownloadActivity.isActive(fileNames: ["Report.pdf", "notes.txt", "partial.zip", "download.png"]))
+            // A bare suffix (a hidden file named like one) is not a download.
+            #expect(!DownloadActivity.isActive(fileNames: [".part", ".download"]))
+            #expect(DownloadActivity.pollInterval == 10)
+        }
+
+        /// A browser briefly has no partial file between two downloads; the watch rides over that gap.
+        @Test func watchBridgesShortGaps() {
+            let t0 = Date(timeIntervalSince1970: 0)
+            var watch = DownloadWatch(grace: 20)
+            var results: [Bool] = []
+            results.append(watch.update(active: false, now: t0))      // never seen one: not downloading
+            results.append(watch.update(active: true, now: t0))
+            results.append(watch.update(active: false, now: t0.addingTimeInterval(10)))
+            results.append(watch.update(active: false, now: t0.addingTimeInterval(19)))
+            results.append(watch.update(active: false, now: t0.addingTimeInterval(20)))
+            results.append(watch.update(active: true, now: t0.addingTimeInterval(30)))
+            #expect(results == [false, true, true, true, false, true])
+            #expect(DownloadWatch().grace == 20)
+        }
+    }
+}
+
+// MARK: - Quick Toggles
+
+extension ControlsTests {
+    @Suite struct QuickToggleTests {
+        @Test func togglesInOrder() {
+            #expect(QuickToggleID.allCases == [.darkMode, .hideDesktopIcons, .showHiddenFiles, .nightShift, .doNotDisturb, .ejectDrives, .micMute])
+            #expect(QuickToggleID.allCases.allSatisfy { !$0.title.isEmpty && !$0.symbol.isEmpty })
+            #expect(QuickToggleID.allCases.filter(\.isAction) == [.doNotDisturb, .ejectDrives])
+            #expect(QuickToggleID.allCases.filter(\.restartsFinder) == [.hideDesktopIcons, .showHiddenFiles])
+            // Raw values persist (visible toggles, restore records).
+            #expect(QuickToggleID(rawValue: "nightShift") == .nightShift)
+        }
+
+        @Test func preferenceParsing() {
+            #expect(PreferenceValue.parse(nil) == .absent)
+            #expect(PreferenceValue.parse(true) == .bool(true))
+            #expect(PreferenceValue.parse(false) == .bool(false))
+            #expect(PreferenceValue.parse(NSNumber(value: 1)) == .bool(true))
+            #expect(PreferenceValue.parse(NSNumber(value: 0)) == .bool(false))
+            #expect(PreferenceValue.parse(0) == .bool(false))
+            // `defaults write com.apple.finder AppleShowAllFiles YES` stores a string.
+            #expect(PreferenceValue.parse("YES") == .bool(true))
+            #expect(PreferenceValue.parse("true") == .bool(true))
+            #expect(PreferenceValue.parse("1") == .bool(true))
+            #expect(PreferenceValue.parse("NO") == .bool(false))
+            #expect(PreferenceValue.parse("off") == .bool(false))
+            #expect(PreferenceValue.parse(Data()) == .absent)    // something unexpected reads as unset
+        }
+
+        @Test func onMeaning() {
+            // Hiding desktop icons means CreateDesktop = false; unset means icons show.
+            #expect(QuickToggleID.hideDesktopIcons.isOn(.bool(false)))
+            #expect(!QuickToggleID.hideDesktopIcons.isOn(.absent))
+            #expect(!QuickToggleID.hideDesktopIcons.isOn(.bool(true)))
+            #expect(QuickToggleID.showHiddenFiles.isOn(.bool(true)))
+            #expect(!QuickToggleID.showHiddenFiles.isOn(.absent))
+            #expect(QuickToggleID.darkMode.isOn(.bool(true)))
+            #expect(!QuickToggleID.darkMode.isOn(.absent))
+            #expect(QuickToggleID.nightShift.isOn(.bool(true)))
+        }
+
+        @Test func restoreRecordsPriorState() {
+            var book = QuickToggleRestoreBook()
+            // Desktop icons were showing because the key was never set.
+            let hide = book.turnOn(.hideDesktopIcons, current: .absent)
+            #expect(hide == .bool(false))
+            #expect(book.records[.hideDesktopIcons] == QuickToggleRestore(prior: .absent, applied: .bool(false)))
+            // Turning it off puts back exactly that: the key removed, not CreateDesktop = true.
+            let show = book.turnOff(.hideDesktopIcons, current: .bool(false))
+            #expect(show == .absent)
+            #expect(book.records[.hideDesktopIcons] == nil)
+
+            // An explicit prior value comes back as that value.
+            let on = book.turnOn(.showHiddenFiles, current: .bool(false))
+            let off = book.turnOff(.showHiddenFiles, current: .bool(true))
+            #expect(on == .bool(true))
+            #expect(off == .bool(false))
+
+            // Turning on twice keeps the first prior state.
+            _ = book.turnOn(.hideDesktopIcons, current: .bool(true))
+            _ = book.turnOn(.hideDesktopIcons, current: .bool(false))
+            #expect(book.records[.hideDesktopIcons]?.prior == .bool(true))
+            let back = book.turnOff(.hideDesktopIcons, current: .bool(false))
+            #expect(back == .bool(true))
+        }
+
+        @Test func staleRecordFallsBackToPlainOff() {
+            var book = QuickToggleRestoreBook()
+            _ = book.turnOn(.showHiddenFiles, current: .bool(false))
+            // Someone else changed the setting since (Terminal, another app): don't resurrect Orbit's memory.
+            let stale = book.turnOff(.showHiddenFiles, current: .absent)
+            #expect(stale == .absent)
+            #expect(book.records.isEmpty)
+            // Already on outside Orbit: turning "on" records nothing, so off can't restore "on".
+            let unchanged = book.turnOn(.darkMode, current: .bool(true))
+            #expect(unchanged == .bool(true))
+            #expect(book.records[.darkMode] == nil)
+            let light = book.turnOff(.darkMode, current: .bool(true))
+            #expect(light == .bool(false))
+            // Records survive a relaunch.
+            _ = book.turnOn(.nightShift, current: .bool(false))
+            let data = try? JSONEncoder().encode(book)
+            #expect(data.flatMap { try? JSONDecoder().decode(QuickToggleRestoreBook.self, from: $0) } == book)
+        }
+    }
+}
