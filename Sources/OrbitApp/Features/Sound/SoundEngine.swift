@@ -112,13 +112,12 @@ final class SoundEngine {
         reconcileScheduled = false
         guard isRunning else { return }
         if !monitor.isListening { monitor.refresh() }
-        let defaultUID = hardware.defaultOutputUID
         let available = Set(hardware.outputDevices.map(\.uid))
 
         var wanted: [String: (plan: TapPlan, key: TapKey)] = [:]
         if permissionGranted {
             for (bundleID, preference) in settings.appStates where !preference.isDefault {
-                let plan = TapPlan(preference: preference, defaultOutputUID: defaultUID, availableOutputUIDs: available)
+                let plan = TapPlan(preference: preference, defaultOutputUID: followedOutput(for: bundleID), availableOutputUIDs: available)
                 guard plan.needsTap, let destination = plan.destinationUID else { continue }
                 let processes = monitor.processObjects(forApp: bundleID)
                 guard !processes.isEmpty else { continue }
@@ -127,7 +126,8 @@ final class SoundEngine {
         }
 
         for (bundleID, tap) in taps where wanted[bundleID] == nil {
-            let plan = TapPlan(preference: settings.preference(for: bundleID), defaultOutputUID: defaultUID, availableOutputUIDs: available)
+            let plan = TapPlan(preference: settings.preference(for: bundleID), defaultOutputUID: followedOutput(for: bundleID),
+                               availableOutputUIDs: available)
             let passingThroughUnity = permissionGranted && !plan.needsTap && plan.destinationUID == tap.destinationUID
                 && monitor.processObjects(forApp: bundleID) == tap.processes
             if passingThroughUnity {
@@ -149,6 +149,13 @@ final class SoundEngine {
             build(bundleID, key: want.key, gain: want.plan.gain)
         }
         updateListening()
+    }
+
+    /// Where "Same as Output" keeps this app: the device it plays to on its own (an app that chose one in its
+    /// own settings), otherwise the system output (`TapPlan.followedOutput`).
+    func followedOutput(for bundleID: String) -> String? {
+        TapPlan.followedOutput(appDeviceUIDs: monitor.outputDeviceUIDs(forApp: bundleID), systemOutputUID: hardware.defaultOutputUID,
+                               availableOutputUIDs: Set(hardware.outputDevices.map(\.uid)))
     }
 
     private func build(_ bundleID: String, key: TapKey, gain: Float) {

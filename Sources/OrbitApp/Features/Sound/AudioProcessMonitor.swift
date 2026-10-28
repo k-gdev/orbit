@@ -11,23 +11,26 @@ struct AudioProcess: Equatable {
     /// The app whose pill this process belongs under (`AudioAppGrouping`).
     let appBundleID: String?
     var isRunningOutput: Bool
+    /// The UIDs of the output devices the process is playing to (`kAudioProcessPropertyDevices`).
+    var outputDeviceUIDs: [String]
 }
 
 /// The audio processes on the system, grouped by app. Reading is on demand (`refresh()`); listening for
-/// changes (the process list and each process's "is playing" flag) happens only between
-/// `startListening()` and `stopListening()`, which `SoundEngine` brackets around the times it matters:
-/// the panel is open, a tap exists, or an app has settings waiting for it to start.
+/// changes (the process list, and each process's "is playing" flag and output devices) happens only
+/// between `startListening()` and `stopListening()`, which `SoundEngine` brackets around the times it
+/// matters: the panel is open, a tap exists, or an app has settings waiting for it to start.
 ///
 /// Read-only: nothing here changes any process or device.
 @available(macOS 14.2, *)
 @MainActor
 final class AudioProcessMonitor {
     private(set) var processes: [AudioProcess] = []
-    /// Called (on the main thread) after the list or a playing flag changed while listening.
+    /// Called (on the main thread) after the list, a playing flag or a process's devices changed while
+    /// listening.
     var onChange: (() -> Void)?
 
     private var listListener: SoundHALListener?
-    private var outputListeners: [AudioObjectID: SoundHALListener] = [:]
+    private var processListeners: [AudioObjectID: [SoundHALListener]] = [:]
     private var groupCache: [pid_t: (bundleID: String?, app: String?)] = [:]
     private let ownPID = getpid()
 
@@ -45,11 +48,11 @@ final class AudioProcessMonitor {
     func stopListening() {
         listListener?.remove()
         listListener = nil
-        outputListeners.values.forEach { $0.remove() }
-        outputListeners = [:]
+        processListeners.values.joined().forEach { $0.remove() }
+        processListeners = [:]
     }
 
-    /// Re-reads the process list (and, while listening, keeps one "is playing" listener per process).
+    /// Re-reads the process list (and, while listening, keeps listeners on each process).
     func refresh() {
         let objects = SoundHAL.objects(SoundHAL.system, SoundHAL.address(kAudioHardwarePropertyProcessObjectList))
         var next: [AudioProcess] = []
@@ -59,17 +62,22 @@ final class AudioProcessMonitor {
                   pid > 0, pid != ownPID else { continue }
             livePIDs.insert(pid)
             let group = grouping(for: object, pid: pid)
-            let playing = (SoundHAL.read(object, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), zero: UInt32(0)) ?? 0) != 0
-            next.append(AudioProcess(objectID: object, pid: pid, bundleID: group.bundleID, appBundleID: group.app, isRunningOutput: playing))
+            next.append(AudioProcess(objectID: object, pid: pid, bundleID: group.bundleID, appBundleID: group.app,
+                                     isRunningOutput: Self.isPlaying(object), outputDeviceUIDs: Self.outputDevices(object)))
         }
         groupCache = groupCache.filter { livePIDs.contains($0.key) }
         if next != processes { processes = next }
-        if isListening { syncOutputListeners() }
+        if isListening { syncProcessListeners() }
     }
 
     /// The process objects of one app (all of them, playing or not, so a tap covers sounds that start later).
     func processObjects(forApp bundleID: String) -> [AudioObjectID] {
         processes.filter { $0.appBundleID == bundleID }.map(\.objectID).sorted()
+    }
+
+    /// The output devices an app's processes are playing to (duplicates included).
+    func outputDeviceUIDs(forApp bundleID: String) -> [String] {
+        processes.filter { $0.appBundleID == bundleID }.flatMap(\.outputDeviceUIDs)
     }
 
     /// Per app: whether any of its processes is playing, and a PID to resolve its name and icon from.
@@ -85,25 +93,38 @@ final class AudioProcessMonitor {
         return result
     }
 
-    private func syncOutputListeners() {
+    private func syncProcessListeners() {
         let live = Set(processes.map(\.objectID))
-        for (object, listener) in outputListeners where !live.contains(object) {
-            listener.remove()
-            outputListeners[object] = nil
+        for (object, listeners) in processListeners where !live.contains(object) {
+            listeners.forEach { $0.remove() }
+            processListeners[object] = nil
         }
-        for object in live where outputListeners[object] == nil {
-            outputListeners[object] = SoundHALListener(object: object, SoundHAL.address(kAudioProcessPropertyIsRunningOutput)) { [weak self] in
-                self?.playingChanged(object)
-            }
+        for object in live where processListeners[object] == nil {
+            let changed: @MainActor () -> Void = { [weak self] in self?.processChanged(object) }
+            processListeners[object] = [
+                SoundHALListener(object: object, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), action: changed),
+                SoundHALListener(object: object, SoundHAL.address(kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput), action: changed),
+            ].compactMap { $0 }
         }
     }
 
-    private func playingChanged(_ object: AudioObjectID) {
+    private func processChanged(_ object: AudioObjectID) {
         guard let index = processes.firstIndex(where: { $0.objectID == object }) else { return }
-        let playing = (SoundHAL.read(object, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), zero: UInt32(0)) ?? 0) != 0
-        guard processes[index].isRunningOutput != playing else { return }
+        let playing = Self.isPlaying(object), devices = Self.outputDevices(object)
+        guard processes[index].isRunningOutput != playing || processes[index].outputDeviceUIDs != devices else { return }
         processes[index].isRunningOutput = playing
+        processes[index].outputDeviceUIDs = devices
         onChange?()
+    }
+
+    private static func isPlaying(_ object: AudioObjectID) -> Bool {
+        (SoundHAL.read(object, SoundHAL.address(kAudioProcessPropertyIsRunningOutput), zero: UInt32(0)) ?? 0) != 0
+    }
+
+    private static func outputDevices(_ object: AudioObjectID) -> [String] {
+        SoundHAL.objects(object, SoundHAL.address(kAudioProcessPropertyDevices, kAudioObjectPropertyScopeOutput))
+            .compactMap(SoundHAL.uid(of:))
+            .filter { !$0.hasPrefix(SoundHAL.aggregateUIDPrefix) }
     }
 
     // MARK: Grouping

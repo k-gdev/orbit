@@ -498,6 +498,26 @@ extension SoundTests {
             #expect(quieter.destinationUID == "Headset")
         }
 
+        /// "Same as Output" leaves an app where it plays on its own: an app that picked a device in its own
+        /// settings (Discord on the headset while the system plays on the speakers) keeps it, so a volume
+        /// change never moves it.
+        @Test func sameAsOutputFollowsTheAppsOwnDevice() {
+            let available: Set<String> = ["Headset", "Speakers", "Display"]
+            #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
+            #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Headset")
+            // Not playing (no device yet), playing on several, or on something not in the list: the system output.
+            #expect(TapPlan.followedOutput(appDeviceUIDs: [], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
+            #expect(TapPlan.followedOutput(appDeviceUIDs: ["Headset", "Display"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
+            #expect(TapPlan.followedOutput(appDeviceUIDs: ["com.kevo.orbit.tap.1"], systemOutputUID: "Speakers", availableOutputUIDs: available) == "Speakers")
+            #expect(TapPlan.followedOutput(appDeviceUIDs: [], systemOutputUID: nil, availableOutputUIDs: available) == nil)
+
+            // Plugged into the plan: the app's own device counts as its output.
+            let own = TapPlan.followedOutput(appDeviceUIDs: ["Headset"], systemOutputUID: "Speakers", availableOutputUIDs: available)
+            let quieter = TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: own, availableOutputUIDs: available)
+            #expect(quieter.destinationUID == "Headset")
+            #expect(!TapPlan(preference: AppAudioPreference(outputUID: "Headset"), defaultOutputUID: own, availableOutputUIDs: available).needsTap)
+        }
+
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {
             #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)

@@ -162,7 +162,9 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
         let visible = AudioAppList.visible(candidates, pinned: settings.pinnedBundleIDs, customised: Set(settings.appStates.keys),
                                            showAll: settings.showAllApps, excluding: [Bundle.main.bundleIdentifier ?? "com.kevo.orbit"])
         model.apps = visible.compactMap { candidate in
-            identities[candidate.bundleID].map { SoundAppItem(identity: $0, isPlaying: candidate.isPlaying) }
+            identities[candidate.bundleID].map {
+                SoundAppItem(identity: $0, isPlaying: candidate.isPlaying, followedOutputUID: engine.followedOutput(for: candidate.bundleID))
+            }
         }
     }
 

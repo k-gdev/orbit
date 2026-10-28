@@ -39,4 +39,14 @@ public struct TapPlan: Equatable, Sendable {
 
     /// The gain is past unity, so samples go through `SoftClip`.
     public var isBoosted: Bool { gain > 1 }
+
+    /// The output an app plays on by itself, which "Same as Output" keeps it on: the one connected device
+    /// its processes are playing to (an app that chose a device in its own settings), otherwise the system
+    /// output. Pass the result as `defaultOutputUID`, so a volume change never moves such an app and a
+    /// route to its own device needs no tap.
+    public static func followedOutput(appDeviceUIDs: [String], systemOutputUID: String?, availableOutputUIDs: Set<String>) -> String? {
+        let own = Set(appDeviceUIDs.filter(availableOutputUIDs.contains))
+        if own.count == 1, Set(appDeviceUIDs).count == 1, let device = own.first { return device }
+        return systemOutputUID
+    }
 }

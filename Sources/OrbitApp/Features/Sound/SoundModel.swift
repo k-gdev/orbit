@@ -21,6 +21,9 @@ struct SoundAppIdentity: Identifiable {
 struct SoundAppItem: Identifiable {
     let identity: SoundAppIdentity
     let isPlaying: Bool
+    /// Where the app plays when set to Same as Output (its own device choice, else the system output);
+    /// nil = the system output.
+    var followedOutputUID: String?
     var id: String { identity.bundleID }
     var bundleID: String { identity.bundleID }
     var name: String { identity.name }

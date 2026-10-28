@@ -179,6 +179,7 @@ struct SoundAppRow: View {
         let pinned = settings.isPinned(app.bundleID)
         let routed = preference.outputUID.flatMap { model.output(uid: $0) }
         let routeMissing = preference.outputUID != nil && routed == nil
+        let followed = model.output(uid: app.followedOutputUID ?? model.defaultOutputUID)
         HStack(spacing: 8) {
             PillSlider(value: Binding(get: { settings.preference(for: app.bundleID).volume },
                                       set: { model.setVolume($0, for: app.bundleID) }),
@@ -188,12 +189,12 @@ struct SoundAppRow: View {
                        valueText: { preference.muted ? "Muted" : "\(Int($0.rounded()))%" },
                        onLeadingTap: { model.toggleMute(app.bundleID) })
                 .help(preference.muted ? "Click the icon to unmute \(app.name)" : "Click the icon to mute \(app.name)")
-            PanelRoundMenu(systemImage: routed?.symbol ?? (routeMissing ? "exclamationmark.triangle" : model.output(uid: model.defaultOutputUID)?.symbol ?? "hifispeaker"),
+            PanelRoundMenu(systemImage: routed?.symbol ?? (routeMissing ? "exclamationmark.triangle" : followed?.symbol ?? "hifispeaker"),
                            isHighlighted: preference.outputUID != nil, size: 34) {
                 Text("Play \(app.name) on")
                 Picker("Output", selection: Binding(get: { preference.outputUID ?? "" },
                                                     set: { model.setOutput($0.isEmpty ? nil : $0, for: app.bundleID) })) {
-                    Text(sameAsOutputTitle).tag("")
+                    Text(followed.map { "Same as Output (\($0.name))" } ?? "Same as Output").tag("")
                     Divider()
                     ForEach(model.outputs) { device in
                         Label(device.name, systemImage: device.symbol).tag(device.uid)
@@ -213,11 +214,6 @@ struct SoundAppRow: View {
             Button("Reset to 100 %, Same as Output") { model.reset(app.bundleID) }
                 .disabled(preference.isDefault)
         }
-    }
-
-    private var sameAsOutputTitle: String {
-        guard let output = model.output(uid: model.defaultOutputUID) else { return "Same as Output" }
-        return "Same as Output (\(output.name))"
     }
 
     private func label(muted: Bool, pinned: Bool) -> some View {
