@@ -130,3 +130,72 @@ import Testing
         #expect(close(BrightnessLink.values(changing: "a", to: 0.5, current: ["a": 0.5, "z": 1.7]), ["a": 0.5, "z": 1.0]))
     }
 }
+
+/// The resolution menu. Modes are a subset of what Kevo's main ThinkVision P27u-20 lists (2026-10-28).
+@Suite struct DisplayModeListTests {
+    private func mode(_ id: Int32, _ w: Int, _ h: Int, _ pw: Int, _ ph: Int, _ hz: Double = 60,
+                      usable: Bool = true, flags: UInt32 = 0x3) -> RawDisplayMode {
+        RawDisplayMode(id: id, width: w, height: h, pixelWidth: pw, pixelHeight: ph, refreshRate: hz, isUsable: usable, ioFlags: flags)
+    }
+
+    @Test func modeListDedupesAndLabelsHiDPI() {
+        let current = mode(82, 3008, 1692, 6016, 3384)
+        let modes = [
+            mode(56, 1920, 1080, 1920, 1080), mode(150, 1920, 1080, 1920, 1080),        // duplicate size
+            mode(76, 2560, 1440, 2560, 1440),
+            mode(75, 2560, 1440, 5120, 2880),
+            current, mode(85, 3008, 1692, 6016, 3384, 30), mode(86, 3008, 1692, 6016, 3384, 25),
+            mode(83, 3008, 1692, 3008, 1692), mode(84, 3008, 1692, 3008, 1692, 30),
+            mode(100, 3840, 2160, 3840, 2160, flags: 0x0200_0003),
+            mode(119, 512, 384, 1024, 768, usable: false, flags: 0x1),                  // unusable
+            mode(120, 512, 384, 1024, 768, usable: false, flags: 0x1),
+        ]
+        let list = DisplayModeList(modes: modes, current: current)
+        #expect(list.entries.map(\.label) == [
+            "3840 × 2160",
+            "3008 × 1692 HiDPI · 60 Hz", "3008 × 1692 HiDPI · 30 Hz", "3008 × 1692 HiDPI · 25 Hz",
+            "3008 × 1692 · 60 Hz", "3008 × 1692 · 30 Hz",
+            "2560 × 1440 HiDPI", "2560 × 1440",
+            "1920 × 1080",
+        ])
+        #expect(list.entries.filter(\.isCurrent).map(\.mode) == [current])
+        #expect(list.title == "3008 × 1692 HiDPI")
+        #expect(list.current?.label == "3008 × 1692 HiDPI · 60 Hz")
+        // Groups: one per size, rates inside, fastest first.
+        #expect(list.groups.map(\.sizeLabel) == ["3840 × 2160", "3008 × 1692 HiDPI", "3008 × 1692", "2560 × 1440 HiDPI",
+                                                 "2560 × 1440", "1920 × 1080"])
+        #expect(list.groups[1].entries.map(\.refreshLabel) == ["60 Hz", "30 Hz", "25 Hz"])
+        #expect(list.groups.filter(\.isCurrent).map(\.sizeLabel) == ["3008 × 1692 HiDPI"])
+        #expect(list.groups.map(\.isHiDPI) == [false, true, false, true, false, false])
+        // The duplicate kept the first of the two identical modes.
+        #expect(list.entries.last?.mode.id == 56)
+        #expect(Set(list.entries.map(\.id)).count == list.entries.count)
+    }
+
+    @Test func modeListPrefersCurrentAndNativeDuplicatesAndKeepsAnUnusableCurrent() {
+        // Of two identical-looking modes, the current one survives even if it comes second.
+        let current = mode(9, 1920, 1080, 1920, 1080)
+        let list = DisplayModeList(modes: [mode(8, 1920, 1080, 1920, 1080), current], current: current)
+        #expect(list.entries.map(\.mode.id) == [9])
+        #expect(list.current?.mode.id == 9)
+        // Otherwise the native-flagged one does.
+        let native = DisplayModeList(modes: [mode(1, 2560, 1440, 2560, 1440), mode(2, 2560, 1440, 2560, 1440, flags: 0x0200_0007)],
+                                     current: nil)
+        #expect(native.entries.map(\.mode.id) == [2])
+        #expect(native.title == "Resolution")
+        // An unusable current mode is still listed (the menu must show where the display is).
+        let odd = mode(5, 640, 480, 640, 480, usable: false)
+        let withOdd = DisplayModeList(modes: [mode(4, 800, 600, 800, 600), odd], current: odd)
+        #expect(withOdd.entries.map(\.mode.id) == [4, 5])
+        #expect(withOdd.title == "640 × 480")
+        // A current mode missing from the list is added.
+        let missing = mode(7, 1024, 768, 2048, 1536)
+        #expect(DisplayModeList(modes: [mode(4, 800, 600, 800, 600)], current: missing).entries.map(\.mode.id) == [7, 4])
+        // Fractional rates keep their decimals; a 0 Hz rate (unknown) gets no label of its own.
+        let rates = DisplayModeList(modes: [mode(1, 1920, 1080, 1920, 1080, 59.94), mode(2, 1920, 1080, 1920, 1080, 120),
+                                            mode(3, 1280, 720, 1280, 720, 0)], current: nil)
+        #expect(rates.entries.map(\.label) == ["1920 × 1080 · 120 Hz", "1920 × 1080 · 59.94 Hz", "1280 × 720"])
+        #expect(DisplayModeList.empty.entries.isEmpty)
+        #expect(DisplayModeList.empty.groups.isEmpty)
+    }
+}
