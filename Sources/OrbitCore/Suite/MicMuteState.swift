@@ -25,6 +25,27 @@ public struct MicDeviceReading: Equatable, Sendable {
 public enum MicMuteAction: Equatable, Sendable {
     case setMute(deviceUID: String, muted: Bool)
     case setVolume(deviceUID: String, volume: Float)
+
+    /// The device the action writes to.
+    public var deviceUID: String {
+        switch self {
+        case .setMute(let uid, _), .setVolume(let uid, _): uid
+        }
+    }
+}
+
+extension MicDeviceReading {
+    /// The reading as `actions` will leave it (actions for other devices change nothing).
+    public func applying(_ actions: [MicMuteAction]) -> MicDeviceReading {
+        var reading = self
+        for action in actions where action.deviceUID == deviceUID {
+            switch action {
+            case .setMute(_, let muted): reading.isMuted = muted
+            case .setVolume(_, let volume): reading.volume = volume
+            }
+        }
+        return reading
+    }
 }
 
 /// How the mic looks right now (the shared mute's live state, spec §8.3).
@@ -38,17 +59,19 @@ public enum MicMutePresentation: Equatable, Sendable {
     case mutedElsewhere
 }
 
-/// Keeps Orbit's own mute and unmute writes from being misread while they land.
+/// Orbit's own mic writes that haven't shown yet, so they aren't misread while they land.
 ///
-/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after one of Orbit's
-/// writes can still show the device as it was: after a mute, "unmuted" (which must not be taken for the user
-/// unmuting elsewhere, or Orbit would forget its mute); after an unmute, "muted" (which must not flash
-/// "Muted outside Orbit", or make a quick second press unmute again). After `wrote(_:at:)`, a reading of that
-/// device that doesn't show the write yet is projected to what the write will leave and marked untrusted
-/// (nothing may be concluded from it), until a reading confirms the write or `timeout` passes (then the write
-/// evidently didn't take, and the device's own state shows again). Each write waits on its own: one to another
-/// device (the old mic put back as the input moves, a reconnected mic's pending undo) never ends the wait for the
-/// current input, and still covers its device if the input switches straight back to it.
+/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after one of Orbit's writes
+/// can still show the device as it was: after a mute, "unmuted" (which must not be taken for the user unmuting
+/// elsewhere, or Orbit would forget its mute); after an unmute, "muted" (which must not flash "Muted outside Orbit").
+/// After `wrote(_:undoing:at:)`, `review` shows a reading of that device as the write will leave it and marks it
+/// untrusted (nothing may be concluded from it) until a reading shows the write's own value, or `timeout` passes (the
+/// write evidently didn't take; the device counts as it reads again). A reading never confirms any other value.
+///
+/// A write waits until a reading of its own device settles it (shown, or timed out) or the device is gone (`forget`):
+/// a reading of another device says nothing about it. `MicMuteModel` reads every device with a write waiting and never
+/// writes to a device while one waits, so there is at most one write per device here. An undo that times out hands
+/// back the mute it was undoing (`Review.undosNotShown`), so the model can tell whether that mute is still in effect.
 ///
 /// Times are on the monotonic `ContinuousClock` (time asleep counts), so a change of the wall clock can't stretch a
 /// wait or end one early.
@@ -59,51 +82,97 @@ public struct MicWriteConfirmation: Equatable, Sendable {
     private struct Written: Equatable, Sendable {
         var action: MicMuteAction
         var at: ContinuousClock.Instant
+        /// For an undo: the mute of Orbit's it undoes, handed back if the undo never shows.
+        var undoing: MicMuteState.Applied?
     }
 
     private var written: [Written] = []
 
     public init() {}
 
-    /// A write of Orbit's is waiting to show up.
+    /// A write of Orbit's is waiting to show up (or to be found timed out).
     public var isWaiting: Bool { !written.isEmpty }
 
-    /// Orbit just wrote `actions`. Each replaces an earlier write of the same control on the same device (the device
-    /// will show the later one); other writes keep waiting. Writing nothing changes nothing: a write still landing
-    /// keeps its wait (ending it would let that write's late arrival be taken for a change made outside Orbit).
-    public mutating func wrote(_ actions: [MicMuteAction], at now: ContinuousClock.Instant) {
+    /// A write of Orbit's to this device is waiting: nothing else may be written to it yet.
+    public func isWaiting(on deviceUID: String) -> Bool {
+        written.contains { $0.action.deviceUID == deviceUID }
+    }
+
+    /// The devices with a write waiting, in the order they were first written to.
+    public var waitingDevices: [String] {
+        var seen: Set<String> = []
+        return written.map(\.action.deviceUID).filter { seen.insert($0).inserted }
+    }
+
+    /// When the earliest waiting write times out: a fresh look then settles it even if no listener fires.
+    public var nextDeadline: ContinuousClock.Instant? {
+        written.map { $0.at + Self.timeout }.min()
+    }
+
+    /// Every write to this device has passed its timeout.
+    public func hasTimedOut(deviceUID: String, now: ContinuousClock.Instant) -> Bool {
+        written.allSatisfy { $0.action.deviceUID != deviceUID || now - $0.at >= Self.timeout }
+    }
+
+    /// Orbit just wrote `actions` (`undoing`: the mute they undo, if any). Each replaces an earlier write of the same
+    /// control on the same device (the device will show the later one). Writing nothing changes nothing: a write still
+    /// landing keeps its wait.
+    public mutating func wrote(_ actions: [MicMuteAction], undoing: MicMuteState.Applied? = nil, at now: ContinuousClock.Instant) {
         for action in actions {
             written.removeAll { Self.sameControl($0.action, action) }
-            written.append(Written(action: action, at: now))
+            written.append(Written(action: action, at: now, undoing: undoing))
         }
     }
 
-    /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
-    /// `MicMuteState.deviceChanged`). Readings of other devices pass through untouched.
-    public mutating func review(_ reading: MicDeviceReading, now: ContinuousClock.Instant) -> (reading: MicDeviceReading, trusted: Bool) {
-        // A write that hasn't shown within the timeout evidently didn't take. Dropped on every review, so a write to a
-        // mic that isn't read again doesn't wait forever.
-        written.removeAll { now - $0.at >= Self.timeout }
-        let mine = written.filter { Self.device(of: $0.action) == reading.deviceUID }
-        guard !mine.isEmpty else { return (reading, true) }
-        if mine.allSatisfy({ Self.shows($0.action, in: reading) }) {
-            written.removeAll { Self.device(of: $0.action) == reading.deviceUID }
-            return (reading, true)
-        }
-        var projected = reading
-        for entry in mine {
-            switch entry.action {
-            case .setMute(_, let muted): projected.isMuted = muted
-            case .setVolume(_, let volume): projected.volume = volume
-            }
-        }
-        return (projected, false)
+    /// What a fresh reading of a device says, given Orbit's writes to it.
+    public struct Review: Equatable, Sendable {
+        /// The reading as it should be shown: as Orbit's writes still waiting will leave it.
+        public var reading: MicDeviceReading
+        /// No write of Orbit's to the device waits any more: the reading counts at face value.
+        public var trusted: Bool
+        /// This review ended the device's wait (its writes showed, or timed out): what waited for it may go ahead.
+        public var settled: Bool
+        /// Writes that timed out without showing: they evidently didn't take.
+        public var timedOut: [MicMuteAction]
+        /// The mutes whose undo timed out without showing.
+        public var undosNotShown: [MicMuteState.Applied]
     }
 
-    private static func device(of action: MicMuteAction) -> String {
-        switch action {
-        case .setMute(let uid, _), .setVolume(let uid, _): uid
+    /// Reviews a fresh reading: a write it shows is confirmed, a write past its timeout didn't take, the rest keep
+    /// waiting (and the reading is shown as they will leave it). Readings of devices with nothing waiting pass through.
+    public mutating func review(_ reading: MicDeviceReading, now: ContinuousClock.Instant) -> Review {
+        let uid = reading.deviceUID
+        let mine = written.filter { $0.action.deviceUID == uid }
+        guard !mine.isEmpty else {
+            return Review(reading: reading, trusted: true, settled: false, timedOut: [], undosNotShown: [])
         }
+        var waiting: [Written] = []
+        var timedOut: [Written] = []
+        for entry in mine where !Self.shows(entry.action, in: reading) {
+            if now - entry.at >= Self.timeout { timedOut.append(entry) } else { waiting.append(entry) }
+        }
+        written.removeAll { $0.action.deviceUID == uid && !waiting.contains($0) }
+        return Review(reading: reading.applying(waiting.map(\.action)), trusted: waiting.isEmpty, settled: waiting.isEmpty,
+                      timedOut: timedOut.map(\.action), undosNotShown: Self.records(timedOut))
+    }
+
+    /// A reading as Orbit's writes to its device, shown or not, will leave it (nothing is settled).
+    public func projected(_ reading: MicDeviceReading) -> MicDeviceReading {
+        reading.applying(written.map(\.action))
+    }
+
+    /// The device is gone: its writes stop waiting. Returns the mutes they were undoing (whether those undos took is
+    /// unknown).
+    public mutating func forget(deviceUID: String) -> [MicMuteState.Applied] {
+        let mine = written.filter { $0.action.deviceUID == deviceUID }
+        written.removeAll { $0.action.deviceUID == deviceUID }
+        return Self.records(mine)
+    }
+
+    private static func records(_ entries: [Written]) -> [MicMuteState.Applied] {
+        var records: [MicMuteState.Applied] = []
+        for record in entries.compactMap(\.undoing) where !records.contains(record) { records.append(record) }
+        return records
     }
 
     private static func sameControl(_ a: MicMuteAction, _ b: MicMuteAction) -> Bool {
@@ -237,26 +306,17 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         return isMuted
     }
 
-    // MARK: Readings taken while Orbit's own writes land
-
-    /// `mute(_:)` for a fresh reading of the device, taken while one of Orbit's own writes may still be landing: the
-    /// mute is built from the device as that write will leave it (`MicWriteConfirmation.review`), not from the stale
-    /// reading. Right after Orbit's unmute the device can still read muted; muting from that would record "muted
-    /// before Orbit" and write nothing, and the unmute landing afterwards would look like the user unmuting
-    /// elsewhere, leaving the mic live although the last press was a mute.
-    public mutating func mute(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
-                              now: ContinuousClock.Instant) -> [MicMuteAction]? {
-        mute(confirmation.review(reading, now: now).reading)
-    }
-
-    /// A fresh reading of the input device, reviewed against Orbit's own writes still landing: the reading to show,
-    /// and whether it shows that the user unmuted Orbit's mute outside Orbit (Orbit's mute is then over, with nothing
-    /// to restore). Only a reading that may be taken at face value can say so.
-    public mutating func observe(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
-                                 now: ContinuousClock.Instant) -> (shown: MicDeviceReading, unmutedOutside: Bool) {
-        let reviewed = confirmation.review(reading, now: now)
-        guard reviewed.trusted, isMuted else { return (reviewed.reading, false) }
-        return (reviewed.reading, !deviceChanged(reviewed.reading))
+    /// An undo of `record` was written but never showed, and its device still reads exactly as Orbit left it: Orbit's
+    /// mute is still in effect there. It becomes the mute in effect again when its device is the input (`asInput`) and
+    /// no other is; otherwise it waits in `pending` to be undone.
+    public mutating func takeBack(_ record: Applied, asInput: Bool) {
+        guard applied?.deviceUID != record.deviceUID else { return }
+        if asInput, applied == nil {
+            pending.removeAll { $0.deviceUID == record.deviceUID }
+            applied = record
+        } else if !pending.contains(where: { $0.deviceUID == record.deviceUID }) {
+            pending.append(record)
+        }
     }
 
     // MARK: Pending records
@@ -325,7 +385,8 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         reading.canSetMute && reading.isMuted ? [.setMute(deviceUID: reading.deviceUID, muted: false)] : []
     }
 
-    private static func undo(_ applied: Applied) -> [MicMuteAction] {
+    /// What undoes `applied` on its device (nothing for a mute or zero volume that was there before Orbit's).
+    static func undo(_ applied: Applied) -> [MicMuteAction] {
         switch applied.method {
         case .muteFlag(let wasMuted):
             return wasMuted ? [] : [.setMute(deviceUID: applied.deviceUID, muted: false)]
