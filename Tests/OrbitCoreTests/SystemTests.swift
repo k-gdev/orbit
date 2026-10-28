@@ -447,4 +447,46 @@ import Testing
         #expect(SamplingPlan.isGap(since: now.addingTimeInterval(-3.5), now: now, interval: 1))
         #expect(!SamplingPlan.isGap(since: now.addingTimeInterval(-5), now: now, interval: 2))
     }
+
+    @Test func readingsApplySamples() {
+        let layout = ClusterLayout([(name: "Super", logicalCPUs: 1), (name: "Performance", logicalCPUs: 2)])
+        var readings = SystemReadings()
+        #expect(readings.cpu == nil)
+        #expect(readings.batteries == nil)
+        let t0 = Date(timeIntervalSinceReferenceDate: 0)
+
+        readings.apply(SystemSample(cpu: CPULoad(total: 0.5, perCore: [0.2, 0.4, 0.9]), gpu: 0.19, uptime: 100,
+                                    batteries: [BatteryReading(id: "internal", name: "This Mac", kind: .mac, percent: 100)]),
+                       layout: layout, at: t0, interval: 1)
+        #expect(readings.cpu?.total == 0.5)
+        // Performance (cpu0-1) and Super (cpu2), fastest first.
+        #expect(readings.clusters.map(\.name) == ["Super", "Performance"])
+        #expect(readings.clusters.first?.cores == [0.9])
+        #expect(readings.cpuHistory.values == [0.5])
+        #expect(readings.gpuHistory.values == [0.19])
+        #expect(readings.gpu == 0.19)
+        #expect(readings.uptime == 100)
+        #expect(readings.batteries?.count == 1)
+
+        // A tick that only measured the CPU keeps every other value as it was.
+        readings.apply(SystemSample(cpu: CPULoad(total: 0.25, perCore: [0.25, 0.25, 0.25])), layout: layout,
+                       at: t0.addingTimeInterval(1), interval: 1)
+        #expect(readings.cpuHistory.values == [0.5, 0.25])
+        #expect(readings.gpuHistory.values == [0.19])
+        #expect(readings.gpu == 0.19)
+        #expect(readings.batteries?.count == 1)
+        #expect(readings.uptime == 100)
+
+        // After a gap (panel closed for a minute) the sparklines start over.
+        readings.apply(SystemSample(cpu: CPULoad(total: 0.75, perCore: [0.75, 0.75, 0.75]), gpu: 0.4), layout: layout,
+                       at: t0.addingTimeInterval(60), interval: 1)
+        #expect(readings.cpuHistory.values == [0.75])
+        #expect(readings.gpuHistory.values == [0.4])
+        #expect(readings.lastSample == t0.addingTimeInterval(60))
+
+        // A slower plan (the readout's 2 s) is not mistaken for a gap.
+        readings.apply(SystemSample(cpu: CPULoad(total: 0.5, perCore: [0.5, 0.5, 0.5])), layout: layout,
+                       at: t0.addingTimeInterval(65), interval: 2)
+        #expect(readings.cpuHistory.values == [0.75, 0.5])
+    }
 }
