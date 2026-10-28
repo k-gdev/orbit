@@ -318,3 +318,114 @@ enum WallpaperFixtures {
         #expect(assignments.videos.map(\.identity) == ["video:/m/a.mov", "video:/m/b.mov"])
     }
 }
+
+// MARK: - When wallpapers play, and which displays get a window
+
+@Suite struct WallpaperPausePolicyTests {
+    /// A display in plain use: visible, unlocked, awake, on AC, default preferences.
+    let normal = DisplayConditions()
+
+    @Test func playsOtherwise() {
+        #expect(normal.pauseOnBattery == false)
+        #expect(normal.pauseInLowPower == true)
+        #expect(WallpaperPausePolicy.state(for: normal) == .playing)
+        #expect(WallpaperPausePolicy.state(for: normal).isPlaying)
+        // Preferences alone never pause: only the conditions they guard.
+        #expect(WallpaperPausePolicy.state(for: DisplayConditions(pauseOnBattery: true, pauseInLowPower: true)) == .playing)
+    }
+
+    @Test func pauseWhenCovered() {
+        var c = normal
+        c.screenCovered = true
+        #expect(WallpaperPausePolicy.state(for: c) == .paused(.screenCovered))
+        #expect(!WallpaperPausePolicy.state(for: c).isPlaying)
+    }
+
+    @Test func pauseWhenLocked() {
+        var c = normal
+        c.screenLocked = true
+        #expect(WallpaperPausePolicy.state(for: c) == .paused(.screenLocked))
+    }
+
+    @Test func pauseWhenAsleep() {
+        var c = normal
+        c.displayAsleep = true
+        #expect(WallpaperPausePolicy.state(for: c) == .paused(.displayAsleep))
+    }
+
+    @Test func pauseOnBatteryOnlyIfEnabled() {
+        var c = normal
+        c.onBattery = true
+        #expect(WallpaperPausePolicy.state(for: c) == .playing)
+        c.pauseOnBattery = true
+        #expect(WallpaperPausePolicy.state(for: c) == .paused(.onBattery))
+        c.onBattery = false
+        #expect(WallpaperPausePolicy.state(for: c) == .playing)
+    }
+
+    @Test func pauseInLowPower() {
+        var c = normal
+        c.lowPowerMode = true
+        #expect(WallpaperPausePolicy.state(for: c) == .paused(.lowPowerMode))
+        c.pauseInLowPower = false
+        #expect(WallpaperPausePolicy.state(for: c) == .playing)
+    }
+
+    @Test func strongestReasonIsReported() {
+        let all = DisplayConditions(screenCovered: true, screenLocked: true, displayAsleep: true, onBattery: true,
+                                    lowPowerMode: true, pauseOnBattery: true, pauseInLowPower: true)
+        #expect(WallpaperPausePolicy.state(for: all) == .paused(.displayAsleep))
+        #expect(WallpaperPausePolicy.state(for: DisplayConditions(screenCovered: true, screenLocked: true)) == .paused(.screenLocked))
+        #expect(WallpaperPausePolicy.state(for: DisplayConditions(screenCovered: true, onBattery: true, lowPowerMode: true,
+                                                                  pauseOnBattery: true)) == .paused(.screenCovered))
+        #expect(PauseReason.allCases.allSatisfy { !$0.label.isEmpty })
+    }
+
+    @Test func sharedPlayerPlaysWhileAnyDisplayPlays() {
+        #expect(PlaybackState.combined([.paused(.screenCovered), .playing]) == .playing)
+        #expect(PlaybackState.combined([.paused(.screenCovered), .paused(.screenLocked)]) == .paused(.screenLocked))
+        #expect(PlaybackState.combined([.paused(.onBattery)]) == .paused(.onBattery))
+    }
+
+    // The window plan: one window per connected display that has a playable wallpaper.
+
+    let a = DisplayRef(key: "A", name: "P27u-20 (1)")
+    let b = DisplayRef(key: "B", name: "P27u-20 (2)")
+    let c = DisplayRef(key: "C", name: "Q27G4ZD")
+
+    private func assignments(_ pairs: [(DisplayRef, WallpaperSource)]) -> WallpaperAssignments {
+        var result = WallpaperAssignments()
+        for (display, source) in pairs { result.assign(source, to: display) }
+        return result
+    }
+
+    @Test func windowForRemovedDisplayCloses() {
+        let saved = assignments([(a, .aerial(id: "T")), (b, .aerial(id: "O"))])
+        let before = WallpaperPlan.desired(screens: [a, b], assignments: saved) { _ in true }
+        #expect(before == ["A": .aerial(id: "T"), "B": .aerial(id: "O")])
+        // B is unplugged: its window closes; A's is untouched; B keeps its assignment for when it returns.
+        let after = WallpaperPlan.desired(screens: [a], assignments: saved) { _ in true }
+        #expect(WallpaperPlan.changes(from: before, to: after) == WallpaperPlan.Changes(close: ["B"], open: [], change: []))
+        #expect(saved["B"] != nil)
+        // Plugging it back in reopens it.
+        #expect(WallpaperPlan.changes(from: after, to: before) == WallpaperPlan.Changes(close: [], open: ["B"], change: []))
+    }
+
+    @Test func onlyAssignedConnectedDisplaysWithPlayableSourcesGetWindows() {
+        let gone = DisplayRef(key: "GONE", name: "K272HUL")
+        let saved = assignments([(a, .aerial(id: "T")), (b, .aerial(id: "DELETED")), (gone, .aerial(id: "O"))])
+        let desired = WallpaperPlan.desired(screens: [a, b, c], assignments: saved) { $0 != .aerial(id: "DELETED") }
+        #expect(desired == ["A": .aerial(id: "T")])
+        #expect(WallpaperPlan.desired(screens: [a, b, c], assignments: WallpaperAssignments()) { _ in true }.isEmpty)
+    }
+
+    @Test func changedSourceSwapsInPlace() {
+        let current: [String: WallpaperSource] = ["A": .aerial(id: "T"), "B": .video(path: "/m/r.mov", bookmark: nil)]
+        // A new bookmark for the same file is not a change; a different aerial is.
+        let desired: [String: WallpaperSource] = ["A": .aerial(id: "O"), "B": .video(path: "/m/r.mov", bookmark: Data([1])),
+                                                   "C": .aerial(id: "T")]
+        #expect(WallpaperPlan.changes(from: current, to: desired) == WallpaperPlan.Changes(close: [], open: ["C"], change: ["A"]))
+        #expect(WallpaperPlan.changes(from: current, to: current).isEmpty)
+        #expect(WallpaperPlan.changes(from: current, to: [:]) == WallpaperPlan.Changes(close: ["A", "B"], open: [], change: []))
+    }
+}
