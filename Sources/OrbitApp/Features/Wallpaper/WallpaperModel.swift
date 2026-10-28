@@ -142,9 +142,11 @@ final class WallpaperModel: ObservableObject {
     // MARK: Changing
 
     /// Shows `source` on the display, or removes its wallpaper (nil). While "Same on all displays" is on, every
-    /// connected display gets it too.
+    /// connected display gets it too, but only for a choice made on a connected display: editing the remembered
+    /// wallpaper of an unplugged one (in Settings) changes only that one.
     func assign(_ source: WallpaperSource?, to display: WallpaperDisplayItem) {
-        let targets = settings.syncDisplays ? [display] + connectedDisplays.filter { $0.key != display.key } : [display]
+        let spreads = settings.syncDisplays && display.isConnected
+        let targets = spreads ? [display] + connectedDisplays.filter { $0.key != display.key } : [display]
         var assignments = settings.assignments
         for target in targets {
             if let source {
