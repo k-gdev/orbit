@@ -199,6 +199,30 @@ enum ClipboardCheck {
             check("an empty pasteboard gives nothing", isNothing(capture(from: board)))
         }
 
+        // Turning the feature off while copies are still being processed: nothing is written or added after
+        // `cancelIngest()`, however many copies were queued, and copies after a restart are handled again.
+        // The store is a throwaway folder (removed at exit); no pasteboard is involved.
+        do {
+            let folder = SnapshotFixtures.directory()
+            let model = ClipboardModel(settings: ClipboardFixtures.settings(), store: ClipboardStore(directory: folder))
+            func copy(_ text: String) -> RawPasteboardCopy {
+                RawPasteboardCopy(content: .text(Data(text.utf8)), sourceBundleID: "com.example.front", sourceName: "Front", date: now)
+            }
+            func blobs() -> [String] {
+                ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0 != ClipboardStore.indexName }
+            }
+            func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.5)) }
+            for text in ["first queued copy", "second queued copy", "third queued copy"] { model.ingest(copy(text)) }
+            model.cancelIngest()
+            settle()
+            check("no queued copy is added after cancelIngest()", model.history.items.isEmpty, "\(model.history.items.map(\.preview))")
+            check("no queued copy writes a blob after cancelIngest()", blobs().isEmpty, "\(blobs())")
+            model.ingest(copy("a copy after the restart"))
+            settle()
+            check("a copy after cancelIngest() is handled again", model.history.items.map(\.preview) == ["a copy after the restart"]
+                  && blobs().count == 1, "\(model.history.items.map(\.preview)) \(blobs())")
+        }
+
         let failed = tally.failures
         if failed == 0 { print("all clipboard checks passed") } else { print("\(failed) clipboard check(s) failed") }
         return failed == 0

@@ -21,6 +21,10 @@ final class ClipboardModel: ObservableObject {
     private var persistenceBlocked = false
     /// The copy being processed, so the next one waits for it (history keeps copy order).
     private var ingestTail: Task<Void, Never>?
+    /// Bumped by `cancelIngest()`. Each queued copy remembers the generation it arrived in and writes or adds
+    /// nothing once that is over: cancelling the tail task alone would leave the older copies it waits on
+    /// running.
+    private var ingestGeneration = 0
 
     /// The clock, replaced by a fixed one in snapshots so relative times are stable.
     var now: () -> Date = { Date() }
@@ -86,28 +90,33 @@ final class ClipboardModel: ObservableObject {
         loadIfNeeded()
         guard !persistenceBlocked else { return }
         let maxItemBytes = settings.limits.maxItemBytes
+        let generation = ingestGeneration
         let previous = ingestTail
         ingestTail = Task { [weak self] in
             await previous?.value
-            if Task.isCancelled { return }
+            guard !Task.isCancelled, self?.ingestGeneration == generation else { return }
             let outcome = await Task.detached(priority: .utility) { copy.makeCapture(maxItemBytes: maxItemBytes) }.value
-            if Task.isCancelled { return }
+            guard !Task.isCancelled, self?.ingestGeneration == generation else { return }
             switch outcome {
             case .skipped(let reason): Log.info("clipboard: skipped a copy (\(reason))")
-            case .capture(let capture): await self?.add(capture)
+            case .capture(let capture): await self?.add(capture, generation: generation)
             }
         }
     }
 
-    /// Stops handling copies that are still being processed (the feature was turned off).
+    /// Stops handling copies that are still being processed (the feature was turned off): none of them
+    /// writes a blob or adds an entry from now on, including the older ones the newest is waiting for.
     func cancelIngest() {
+        ingestGeneration &+= 1
         ingestTail?.cancel()
         ingestTail = nil
     }
 
-    /// Adds a prepared copy. The same content again moves its entry to the top (no second file is written).
-    private func add(_ capture: ClipboardCapture) async {
-        guard !persistenceBlocked, settings.limits.allowsItem(ofSize: capture.payload.count) else { return }
+    /// Adds a prepared copy that arrived in `generation`. The same content again moves its entry to the top
+    /// (no second file is written).
+    private func add(_ capture: ClipboardCapture, generation: Int) async {
+        guard generation == ingestGeneration, !persistenceBlocked,
+              settings.limits.allowsItem(ofSize: capture.payload.count) else { return }
         var item = capture.makeItem(payloadFile: nil)   // the hash was computed off the main thread
         if !history.contains(contentHash: item.contentHash) {
             let name = ClipboardStore.newPayloadName(for: capture.kind)
@@ -119,8 +128,8 @@ final class ClipboardModel: ObservableObject {
                 Log.error("clipboard: could not store a copy: \(error)")
                 return
             }
-            // A blob with no entry is swept at the next launch if the copy is dropped here.
-            if Task.isCancelled { store?.deletePayloads([name]); return }
+            // Cancelled while the blob was written: remove it again (anything left is swept at the next launch).
+            if Task.isCancelled || generation != ingestGeneration { store?.deletePayloads([name]); return }
             item.payloadFile = name
         }
         if case .movedToTop(let unused?) = history.add(item) {
