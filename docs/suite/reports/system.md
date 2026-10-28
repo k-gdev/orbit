@@ -272,3 +272,115 @@ None.
 - Scratch probes (sensor, SMC, power-source, SF Symbol listing, sampler check) and logs are in
   `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/`.
   All are read-only and nothing is committed.
+
+## Fix round 1
+
+Eight commits on `suite/system` on top of bafd4c5, one per fix, not pushed. Each was gated by `swift build` (all
+targets, no warnings in System files) plus `swift test --filter System`. The full suite ran once at the end, as asked.
+
+| Commit | Item | Subject |
+|---|---|---|
+| 3c48fca | I1 | fix(system): gap-check each sparkline history against its own samples |
+| 7fe7475 | M4 | fix(system): de-duplicate batteries across sources by exact name only |
+| de951d4 | M1 | fix(system): close samplers whose metric left the plan |
+| 261fde1 | M7 | fix(system): drain the sampling queue's autorelease pool per work item |
+| 3909aac | M2 | fix(system): stop re-walking the SMC after an empty discovery and its retry |
+| 7aadb6b | M5 | fix(system): build the uptime tile's date formatters once |
+| 16cbbf1 | M6 | fix(system): remember the readout's menu bar position |
+| 1db18a1 | M8 | fix(system): remove the readout after its menu closes |
+
+### What changed
+- **I1 (Important): sparkline histories joining across gaps** (`SystemReadings.swift`). The single shared
+  `lastSample`/`lastInterval` gap check is gone. `cpuHistory` and `gpuHistory` each remember when they last grew, and
+  under which interval, and `append` gap-checks against that history's own time (`SamplingPlan.isGap`, 3 × the larger
+  interval). So a CPU-only readout ticking every 2 s no longer keeps an hour-old GPU history "fresh", and a
+  temperature-only readout no longer keeps the CPU history alive. `lastSample` stays public (any metric).
+  `SystemReadings` needed a hand-written `==` because the bookkeeping is a tuple; it compares every public value.
+- **M4: loose battery de-dup** (`BatteryReading.swift`). A registry device is dropped only when its normalised name
+  (lowercased, curly apostrophe straightened, trimmed) **exactly** equals a power source's, and empty names never
+  match. An empty or whitespace `Product` is now named "Bluetooth Device" instead of "".
+- **M1: samplers left open** (`SamplingPlan.droppedMetrics(from:to:)` in core, used by `SamplingEngine.run`/`stop`).
+  On a plan change, metrics that left the plan release what they hold:
+  - temperature → `thermal.close()` (IOHID client + SMC connection)
+  - GPU → `gpu.close()` (accelerator service)
+  - CPU → baseline reset
+  - batteries → the 10 s throttle resets, so reopening the tab re-reads batteries at once
+
+  So closing the tab with the CPU readout on now closes IOHID, the SMC and the GPU service. `stop()` still closes
+  everything.
+- **M7**: the sampling queue is created with `autoreleaseFrequency: .workItem`.
+- **M2: SMC re-walk** (`SMCReader.swift`).
+  - The first empty discovery is not cached, so the next reader retries once. A second empty discovery caches `[]`
+    for the process (`emptyDiscoveriesBeforeGivingUp = 2`).
+  - Once the process has given up, a reader doesn't even open the SMC.
+  - A reader that finds no keys closes its connection and doesn't reopen it.
+  - Non-empty discoveries are cached as before.
+- **M5**: the uptime tile's two `DateFormatter`s ("EEE HH:mm", "MMM d") are static lets, built once.
+- **M6**: the readout status item has `autosaveName = "OrbitSystemReadout"`. At app runtime only, AppKit stores the
+  position in Orbit's own defaults domain; snapshots and tests never create the item.
+- **M8**: Hide Readout sets `menuBarReadout = .off` in a `DispatchQueue.main.async`, so the status item isn't removed
+  while its own menu is still tracking.
+- **M3**: no code change; added to Known gaps below.
+
+### Tests (TDD)
+- **I1**, `readingsApplySamples` extended with two cases:
+  1. CPU-only readout samples every 2 s for an hour after GPU samples, then a GPU sample. The GPU history must be
+     `[0.6]`, while the CPU history keeps going, capped at 60 with the latest value 0.3.
+  2. Temperature-only samples for an hour after a CPU sample, then a CPU sample. The CPU history must be `[0.1]`.
+
+  RED (`swift test --filter SystemTests`):
+  ```
+  ✘ Test readingsApplySamples() recorded an issue at SystemTests.swift:523:9: Expectation failed: (readings.gpuHistory.values → [0.4, 0.6]) == [0.6]
+  ✘ Test readingsApplySamples() recorded an issue at SystemTests.swift:537:9: Expectation failed: (tempOnly.cpuHistory.values → [0.5, 0.1]) == [0.1]
+  ✘ Test run with 18 tests in 1 suite failed after 0.007 seconds with 2 issues.
+  ```
+  GREEN: `✔ Test run with 18 tests in 1 suite passed after 0.006 seconds.`
+- **M4**, `batteryParsesBluetoothAndDedupes` extended. The IOPS source is "Kevo’s Magic Keyboard"; the registry has
+  "Magic Keyboard" (a substring, must stay), "" (no name, must stay as "Bluetooth Device") and "kevo's magic keyboard"
+  (an exact normalised match, dropped).
+
+  RED:
+  ```
+  ✘ Test batteryParsesBluetoothAndDedupes() recorded an issue at SystemTests.swift:403:9: Expectation failed: (loose.map(\.name) → ["", "Kevo’s Magic Keyboard"]) == ["Bluetooth Device", "Kevo’s Magic Keyboard", "Magic Keyboard"]
+  ```
+  The substring match dropped "Magic Keyboard", and the empty Product showed as a blank name. GREEN: 18 tests
+  passed.
+- **M1**, `samplingPlan` extended with `droppedMetrics`:
+  - panel → CPU-readout-only drops gpu, memory, temperature, batteries and uptime
+  - readout → panel drops nothing
+  - panel → nil drops everything
+  - nil → panel drops nothing
+
+  RED: `type 'SamplingPlan' has no member 'droppedMetrics'` ×8. GREEN: 18 tests passed.
+- M2, M5, M6, M7 and M8 are OS glue with no pure logic to test. They are covered by `swift build` and by the hardware
+  check below (M1/M2).
+
+### Commands and output
+- `swift test --filter System` → all 18 System tests passed, and:
+  ```
+  ✔ Suite SystemTests passed.
+  ✔ Test run with 18 tests in 1 suite passed.
+  ```
+- `swift test` (full, once) → exit 0, `✔ Test run with 579 tests in 26 suites passed after 74.243 seconds.` It passed
+  on the first try; no VideoToolTests flake this time.
+- Hardware check: a throwaway executable built from copies of the sampler sources, read-only.
+  - first open: `CPU 23×66°, GPU 84×57°, SoC 42×54°`, 551 ms (includes SMC discovery)
+  - `close()` then sample again: same groups, 50 ms (reopened, no re-walk)
+  - a second `ThermalSampler`: same groups, 48 ms (cached keys)
+  - the GPU service also reopens after `close()`
+  - batteries: `This Mac 98%`, `Kevo’s AirPods 100%`
+- Snapshots (light and dark, looked at; unchanged apart from the uptime "since" time):
+  `/private/tmp/claude-501/-Users-kevog-orbit--claude-worktrees-suite-77e4bb/f80311f0-5082-4d52-8925-21b20605dfb4/scratchpad/system/fix1-panel-light.png`,
+  `…/system/fix1-panel-dark.png`, `…/system/fix1-settings-light.png`, `…/system/fix1-settings-dark.png`.
+- Universal release build: `swift build -c release --arch arm64 --arch x86_64` → `Build complete!` (exit 0), 0 warnings
+  in System files. `lipo -archs .build/apple/Products/Release/Orbit` → `x86_64 arm64`.
+
+### Known gaps added (M3)
+- The SMC key classification (`Tp??`/`Te??` → CPU, `Tg??` → GPU) is verified on the M5 Max only. Other families map
+  their keys differently (the M3 family uses e.g. `Tf??` for CPU cores), so on such chips the CPU column may read
+  "no sensor" or miss sensors, while the SoC column (IOHID "PMU tdie*") still works.
+- IOHID names from a second PMU ("PMU2 tdie*") aren't matched by the classifier (only "PMU tdie*" is).
+
+Shell changes in this round: none. Files touched: `Sources/OrbitCore/System/{SystemReadings,BatteryReading,SamplingPlan}.swift`,
+`Sources/OrbitApp/Features/System/{SystemMonitor,SMCReader,SystemPanelView,SystemReadoutItem}.swift`,
+`Tests/OrbitCoreTests/SystemTests.swift`.
