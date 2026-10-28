@@ -22,7 +22,8 @@ final class JobCoordinator: ObservableObject {
     var outcomeHandler: ((Outcome) -> Void)?
 
     private let progressPanels = ProgressPanelController()
-    private let toasts = ToastCenter()
+    /// The one toast stack, shared with the suite (`SuiteContext.toasts`) so toasts never overlap.
+    let toasts = ToastCenter()
 
     /// Jobs show their progress panel only if still running after this long.
     private static let progressDelay: Duration = .milliseconds(500)
