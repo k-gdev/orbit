@@ -17,6 +17,8 @@ final class StillFrameWriter {
     let folder: URL
     private let makeFolder: () throws -> URL
     private var pending: [String: (token: UUID, identity: String, task: Task<Void, Never>)] = [:]
+    /// Still files being written, by file name.
+    private var writes: [String: Task<Void, Error>] = [:]
 
     /// `makeFolder` creates and returns the stills folder (`context.directory(for: .wallpaper)/stills`); `folder`
     /// is the same path, for checks that must not create it.
@@ -42,7 +44,12 @@ final class StillFrameWriter {
                     ? (try? video.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate : nil
                 let still = folder.appending(path: StillFrame.fileName(for: source, modified: modified), directoryHint: .notDirectory)
                 if !FileManager.default.fileExists(atPath: still.path) {
-                    try await Self.writeStill(of: video, to: still)
+                    // Displays sharing a wallpaper share one write; it finishes even if this display moves on.
+                    let name = still.lastPathComponent
+                    let write = self.writes[name] ?? Task.detached(priority: .utility) { try await Self.writeStill(of: video, to: still) }
+                    self.writes[name] = write
+                    defer { self.writes[name] = nil }
+                    try await write.value
                 }
                 guard !Task.isCancelled else { return }
                 self.setDesktopPicture(still, onDisplay: key)

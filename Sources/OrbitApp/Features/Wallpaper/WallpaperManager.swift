@@ -27,6 +27,8 @@ final class WallpaperManager {
     private(set) var isRunning = false
     /// Whether the last rebuild ran with still frames on (so turning them on sets every window's still once).
     private var stillFramesWereOn = false
+    /// Video sources whose refreshed bookmark was saved during this run.
+    private var refreshedBookmarks: Set<String> = []
 
     /// Each display's playback, published after every evaluation (empty when stopped).
     private(set) var states: [String: PlaybackState] = [:]
@@ -76,6 +78,7 @@ final class WallpaperManager {
         stills.cancelAll()
         screens.removeAll()
         stillFramesWereOn = false
+        refreshedBookmarks.removeAll()
         states = [:]
         onStatesChange(states)
     }
@@ -113,7 +116,9 @@ final class WallpaperManager {
         for ref in refs {
             guard let source = assignments[ref.key]?.source else { continue }
             guard let (url, refreshed) = resolve(source) else { continue }
-            if let refreshed {
+            // Save a refreshed bookmark once per file per run, so a bookmark that keeps reporting stale can't turn
+            // save → rebuild → save into a loop.
+            if let refreshed, refreshedBookmarks.insert(refreshed.identity).inserted {
                 assignments.assign(refreshed, to: ref)
                 urls[refreshed.identity] = url
             } else {
