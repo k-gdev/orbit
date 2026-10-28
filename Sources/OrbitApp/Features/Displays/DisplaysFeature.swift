@@ -8,7 +8,8 @@ import SwiftUI
 /// and gamma dimming for monitors that don't answer DDC. Link brightness moves them all together.
 ///
 /// Off, it does nothing at all. On, it only listens for display changes (to re-apply software dimming, which
-/// macOS resets) until the tab is shown; DDC is spoken only while the tab is visible or a pill moves.
+/// macOS resets) and wake (to re-match DDC services) until the tab is shown; DDC is spoken only while the
+/// tab is visible, a pill moves, or a retry the tab started is due.
 @MainActor
 final class DisplaysFeature: SuiteFeature {
     let id = FeatureID.displays
@@ -35,9 +36,28 @@ final class DisplaysFeature: SuiteFeature {
             guard let self, let model = self.model else { return }
             model.displaysChanged(refreshTiles: self.isPanelVisible)
         }
-        observe(NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidWakeNotification) { [weak self] in
-            self?.model?.screensWoke()
+        // The Mac or its screens woke: re-match DDC services (the DCP may have rebuilt them), re-apply gamma
+        // and ask silent displays again. Both notifications usually arrive together; one pass, a moment
+        // later, once the displays are back.
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            observe(NSWorkspace.shared.notificationCenter, name) { [weak self] in self?.scheduleWakeHandling() }
         }
+    }
+
+    private var wakeWork: DispatchWorkItem?
+    static let wakeDelay: TimeInterval = 1.5
+
+    private func scheduleWakeHandling() {
+        wakeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.wakeWork = nil
+                self.model?.systemWoke(refreshTiles: self.isPanelVisible)
+            }
+        }
+        wakeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeDelay, execute: work)
     }
 
     func stop() {
@@ -45,6 +65,8 @@ final class DisplaysFeature: SuiteFeature {
         isRunning = false
         for observer in observers { observer.center.removeObserver(observer.token) }
         observers.removeAll()
+        wakeWork?.cancel()
+        wakeWork = nil
         model?.stop()
         model = nil
         isPanelVisible = false

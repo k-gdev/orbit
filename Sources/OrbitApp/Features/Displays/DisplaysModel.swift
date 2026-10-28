@@ -30,14 +30,17 @@ final class DisplaysDriver {
     func modes(for id: CGDirectDisplayID) -> DisplayModeList { DisplayModeService.list(for: id) }
 
     func stop() {
-        ddc.disconnect()
+        ddc.invalidate()
         gamma.restoreAll()
     }
 }
 
 /// The Displays tab's state: one tile per display with how its brightness is driven, its value and its
-/// resolution menu. Brightness changes are previewed in the tile at once and written at most every 80 ms
-/// while a drag lasts (`writeInterval`), then once more when it ends.
+/// resolution menu. How a tile is driven follows `DisplayControlPolicy` (OrbitCore, tested): DDC monitors keep
+/// DDC through missed replies and are re-scanned, silent ones are asked three times with backoff before they
+/// fall back to software dimming, and wake / display changes ask again. Brightness changes are previewed in
+/// the tile at once and written at most every 80 ms while a drag lasts (`writeInterval`), then once more
+/// when it ends.
 @MainActor
 final class DisplaysModel: ObservableObject {
     struct Tile: Identifiable, Equatable {
@@ -61,9 +64,12 @@ final class DisplaysModel: ObservableObject {
     static let writeInterval: TimeInterval = 0.08
 
     private let driver: DisplaysDriver?
-    /// Per display key: did it answer DDC since the last display change? nil = not asked yet.
-    private var answersDDC: [String: Bool] = [:]
+    /// DDC history per display key for this run (`hasAnswered` is seeded from `settings.answeredDDC`).
+    private var probeStates: [String: DDCProbeState] = [:]
+    /// The last catalog scan, for building DDC targets on retries.
+    private var infos: [DisplayInfo] = []
     private var rescanDDC = true
+    private var retries: [CGDirectDisplayID: DispatchWorkItem] = [:]
     /// Values when the current linked drag began.
     private var linkBaseline: [CGDirectDisplayID: Double]?
     private var pendingWrites: [CGDirectDisplayID: (value: Double, control: BrightnessControl, key: String)] = [:]
@@ -87,6 +93,7 @@ final class DisplaysModel: ObservableObject {
             // `$` publishes before the property changes; act once it has.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.gammaFallbackChanged(on) } }
         }.store(in: &cancellables)
+        driver?.ddc.onWriteFailure = { [weak self] id in self?.ddcWriteFailed(id) }
     }
 
     // MARK: Ranges
@@ -109,13 +116,17 @@ final class DisplaysModel: ObservableObject {
 
     // MARK: Scanning
 
+    private func probeState(for key: String) -> DDCProbeState {
+        probeStates[key] ?? DDCProbeState(hasAnswered: settings.answeredDDC.contains(key))
+    }
+
     /// Re-reads the display list, built-in brightness and (in the background) each external monitor's DDC
-    /// brightness. Called when the tab appears and after display changes.
+    /// brightness. Called when the tab appears and after display changes or wake.
     func refresh() {
         guard let driver else { return }
-        let infos = driver.scan()
+        infos = driver.scan()
         var next: [Tile] = []
-        var targets: [DDCService.Target] = []
+        var toRead: Set<CGDirectDisplayID> = []
         for info in infos {
             let old = tiles.first { $0.id == info.id && $0.key == info.key }
             var tile = Tile(id: info.id, key: info.key, title: info.title, isBuiltIn: info.isBuiltIn, control: .probing,
@@ -124,24 +135,28 @@ final class DisplaysModel: ObservableObject {
                 tile.control = .native(builtIn: info.isBuiltIn)
                 tile.brightness = native
             } else {
-                let known = answersDDC[info.key]
-                let ask = DDCService.isSupported && !info.isAsleep && known != false
-                if known == true {
-                    tile.control = .ddc         // re-read in the background, keep the last value meanwhile
-                } else if ask {
-                    tile.control = .probing
-                } else {
-                    tile.control = fallbackControl
-                }
+                let start = DisplayControlPolicy.start(state: probeState(for: info.key), ddcSupported: DDCService.isSupported,
+                                                       asleep: info.isAsleep, gammaFallback: settings.useGammaFallback)
+                tile.control = start.control
                 if tile.control == .software || tile.control == .unavailable {
-                    tile.brightness = settings.lastSoftwareDim[info.key] ?? 100
+                    tile.brightness = driver.gamma.dims[info.id] ?? savedSoftwareDim(for: info.key) ?? 100
                 }
-                targets.append(DDCService.Target(id: info.id, descriptor: info.descriptor, read: ask))
+                if start.probe { toRead.insert(info.id) }
             }
             next.append(tile)
         }
         tiles = next
         hasScanned = true
+        probe(toRead)
+    }
+
+    /// Reads DDC from `ids` (matching every non-native display, re-walking the registry when needed).
+    private func probe(_ ids: Set<CGDirectDisplayID>) {
+        guard let driver, !ids.isEmpty else { return }
+        for id in ids { retries.removeValue(forKey: id)?.cancel() }
+        let nonNative = Set(tiles.filter { if case .native = $0.control { return false } else { return true } }.map(\.id))
+        let targets = infos.filter { nonNative.contains($0.id) }
+            .map { DDCService.Target(id: $0.id, descriptor: $0.descriptor, read: ids.contains($0.id)) }
         guard targets.contains(where: \.read) else { return }
         let started = edits
         let rescan = rescanDDC
@@ -149,6 +164,54 @@ final class DisplaysModel: ObservableObject {
         driver.ddc.probe(targets, rescan: rescan) { [weak self] id, value in
             self?.received(value, for: id, editsAtStart: started[id] ?? 0)
         }
+    }
+
+    private func received(_ value: VCPValue?, for id: CGDirectDisplayID, editsAtStart: Int) {
+        guard let index = tiles.firstIndex(where: { $0.id == id }) else { return }
+        let key = tiles[index].key
+        let before = probeState(for: key)
+        let outcome = DisplayControlPolicy.outcome(of: value, state: before, gammaFallback: settings.useGammaFallback)
+        probeStates[key] = outcome.state
+        let wasFallback = tiles[index].control == .software || tiles[index].control == .unavailable
+
+        if let value {
+            settings.rememberAnsweredDDC(key)
+            settings.learn(maximum: value.current, reported: value.maximum, for: key)
+            tiles[index].reading = value
+        } else if before.hasAnswered {
+            Log.info("displays: \(tiles[index].title) missed a DDC reply (\(outcome.state.misses) in a row)")
+        }
+        if outcome.clearsSoftwareDim { driver?.gamma.restore(id) }
+        tiles[index].control = outcome.control
+        if outcome.adoptsReading, let value, (edits[id] ?? 0) == editsAtStart {
+            tiles[index].brightness = range(for: tiles[index]).clamped(Double(value.current))
+        }
+        let isFallback = outcome.control == .software || outcome.control == .unavailable
+        if isFallback, !wasFallback {
+            Log.info("displays: \(tiles[index].title) didn't answer DDC \(DisplayControlPolicy.maxMisses) times; using "
+                     + (outcome.control == .software ? "software dimming" : "no brightness control"))
+            tiles[index].brightness = savedSoftwareDim(for: key) ?? 100
+        }
+        if let delay = outcome.retryAfter { scheduleRetry(id, after: delay) }
+    }
+
+    private func scheduleRetry(_ id: CGDirectDisplayID, after delay: TimeInterval) {
+        retries.removeValue(forKey: id)?.cancel()
+        rescanDDC = true
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.probe([id]) } }
+        retries[id] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// A DDC write was refused (the service went stale, e.g. after sleep): re-scan and ask the display again.
+    private func ddcWriteFailed(_ id: CGDirectDisplayID) {
+        guard tiles.contains(where: { $0.id == id && $0.control == .ddc }) else { return }
+        scheduleRetry(id, after: DisplayControlPolicy.retryDelays.first ?? 1)
+    }
+
+    /// The saved software-dimming level for `key`, if it may be used (never for a display that answered DDC).
+    private func savedSoftwareDim(for key: String) -> Double? {
+        DisplayControlPolicy.persistsSoftwareDim(probeState(for: key)) ? settings.lastSoftwareDim[key] : nil
     }
 
     /// The Settings page appeared: a full refresh when live; while the feature is off, just the display list
@@ -166,55 +229,36 @@ final class DisplaysModel: ObservableObject {
         }
     }
 
-    private var fallbackControl: BrightnessControl { settings.useGammaFallback ? .software : .unavailable }
-
-    private func received(_ value: VCPValue?, for id: CGDirectDisplayID, editsAtStart: Int) {
-        guard let index = tiles.firstIndex(where: { $0.id == id }) else { return }
-        let key = tiles[index].key
-        if let value {
-            answersDDC[key] = true
-            settings.learn(maximum: value.current, reported: value.maximum, for: key)
-            if tiles[index].control == .software || settings.lastSoftwareDim[key] != nil {
-                // It answers DDC now (DDC/CI turned on in its menu): stop dimming it in software.
-                driver?.gamma.restore(id)
-                settings.lastSoftwareDim[key] = nil
-            }
-            tiles[index].control = .ddc
-            tiles[index].reading = value
-            if (edits[id] ?? 0) == editsAtStart {
-                tiles[index].brightness = range(for: tiles[index]).clamped(Double(value.current))
-            }
-        } else if answersDDC[key] == true {
-            tiles[index].control = .ddc   // answered before: a missed reply, keep the last value
-        } else {
-            answersDDC[key] = false
-            Log.info("displays: \(tiles[index].title) didn't answer DDC; using \(fallbackControl == .software ? "software dimming" : "no brightness control")")
-            tiles[index].control = fallbackControl
-            tiles[index].brightness = settings.lastSoftwareDim[key] ?? 100
-        }
-    }
-
     /// The display set changed (connected, disconnected, rearranged, mode switched): macOS may have reset
     /// gamma tables, and the DDC services may have moved.
     func displaysChanged(refreshTiles: Bool) {
-        answersDDC = answersDDC.filter { $0.value }   // ask the silent ones again
-        rescanDDC = true
-        driver?.ddc.invalidate()
-        driver?.gamma.reapply()
+        startOver()
         applySavedSoftwareDims()
         if refreshTiles { refresh() }
     }
 
-    /// The screens woke: gamma tables may have been reset.
-    func screensWoke() {
+    /// The Mac or its screens woke: the DCP may have rebuilt its DDC services, gamma may have been reset, and
+    /// displays that gave up on DDC are asked again.
+    func systemWoke(refreshTiles: Bool) {
+        startOver()
+        if refreshTiles { refresh() }
+    }
+
+    private func startOver() {
+        for work in retries.values { work.cancel() }
+        retries.removeAll()
+        probeStates = probeStates.mapValues(DisplayControlPolicy.afterWake)
+        rescanDDC = true
+        driver?.ddc.invalidate()
         driver?.gamma.reapply()
     }
 
-    /// Re-applies the software dimming saved for connected displays (at start and after display changes).
+    /// Re-applies the software dimming saved for connected displays (at start and after display changes),
+    /// never for displays that have answered DDC.
     func applySavedSoftwareDims() {
         guard let driver, settings.useGammaFallback, !settings.lastSoftwareDim.isEmpty else { return }
-        for info in driver.scan() where answersDDC[info.key] != true && driver.nativeBrightness(info.id) == nil {
-            if let level = settings.lastSoftwareDim[info.key], SoftwareDim.dims(level), driver.gamma.dims[info.id] != level {
+        for info in driver.scan() where driver.nativeBrightness(info.id) == nil {
+            if let level = savedSoftwareDim(for: info.key), SoftwareDim.dims(level), driver.gamma.dims[info.id] != level {
                 driver.gamma.set(level, for: info.id, key: info.key)
             }
         }
@@ -224,7 +268,7 @@ final class DisplaysModel: ObservableObject {
         if on {
             for index in tiles.indices where tiles[index].control == .unavailable {
                 tiles[index].control = .software
-                tiles[index].brightness = settings.lastSoftwareDim[tiles[index].key] ?? 100
+                tiles[index].brightness = savedSoftwareDim(for: tiles[index].key) ?? 100
             }
             applySavedSoftwareDims()
         } else {
@@ -283,11 +327,16 @@ final class DisplaysModel: ObservableObject {
         for (id, write) in writes { driver?.write(write.value, control: write.control, to: id, key: write.key) }
     }
 
-    /// A drag ended or a scroll burst settled: write now and remember software dimming levels.
+    /// A drag ended or a scroll burst settled: write now and remember software-dimming levels (only for
+    /// displays that never answered DDC; a DDC monitor dimmed in software while it misses replies isn't saved).
     func endEditing() {
         linkBaseline = nil
         flushWrites()
         for tile in tiles where tile.control == .software {
+            guard DisplayControlPolicy.persistsSoftwareDim(probeState(for: tile.key)) else {
+                settings.lastSoftwareDim[tile.key] = nil
+                continue
+            }
             settings.lastSoftwareDim[tile.key] = SoftwareDim.dims(tile.brightness) ? tile.brightness : nil
         }
     }
@@ -308,12 +357,15 @@ final class DisplaysModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// The feature stopped: drop queued writes, give gamma back, release DDC services.
+    /// The feature stopped: drop queued writes and retries, give gamma back, release DDC services.
     func stop() {
         writeTimer?.cancel()
         writeTimer = nil
         pendingWrites.removeAll()
+        for work in retries.values { work.cancel() }
+        retries.removeAll()
         linkBaseline = nil
+        driver?.ddc.onWriteFailure = nil
         driver?.stop()
         cancellables.removeAll()
     }

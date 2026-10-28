@@ -14,6 +14,9 @@ import OrbitCore
 ///   reply, accept it only if `DDC.parseVCPReply` does; up to three attempts.
 /// - `write` keeps only the latest value per display (a drag produces many); the queue sends it, then waits
 ///   50 ms before the next message as DDC/CI asks.
+/// - A matched service that stops answering (a failed read, or a write the driver refuses) is logged and the
+///   next probe walks the registry again: after sleep the DCP may have rebuilt its services. A refused write
+///   also drops that endpoint and calls `onWriteFailure`, so the model re-probes the display.
 final class DDCService: @unchecked Sendable {
     static let iokit = "/System/Library/Frameworks/IOKit.framework/IOKit"
 
@@ -32,6 +35,14 @@ final class DDCService: @unchecked Sendable {
     }
 
     private let queue = DispatchQueue(label: "app.orbit.displays.ddc", qos: .userInitiated)
+    private let lock = NSLock()
+    private var failureHandler: (@MainActor (CGDirectDisplayID) -> Void)?
+
+    /// Runs on the main actor when a DDC write to a display was refused (its endpoint has been dropped).
+    var onWriteFailure: (@MainActor (CGDirectDisplayID) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return failureHandler }
+        set { lock.lock(); failureHandler = newValue; lock.unlock() }
+    }
 
     // Queue-only state.
     private var endpoints: [CGDirectDisplayID: Endpoint] = [:]
@@ -57,9 +68,9 @@ final class DDCService: @unchecked Sendable {
         let read: Bool
     }
 
-    /// Matches services to `targets` (walking the registry again when `rescan` or nothing is cached), then
-    /// reads VCP 0x10 from each target marked `read`. `result` runs on the main actor once per such target:
-    /// nil when the display has no DDC endpoint or didn't give a valid reply.
+    /// Matches services to `targets` (walking the registry again when `rescan`, after a failure, or when
+    /// nothing is cached), then reads VCP 0x10 from each target marked `read`. `result` runs on the main actor
+    /// once per such target: nil when the display has no DDC endpoint or didn't give a valid reply.
     func probe(_ targets: [Target], rescan: Bool, result: @escaping @MainActor (CGDirectDisplayID, VCPValue?) -> Void) {
         guard Self.isSupported else {
             DispatchQueue.main.async { MainActor.assumeIsolated { for target in targets where target.read { result(target.id, nil) } } }
@@ -68,7 +79,14 @@ final class DDCService: @unchecked Sendable {
         queue.async { [self] in
             if rescan || needsScan { connect(targets) }
             for target in targets where target.read {
-                let value = endpoints[target.id].flatMap { readVCP($0.av, code: DDC.brightness) }
+                var value: VCPValue?
+                if let endpoint = endpoints[target.id] {
+                    value = readVCP(endpoint.av, code: DDC.brightness)
+                    if value == nil {
+                        Log.info("displays: no valid DDC reply from display \(target.id) after 3 attempts; will re-scan its service")
+                        needsScan = true
+                    }
+                }
                 DispatchQueue.main.async { MainActor.assumeIsolated { result(target.id, value) } }
             }
         }
@@ -84,18 +102,9 @@ final class DDCService: @unchecked Sendable {
         }
     }
 
-    /// Forgets the matched services after a display change (ids and services may have moved), so nothing is
-    /// sent to a stale pairing and the next probe walks the registry again.
+    /// Drops queued writes and every matched service, so nothing goes to a stale pairing and the next probe
+    /// walks the registry again (display changes, wake, stop).
     func invalidate() {
-        queue.async { [self] in
-            pendingWrites.removeAll()
-            endpoints.removeAll()
-            needsScan = true
-        }
-    }
-
-    /// Drops queued writes and every endpoint.
-    func disconnect() {
         queue.async { [self] in
             pendingWrites.removeAll()
             endpoints.removeAll()
@@ -155,13 +164,21 @@ final class DDCService: @unchecked Sendable {
               let write = PrivateSymbol.load("IOAVServiceWriteI2C", from: Self.iokit, as: I2CTransfer.self) else { return }
         let request = DDC.setVCPRequest(code: DDC.brightness, value: value)
         var payload = Array(request.dropFirst())
+        var statuses: [IOReturn] = []
         for _ in 0..<2 {
             usleep(10_000)
-            _ = payload.withUnsafeMutableBytes {
+            statuses.append(payload.withUnsafeMutableBytes {
                 write(endpoint.av, UInt32(DDC.chipAddress), UInt32(request[0]), $0.baseAddress!, UInt32($0.count))
-            }
+            })
         }
         usleep(50_000)
+        guard !statuses.contains(kIOReturnSuccess) else { return }
+        let codes = statuses.map { String(format: "0x%08X", UInt32(bitPattern: $0)) }.joined(separator: ", ")
+        Log.info("displays: DDC write of \(value) to display \(id) failed (\(codes)); dropping its service and re-scanning")
+        endpoints[id] = nil
+        needsScan = true
+        let handler = onWriteFailure
+        DispatchQueue.main.async { MainActor.assumeIsolated { handler?(id) } }
     }
 
     // MARK: IORegistry
@@ -178,7 +195,9 @@ final class DDCService: @unchecked Sendable {
         var objects: [Int: io_service_t] = [:]
         var iterator: io_iterator_t = 0
         let root = IORegistryGetRootEntry(kIOMainPortDefault)
-        guard IORegistryEntryCreateIterator(root, kIOServicePlane, IOOptionBits(kIORegistryIterateRecursively), &iterator) == KERN_SUCCESS else {
+        defer { if root != 0 { IOObjectRelease(root) } }
+        guard root != 0,
+              IORegistryEntryCreateIterator(root, kIOServicePlane, IOOptionBits(kIORegistryIterateRecursively), &iterator) == KERN_SUCCESS else {
             return []
         }
         defer { IOObjectRelease(iterator) }

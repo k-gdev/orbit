@@ -12,6 +12,7 @@ public final class DisplaySettings: ObservableObject {
         static let useGammaFallback = "displays.useGammaFallback"
         static let lastSoftwareDim = "displays.lastSoftwareDim"
         static let learnedMaximums = "displays.learnedMaximums"
+        static let answeredDDC = "displays.answeredDDC"
     }
 
     /// Moving one display's brightness moves the others proportionally. Off by default.
@@ -51,6 +52,7 @@ public final class DisplaySettings: ObservableObject {
         lastSoftwareDim = (defaults.dictionary(forKey: Key.lastSoftwareDim) ?? [:])
             .compactMapValues { ($0 as? NSNumber)?.doubleValue }
         learnedMaximums = Self.integers(defaults.dictionary(forKey: Key.learnedMaximums))
+        answeredDDC = Set(defaults.stringArray(forKey: Key.answeredDDC) ?? [])
     }
 
     /// The override for `key`, or nil for "Auto".
@@ -69,6 +71,17 @@ public final class DisplaySettings: ObservableObject {
     public func learn(maximum value: Int, reported: Int, for key: String) {
         guard value > reported, value > (learnedMaximums[key] ?? 0) else { return }
         learnedMaximums[key] = min(value, BrightnessRange.ceiling)
+    }
+
+    /// Displays that have given a valid DDC reply (on any run). A software-dimming level is never saved
+    /// for them, and none is re-applied at launch.
+    public private(set) var answeredDDC: Set<String> = []
+
+    /// Records that `key` answered DDC, and drops any software-dimming level saved for it.
+    public func rememberAnsweredDDC(_ key: String) {
+        if lastSoftwareDim[key] != nil { lastSoftwareDim[key] = nil }
+        guard answeredDDC.insert(key).inserted else { return }
+        defaults.set(answeredDDC.sorted(), forKey: Key.answeredDDC)
     }
 
     /// Forgets the learned maximum for `key` (Settings → Reset learned range).

@@ -97,6 +97,23 @@ import Testing
         #expect(plain.observe(VCPValue(current: 100, maximum: 100), for: "aoc") == nil)
     }
 
+    @Test func settingsRememberDisplaysThatAnsweredDDC() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let settings = DisplaySettings(defaults: defaults)
+        #expect(settings.answeredDDC.isEmpty)
+        settings.rememberAnsweredDDC("tv-left")
+        settings.rememberAnsweredDDC("tv-left")
+        settings.rememberAnsweredDDC("aoc")
+        // Remembering also drops a software-dim level saved for it.
+        settings.lastSoftwareDim = ["acer": 40, "aoc": 60]
+        settings.rememberAnsweredDDC("aoc")
+        let reloaded = DisplaySettings(defaults: defaults)
+        #expect(reloaded.answeredDDC == ["tv-left", "aoc"])
+        #expect(reloaded.lastSoftwareDim == ["acer": 40])
+        #expect(defaults.stringArray(forKey: "displays.answeredDDC")?.sorted() == ["aoc", "tv-left"])
+    }
+
     @Test func settingsForgetTheLearnedRange() {
         let (defaults, cleanup) = Fixtures.defaults()
         defer { cleanup() }
