@@ -80,4 +80,150 @@ import Testing
         try FileManager.default.removeItem(at: file)
         #expect(ShelfAvailability.status(of: file, probe: ShelfAvailability.probe) == .missing)
     }
+
+    // MARK: Store hardening (M3)
+
+    /// A throwaway folder holding a store directory and real files.
+    private struct StoreFixture {
+        let root = Fixtures.tempDir()
+        var storeDirectory: URL { root.appending(path: "Shelf", directoryHint: .isDirectory) }
+        var shelfFile: URL { storeDirectory.appending(path: ShelfStore.fileName, directoryHint: .notDirectory) }
+        func file(_ name: String) -> URL { Fixtures.file(name, name, in: root) }
+        func write(_ text: String) throws {
+            try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: shelfFile)
+        }
+        func backups() -> [String] {
+            ((try? FileManager.default.contentsOfDirectory(atPath: storeDirectory.path)) ?? [])
+                .filter { $0 != ShelfStore.fileName }.sorted()
+        }
+        func contents(of name: String) -> String? {
+            try? String(contentsOf: storeDirectory.appending(path: name), encoding: .utf8)
+        }
+        func remove() { try? FileManager.default.removeItem(at: root) }
+    }
+
+    private static let fixedDate = Date(timeIntervalSince1970: 1_793_000_000) // 2026-10-26 07:33:20 UTC
+
+    @Test func aCorruptShelfFileIsMovedAsideBeforeTheFirstSave() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        try f.write("this is not json")
+        let store = ShelfStore(directory: f.storeDirectory, now: { Self.fixedDate })
+        #expect(store.load().isEmpty)
+        // Loading changes nothing on disk: the damaged file is still there, untouched.
+        #expect(f.contents(of: ShelfStore.fileName) == "this is not json")
+        #expect(f.backups().isEmpty)
+
+        // The first save keeps it under another name before writing the new shelf.
+        let kept = f.file("kept.txt")
+        try store.save(ShelfItems([kept]))
+        #expect(f.backups() == ["shelf.json.corrupt-20261026-073320"])
+        #expect(f.contents(of: "shelf.json.corrupt-20261026-073320") == "this is not json")
+        #expect(ShelfStore(directory: f.storeDirectory).load().urls.map(\.lastPathComponent) == ["kept.txt"])
+        // Later saves have nothing more to preserve.
+        try store.save(ShelfItems([kept, f.file("two.txt")]))
+        #expect(f.backups().count == 1)
+    }
+
+    @Test func aBackupNeverOverwritesAnEarlierOne() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        let kept = f.file("kept.txt")
+        for text in ["first damage", "second damage", "third damage"] {
+            try f.write(text)
+            let store = ShelfStore(directory: f.storeDirectory, now: { Self.fixedDate }) // the same second every time
+            _ = store.load()
+            try store.save(ShelfItems([kept]))
+        }
+        #expect(f.backups() == ["shelf.json.corrupt-20261026-073320", "shelf.json.corrupt-20261026-073320-2",
+                                "shelf.json.corrupt-20261026-073320-3"])
+        #expect(f.contents(of: "shelf.json.corrupt-20261026-073320") == "first damage")
+        #expect(f.contents(of: "shelf.json.corrupt-20261026-073320-2") == "second damage")
+        #expect(f.contents(of: "shelf.json.corrupt-20261026-073320-3") == "third damage")
+    }
+
+    @Test func aNewerVersionIsReadAsFarAsPossibleAndPreserved() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        let kept = f.file("kept.txt")
+        let original = #"{"version": 99, "items": [{"path": "\#(kept.path)", "color": "red"}], "extra": true}"#
+        try f.write(original)
+        let store = ShelfStore(directory: f.storeDirectory, now: { Self.fixedDate })
+        #expect(store.load().urls.map(\.lastPathComponent) == ["kept.txt"])
+        try store.save(ShelfItems([kept]))
+        // What a newer Orbit wrote is kept whole, and ours is written as our own version.
+        #expect(f.backups() == ["shelf.json.newer-20261026-073320"])
+        #expect(f.contents(of: "shelf.json.newer-20261026-073320") == original)
+        let rewritten = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: f.shelfFile)) as? [String: Any])
+        #expect(rewritten["version"] as? Int == 1)
+    }
+
+    @Test func oneBadEntryDoesNotDiscardTheRest() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        let a = f.file("a.txt")
+        let b = f.file("b.txt")
+        let damaged = #"{"version":1,"items":[{"path":"\#(a.path)"},{"nope":1},"junk",{"path":"\#(b.path)","bookmark":"!!notbase64"}]}"#
+        try f.write(damaged)
+        let store = ShelfStore(directory: f.storeDirectory, now: { Self.fixedDate })
+        // The two readable entries survive (a bookmark that can't be read just means no bookmark).
+        #expect(store.load().urls.map(\.lastPathComponent) == ["a.txt", "b.txt"])
+        // The original, bad entries included, is kept before the first save rewrites the file.
+        try store.save(ShelfItems([a, b]))
+        #expect(f.backups() == ["shelf.json.corrupt-20261026-073320"])
+        #expect(f.contents(of: "shelf.json.corrupt-20261026-073320") == damaged)
+    }
+
+    @Test func aCleanShelfFileMakesNoBackups() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        let kept = f.file("kept.txt")
+        let store = ShelfStore(directory: f.storeDirectory)
+        try store.save(ShelfItems([kept]))
+        let again = ShelfStore(directory: f.storeDirectory)
+        #expect(again.load().count == 1)
+        try again.save(ShelfItems())
+        #expect(f.backups().isEmpty)
+        // No file at all is not damage either.
+        let empty = StoreFixture()
+        defer { empty.remove() }
+        let fresh = ShelfStore(directory: empty.storeDirectory)
+        #expect(fresh.load().isEmpty)
+        try fresh.save(ShelfItems([empty.file("x.txt")]))
+        #expect(empty.backups().isEmpty)
+    }
+
+    @Test func ifTheDamagedFileCannotBeKeptItIsNotOverwritten() throws {
+        struct Refused: Error {}
+        let f = StoreFixture()
+        defer { f.remove() }
+        try f.write("precious but unreadable")
+        let store = ShelfStore(directory: f.storeDirectory, now: { Self.fixedDate }, moveItem: { _, _ in throw Refused() })
+        #expect(store.load().isEmpty)
+        #expect(throws: (any Error).self) { try store.save(ShelfItems([f.file("kept.txt")])) }
+        #expect(f.contents(of: ShelfStore.fileName) == "precious but unreadable")
+    }
+
+    @Test func loadStoredNeverTouchesTheFilesItListsAndLoadFollowsMovedOnes() throws {
+        let f = StoreFixture()
+        defer { f.remove() }
+        let original = f.file("before.txt")
+        let store = ShelfStore(directory: f.storeDirectory)
+        try store.save(ShelfItems([original, URL(fileURLWithPath: "/Volumes/Gone Drive/never-here.txt")]))
+        let renamed = f.root.appending(path: "after.txt")
+        try FileManager.default.moveItem(at: original, to: renamed)
+
+        // `loadStored` answers from shelf.json alone: the paths as saved, whether or not they exist.
+        let stored = ShelfStore(directory: f.storeDirectory).loadStored()
+        #expect(stored.urls.map(\.lastPathComponent) == ["before.txt", "never-here.txt"])
+        // `follow` finds the renamed file through its bookmark, and has nothing for the one on the missing drive.
+        let reader = ShelfStore(directory: f.storeDirectory)
+        _ = reader.loadStored()
+        #expect(reader.follow(original)?.resolvingSymlinksInPath().path == renamed.resolvingSymlinksInPath().path)
+        #expect(reader.follow(URL(fileURLWithPath: "/Volumes/Gone Drive/never-here.txt")) == nil)
+        // `load` is `loadStored` plus following.
+        let full = ShelfStore(directory: f.storeDirectory).load()
+        #expect(full.urls.map(\.lastPathComponent) == ["after.txt", "never-here.txt"])
+    }
 }
