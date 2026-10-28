@@ -2,8 +2,8 @@ import AppKit
 import OrbitCore
 import SwiftUI
 
-/// "Keep this resolution?" after a resolution change, which is applied for this session only until the user
-/// keeps it. Shown two ways at once: a floating card centred on the display that changed (it stays up even
+/// "Keep this resolution?" after a resolution change, which is applied (permanently) before the question is
+/// asked. Shown two ways at once: a floating card centred on the display that changed (it stays up even
 /// when the menu bar panel closes or its display changes size) and a row in that display's tile in the panel.
 /// Revert, or 15 s without an answer, puts the previous mode back.
 struct ResolutionConfirmCard: View {
@@ -97,6 +97,8 @@ final class ResolutionConfirmWindow {
         panel.setContentSize(host.fittingSize)
         reposition()
         panel.orderFrontRegardless()
+        // Key (without activating Orbit), so Return keeps and Esc reverts without a click first.
+        panel.makeKey()
     }
 
     /// Centres the card on its display (call after display changes).

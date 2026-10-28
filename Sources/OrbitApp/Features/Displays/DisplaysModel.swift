@@ -376,12 +376,13 @@ final class DisplaysModel: ObservableObject {
 
     // MARK: Resolution
 
-    /// A resolution change waiting for Keep / Revert (applied for this session only meanwhile).
+    /// A resolution change waiting for Keep / Revert (already applied, permanently, meanwhile).
     @Published private(set) var confirmation: ResolutionConfirmation?
     private var confirmationTimer: DispatchWorkItem?
 
-    /// Switches `id` to `entry` for this session only and asks "Keep this resolution?" for 15 s; Keep makes it
-    /// permanent, Revert or no answer goes back. A change still waiting is reverted first.
+    /// Switches `id` to `entry` permanently (as System Settings does, so a kept mode is the saved one without a
+    /// second switch) and asks "Keep this resolution?" for 15 s: Keep just ends the question, Revert or no answer
+    /// puts the previous mode back permanently. A change still waiting is reverted first.
     func select(_ entry: DisplayModeEntry, for id: CGDirectDisplayID) {
         guard !entry.isCurrent, let driver, let index = tiles.firstIndex(where: { $0.id == id }) else { return }
         if confirmation != nil { revertResolution() }
@@ -389,7 +390,7 @@ final class DisplaysModel: ObservableObject {
             Log.info("displays: not switching \(tiles[index].title): its current mode is unknown, so it couldn't be reverted")
             return
         }
-        guard driver.apply(entry.mode, to: id, permanently: false) else { return }
+        guard driver.apply(entry.mode, to: id, permanently: true) else { return }
         let pending = ResolutionConfirmation(displayID: id, displayTitle: tiles[index].title, previous: previous, proposed: entry.mode,
                                              proposedLabel: entry.label, startedAt: Date())
         confirmation = pending
@@ -406,19 +407,16 @@ final class DisplaysModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + ResolutionConfirmation.duration, execute: work)
     }
 
-    /// Keep: the new mode becomes permanent.
+    /// Keep: the new mode was applied permanently already, so this only ends the question.
     func keepResolution() {
         guard let pending = endConfirmation() else { return }
-        if driver?.apply(pending.proposed, to: pending.displayID, permanently: true) != true {
-            Log.info("displays: couldn't save \(pending.proposedLabel) for \(pending.displayTitle) permanently; it stays for this session")
-        }
         refreshModes(pending.displayID)
     }
 
-    /// Revert (or the countdown ran out): the previous mode comes back.
+    /// Revert (or the countdown ran out): the previous mode comes back, permanently.
     func revertResolution() {
         guard let pending = endConfirmation(), let driver else { return }
-        if !driver.apply(pending.previous, to: pending.displayID, permanently: false) {
+        if !driver.apply(pending.previous, to: pending.displayID, permanently: true) {
             Log.info("displays: couldn't switch \(pending.displayTitle) back directly; restoring the saved display configuration")
             driver.restorePermanentConfiguration()
         }

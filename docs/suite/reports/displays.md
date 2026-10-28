@@ -257,7 +257,7 @@ None. I only touched `Sources/OrbitCore/Displays/`, `Sources/OrbitApp/Features/D
 ## Known gaps
 - Brightness (VCP 0x10) is the only DDC control: no contrast, volume or input switching. Intel Macs get gamma dimming only (no IOFramebuffer I2C path).
 - No HiDPI mode creation and no virtual screens (see above).
-- A resolution change has no automatic revert.
+- ~~A resolution change has no automatic revert.~~ Outdated: fix round 1 added Keep / Revert with a 15 s automatic revert (see "Final wave" below).
 - Two identical monitors with no `IODisplayLocation` and no serials fall back to list order. That's a guess, though one that doesn't happen on Kevo's Mac.
 - Brightness changed from the monitor's own buttons while the panel is open isn't picked up until the next time the panel opens.
 - `DisplaysModel` (app glue: probing, the throttle, link baseline) has no unit tests. Its maths is in the tested OrbitCore units.
@@ -412,3 +412,8 @@ New pure units were written test-first against stubs.
 
 ### Shell changes
 None.
+
+## Final wave
+- **Resolution changes are applied `.permanently` up front.** `select` applies the new mode `.permanently` (as System Settings does), so a kept mode is the saved one without a second switch. Re-applying the same mode `.permanently` on Keep could be a no-op that never persisted. **Keep** now only ends the question. **Revert**, and the 15 s timeout, re-apply the previous mode `.permanently`, with `CGRestorePermanentDisplayConfiguration()` still the fallback. This supersedes the `.forSession` steps described in the fix round above.
+- **The floating card becomes key** (`makeKey()` after `orderFrontRegardless()`, still without activating Orbit), so Return keeps and Esc reverts without a click first.
+- **The "no automatic revert" line under Known gaps was out of date** and is now marked as such.

@@ -1,7 +1,7 @@
 import Foundation
 
-/// A resolution change waiting for the user: applied for this session only, kept permanently on "Keep",
-/// reverted to `previous` on "Revert" or when `deadline` passes (the display may be unreadable).
+/// A resolution change waiting for the user: `proposed` is already applied, permanently; "Keep" just ends the
+/// question, "Revert" or the `deadline` passing (the display may be unreadable) applies `previous` again.
 public struct ResolutionConfirmation: Equatable, Sendable {
     /// How long the user has to keep a new resolution.
     public static let duration: TimeInterval = 15
