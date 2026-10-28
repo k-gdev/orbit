@@ -35,9 +35,11 @@ struct ShelfStripView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(PanelStyle.accent(for: colorScheme))
             Text("Shelf").font(.system(size: 13, weight: .semibold))
-            Text(Self.countText(model.urls.count)).font(.system(size: 11)).foregroundStyle(style.secondaryInk)
+            Text(Self.countText(model.urls.count, offline: model.unreachable.count))
+                .font(.system(size: 11)).foregroundStyle(style.secondaryInk)
+                .lineLimit(1)
             Spacer(minLength: 8)
-            if model.urls.count > 1 { dragAllChip(style) }
+            if model.availableURLs.count > 1 { dragAllChip(style) }
             if !model.urls.isEmpty { clearButton(style) }
             closeButton(style)
         }
@@ -46,12 +48,15 @@ struct ShelfStripView: View {
         .padding(.bottom, 4)
     }
 
-    static func countText(_ count: Int) -> String {
+    /// "Empty", "1 file", "5 files", and ", 2 offline" when some can't be reached right now.
+    static func countText(_ count: Int, offline: Int = 0) -> String {
+        let base: String
         switch count {
-        case 0: "Empty"
-        case 1: "1 file"
-        default: "\(count) files"
+        case 0: return "Empty"
+        case 1: base = "1 file"
+        default: base = "\(count) files"
         }
+        return offline > 0 ? "\(base), \(offline) offline" : base
     }
 
     private func dragAllChip(_ style: PanelStyle) -> some View {
@@ -63,7 +68,7 @@ struct ShelfStripView: View {
             .foregroundStyle(style.inkOnTrack)
             .padding(.horizontal, 9).padding(.vertical, 4)
             .background(Capsule().fill(style.controlFill))
-            ShelfDragSource(urls: model.urls, toolTip: "Drag every file on the shelf at once",
+            ShelfDragSource(urls: model.availableURLs, toolTip: "Drag every file on the shelf at once",
                             onMovedOut: { model.verifyMoved($0) })
         }
         .fixedSize()
@@ -160,6 +165,7 @@ struct ShelfTile: View {
     }
 
     var body: some View {
+        let offline = model.unreachable.contains(url)
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous).fill(hovering ? Color.primary.opacity(0.09) : Color.clear)
             VStack(spacing: 5) {
@@ -172,41 +178,72 @@ struct ShelfTile: View {
                     // has transparent edges, so the same treatment hides in it.
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                     .shadow(color: .black.opacity(0.22), radius: 1.2, y: 0.8)
+                    .opacity(offline ? 0.4 : 1)
+                    .overlay(alignment: .bottomTrailing) { if offline { ShelfOfflineBadge().offset(x: 5, y: 4) } }
                 Text(url.lastPathComponent)
                     .font(.system(size: 10.5))
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
+                    .opacity(offline ? 0.55 : 1)
             }
             .padding(.horizontal, 4)
             .padding(.top, 7)
             .frame(maxHeight: .infinity, alignment: .top)
-            ShelfDragSource(urls: [url], toolTip: url.path, removeButton: .topTrailing,
+            // An item that can't be reached can't be dragged or opened, only removed.
+            ShelfDragSource(urls: offline ? [] : [url],
+                            toolTip: offline ? "\(url.path)\n\(ShelfOffline.hint)" : url.path,
+                            removeButton: .topTrailing,
                             onHover: { hovering = $0 },
-                            onOpen: { NSWorkspace.shared.open(url) },
+                            onOpen: { if !offline { NSWorkspace.shared.open(url) } },
                             onRemove: { model.remove(url) },
                             onMovedOut: { model.verifyMoved($0) },
-                            menu: { ShelfMenus.entries(for: url, remove: { model.remove(url) }) },
+                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) }) },
                             simulatesHover: previewHover == url)
         }
         .frame(width: Self.size.width, height: Self.size.height)
-        .task(id: url) {
+        .task(id: ThumbnailKey(url: url, offline: offline)) {
+            // No preview for a file that can't be reached (the check itself could stall).
+            guard !offline else { return }
             if let fresh = await ShelfThumbnails.load(url, side: 48) { thumbnail = fresh }
         }
     }
+
+    private struct ThumbnailKey: Hashable {
+        let url: URL
+        let offline: Bool
+    }
 }
 
-/// The right-click menu of a shelf entry.
+/// Why an item is dimmed.
+enum ShelfOffline {
+    static let hint = "Can't reach this file right now: its drive may be disconnected or asleep. It stays on the shelf until you remove it."
+}
+
+/// The small warning mark on a dimmed item's icon.
+struct ShelfOfflineBadge: View {
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(Color.orange)
+            .padding(2)
+            .background(Circle().fill(Color.white.opacity(0.9)))
+    }
+}
+
+/// The right-click menu of a shelf entry. An item that can't be reached right now offers only what still works.
 enum ShelfMenus {
-    static func entries(for url: URL, remove: @escaping () -> Void) -> [ShelfMenuEntry] {
-        [
+    static func entries(for url: URL, offline: Bool = false, remove: @escaping () -> Void) -> [ShelfMenuEntry] {
+        let copyPath = ShelfMenuEntry.action("Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url.path, forType: .string)
+        }
+        if offline { return [copyPath, .separator, .action("Remove from Shelf", remove)] }
+        return [
             .action("Open") { NSWorkspace.shared.open(url) },
             .action("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) },
-            .action("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url.path, forType: .string)
-            },
+            copyPath,
             .separator,
             .action("Remove from Shelf", remove),
         ]

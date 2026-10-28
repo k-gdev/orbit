@@ -204,7 +204,7 @@ final class ShelfWindowController: NSObject, NSWindowDelegate {
             frame = saved.map { ShelfPlacement.restored(CGRect(origin: $0.origin, size: size), in: visible) }
                 ?? ShelfPlacement.defaultFrame(size: size, in: visible)
         }
-        model.removeMissing()
+        model.refreshAvailability()
         applyLevel()
         panel.setFrame(frame, display: true)
         panel.orderFrontRegardless()

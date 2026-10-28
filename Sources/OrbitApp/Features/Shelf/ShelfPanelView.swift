@@ -70,27 +70,34 @@ private struct ShelfListRow: View {
 
     var body: some View {
         let style = PanelStyle.colors(for: colorScheme)
+        let offline = model.unreachable.contains(url)
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Color.primary.opacity(0.08) : Color.clear)
             HStack(spacing: 9) {
                 Image(nsImage: ShelfIcon.icon(for: url))
                     .resizable().interpolation(.high).scaledToFit()
                     .frame(width: 28, height: 28)
+                    .opacity(offline ? 0.4 : 1)
+                    .overlay(alignment: .bottomTrailing) { if offline { ShelfOfflineBadge().scaleEffect(0.8).offset(x: 4, y: 3) } }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(url.lastPathComponent).font(.system(size: 12.5, weight: .medium))
                         .lineLimit(1).truncationMode(.middle)
-                    Text(Self.folderName(of: url)).font(.system(size: 11)).foregroundStyle(style.secondaryInk)
+                        .opacity(offline ? 0.55 : 1)
+                    Text(offline ? "Not connected" : Self.folderName(of: url)).font(.system(size: 11))
+                        .foregroundStyle(offline ? Color.orange : style.secondaryInk)
                         .lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 24)
             }
             .padding(.horizontal, 6)
-            ShelfDragSource(urls: [url], toolTip: url.path, removeButton: .trailing,
+            ShelfDragSource(urls: offline ? [] : [url],
+                            toolTip: offline ? "\(url.path)\n\(ShelfOffline.hint)" : url.path,
+                            removeButton: .trailing,
                             onHover: { hovering = $0 },
-                            onOpen: { NSWorkspace.shared.open(url) },
+                            onOpen: { if !offline { NSWorkspace.shared.open(url) } },
                             onRemove: { model.remove(url) },
                             onMovedOut: { model.verifyMoved($0) },
-                            menu: { ShelfMenus.entries(for: url, remove: { model.remove(url) }) })
+                            menu: { ShelfMenus.entries(for: url, offline: offline, remove: { model.remove(url) }) })
         }
         .frame(height: 40)
     }
