@@ -37,9 +37,12 @@ public struct SystemReadings: Equatable, Sendable {
     public var uptime: TimeInterval?
     /// nil until batteries were read once; empty when there are none.
     public var batteries: [BatteryReading]?
-    /// When the last sample arrived.
+    /// When the last sample (of anything) arrived.
     public var lastSample: Date?
-    private var lastInterval: TimeInterval = 0
+    /// When each history last grew, and under which interval: each is gap-checked against its own time, so a
+    /// CPU-only readout ticking every 2 s doesn't keep an hour-old GPU history "fresh" (and vice versa).
+    private var cpuAppended: (date: Date, interval: TimeInterval)?
+    private var gpuAppended: (date: Date, interval: TimeInterval)?
 
     public init(cpu: CPULoad? = nil, clusters: [ClusterLoad] = [], cpuHistory: SampleHistory<Double> = SampleHistory(),
                 gpu: Double? = nil, gpuHistory: SampleHistory<Double> = SampleHistory(), memory: MemoryStats? = nil,
@@ -55,27 +58,38 @@ public struct SystemReadings: Equatable, Sendable {
         self.batteries = batteries
     }
 
-    /// Folds in one tick taken at `now` under a plan sampling every `interval` seconds. The histories start
-    /// over after a gap (`SamplingPlan.isGap`) so a sparkline never joins readings minutes apart.
+    /// Folds in one tick taken at `now` under a plan sampling every `interval` seconds. Each history starts
+    /// over after a gap in its OWN samples (`SamplingPlan.isGap`), so a sparkline never joins readings minutes
+    /// apart, whatever else kept arriving in between.
     public mutating func apply(_ sample: SystemSample, layout: ClusterLayout, at now: Date, interval: TimeInterval) {
-        if SamplingPlan.isGap(since: lastSample, now: now, interval: max(interval, lastInterval)) {
-            cpuHistory.removeAll()
-            gpuHistory.removeAll()
-        }
         lastSample = now
-        lastInterval = interval
         if let load = sample.cpu {
             cpu = load
             clusters = layout.clusters(load.perCore)
-            cpuHistory.append(load.total)
+            Self.append(load.total, to: &cpuHistory, last: &cpuAppended, at: now, interval: interval)
         }
         if let utilization = sample.gpu {
             gpu = utilization
-            gpuHistory.append(utilization)
+            Self.append(utilization, to: &gpuHistory, last: &gpuAppended, at: now, interval: interval)
         }
         if let memory = sample.memory { self.memory = memory }
         if let sensors = sample.sensors { self.sensors = sensors }
         if let uptime = sample.uptime { self.uptime = uptime }
         if let batteries = sample.batteries { self.batteries = batteries }
+    }
+
+    private static func append(_ value: Double, to history: inout SampleHistory<Double>,
+                               last: inout (date: Date, interval: TimeInterval)?, at now: Date, interval: TimeInterval) {
+        if let previous = last, SamplingPlan.isGap(since: previous.date, now: now, interval: max(interval, previous.interval)) {
+            history.removeAll()
+        }
+        history.append(value)
+        last = (now, interval)
+    }
+
+    public static func == (lhs: SystemReadings, rhs: SystemReadings) -> Bool {
+        lhs.cpu == rhs.cpu && lhs.clusters == rhs.clusters && lhs.cpuHistory == rhs.cpuHistory && lhs.gpu == rhs.gpu
+            && lhs.gpuHistory == rhs.gpuHistory && lhs.memory == rhs.memory && lhs.sensors == rhs.sensors
+            && lhs.uptime == rhs.uptime && lhs.batteries == rhs.batteries && lhs.lastSample == rhs.lastSample
     }
 }

@@ -509,5 +509,31 @@ import Testing
         readings.apply(SystemSample(cpu: CPULoad(total: 0.5, perCore: [0.5, 0.5, 0.5])), layout: layout,
                        at: t0.addingTimeInterval(65), interval: 2)
         #expect(readings.cpuHistory.values == [0.75, 0.5])
+
+        // The CPU readout keeps ticking every 2 s for an hour with the tab closed: the GPU history is old by
+        // then, so the next GPU sample starts it over even though some sample arrived 2 s ago.
+        var t = 65.0
+        while t < 3665 {
+            t += 2
+            readings.apply(SystemSample(cpu: CPULoad(total: 0.25, perCore: [0.25, 0.25, 0.25])), layout: layout,
+                           at: t0.addingTimeInterval(t), interval: 2)
+        }
+        readings.apply(SystemSample(cpu: CPULoad(total: 0.3, perCore: [0.3, 0.3, 0.3]), gpu: 0.6), layout: layout,
+                       at: t0.addingTimeInterval(t + 1), interval: 1)
+        #expect(readings.gpuHistory.values == [0.6])
+        // The CPU stream had no gap, so its history kept going (capped at 60).
+        #expect(readings.cpuHistory.count == 60)
+        #expect(readings.cpuHistory.latest == 0.3)
+
+        // And the other way round: a temperature-only readout doesn't keep the CPU history alive.
+        var tempOnly = SystemReadings()
+        tempOnly.apply(SystemSample(cpu: CPULoad(total: 0.5, perCore: [0.5, 0.5, 0.5])), layout: layout, at: t0, interval: 1)
+        for step in 1...1800 {
+            tempOnly.apply(SystemSample(sensors: SensorGroups(cpu: SensorGroupStats(average: 50, maximum: 50, count: 1))),
+                           layout: layout, at: t0.addingTimeInterval(Double(step) * 2), interval: 2)
+        }
+        tempOnly.apply(SystemSample(cpu: CPULoad(total: 0.1, perCore: [0.1, 0.1, 0.1])), layout: layout,
+                       at: t0.addingTimeInterval(3601), interval: 1)
+        #expect(tempOnly.cpuHistory.values == [0.1])
     }
 }
