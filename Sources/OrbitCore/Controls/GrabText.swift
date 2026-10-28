@@ -12,6 +12,22 @@ public struct RecognizedLine: Equatable, Sendable {
     }
 }
 
+/// Where keyboard focus goes when Grab Text's crosshair closes.
+public enum GrabTextFocus: Equatable, Sendable {
+    /// Focus never left the user's app (the overlay is a non-activating panel), or Orbit was already in
+    /// front when the grab started: leave things as they are.
+    case none
+    /// Orbit became active during the grab: give focus back to the app the user was in.
+    case activatePrevious
+    /// Orbit became active but the previous app is gone: hide Orbit so the next app in line gets focus.
+    case hideOrbit
+
+    public static func afterOverlay(previousWasOrbit: Bool, orbitIsActive: Bool, previousAvailable: Bool) -> GrabTextFocus {
+        guard orbitIsActive, !previousWasOrbit else { return .none }
+        return previousAvailable ? .activatePrevious : .hideOrbit
+    }
+}
+
 /// What Grab Text copies and what the HUD says (spec §8.4).
 public enum GrabTextResult {
     /// The text to copy (lines trimmed, blank lines dropped, joined with newlines) and the HUD message:

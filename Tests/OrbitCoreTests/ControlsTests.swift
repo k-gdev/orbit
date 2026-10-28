@@ -142,10 +142,12 @@ final class FakeAsserter: PowerAsserting {
     private(set) var acquired: [PowerAssertionKind] = []
     private(set) var released: [PowerAssertionKind] = []
     var refuse = false
+    /// Kinds macOS refuses (for a refused display assertion alone).
+    var refuseKinds: Set<PowerAssertionKind> = []
 
     func acquire(_ kind: PowerAssertionKind, reason: String) -> Bool {
         #expect(reason == "Orbit Keep Awake")
-        guard !refuse else { return false }
+        guard !refuse, !refuseKinds.contains(kind) else { return false }
         #expect(!held.contains(kind), "acquired \(kind) twice without releasing")
         held.insert(kind)
         acquired.append(kind)
@@ -591,6 +593,155 @@ extension ControlsTests {
             #expect(FocusShortcut.parseList("").isEmpty)
             #expect(FocusShortcut.runArguments("Toggle Do Not Disturb") == ["run", "Toggle Do Not Disturb"])
             #expect(FocusShortcut.executable.path == "/usr/bin/shortcuts")
+        }
+    }
+}
+
+// MARK: - Fix round 1 (task review)
+
+extension ControlsTests {
+    @Suite struct ControlsFixRound1Tests {
+        private let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+        /// M1: a timer that fires before the wall-clock deadline (the clock was set back) must be re-armed
+        /// for the deadline instead of leaving the assertion up forever.
+        @Test func rearmsWhenTimerFiresEarly() {
+            let s = KeepAwakeSession(startDate: start, mode: .duration(3600), keepDisplayAwake: false)
+            #expect(s.nextCheck(now: start.addingTimeInterval(1800)) == start.addingTimeInterval(3600))
+            #expect(s.nextCheck(now: start.addingTimeInterval(3600)) == nil)     // due: evaluate ends it
+            #expect(s.nextCheck(now: start.addingTimeInterval(9999)) == nil)
+            let until = KeepAwakeSession(startDate: start, mode: .until(start.addingTimeInterval(60)), keepDisplayAwake: false)
+            #expect(until.nextCheck(now: start) == start.addingTimeInterval(60))
+            // Sessions without a deadline have nothing to re-arm.
+            #expect(KeepAwakeSession(startDate: start, mode: .indefinitely, keepDisplayAwake: false).nextCheck(now: start) == nil)
+            #expect(KeepAwakeSession(startDate: start, mode: .whileDownloading, keepDisplayAwake: false).nextCheck(now: start) == nil)
+        }
+
+        /// M9: macOS can refuse the display assertion alone; the engine says so instead of pretending.
+        @Test func engineReportsRefusedDisplayAssertion() {
+            let fake = FakeAsserter()
+            fake.refuseKinds = [.preventDisplaySleep]
+            let engine = KeepAwakeEngine(asserter: fake)
+            #expect(engine.start(.indefinitely, keepDisplayAwake: true, now: start))
+            #expect(engine.isActive)
+            #expect(engine.session?.keepDisplayAwake == true)      // what the user asked for
+            #expect(!engine.holdsDisplayAssertion)                  // what macOS granted
+            #expect(fake.held == [.preventSystemSleep])
+            fake.refuseKinds = []
+            engine.setKeepDisplayAwake(true)
+            #expect(engine.holdsDisplayAssertion)
+            engine.stop()
+            #expect(!engine.holdsDisplayAssertion)
+        }
+
+        @Test func statusLineTellsTheTruth() {
+            let s = KeepAwakeSession(startDate: start, mode: .duration(2 * 3600), keepDisplayAwake: true)
+            let now = start.addingTimeInterval(48 * 60)
+            #expect(KeepAwakeFormat.status(s, now: now, displayHeld: true) == "1 h 12 m left · display stays on")
+            #expect(KeepAwakeFormat.status(s, now: now, displayHeld: false) == "1 h 12 m left · display can still sleep")
+            let plain = KeepAwakeSession(startDate: start, mode: .indefinitely, keepDisplayAwake: false)
+            #expect(KeepAwakeFormat.status(plain, now: now, displayHeld: false) == "Indefinitely")
+            #expect(KeepAwakeFormat.status(nil, now: now, displayHeld: false) == "Off · your Mac sleeps as usual")
+        }
+
+        /// M3/M4: the panel showed a stale "on"; the setting is already off, so nothing is written (and
+        /// Finder is not restarted for nothing).
+        @Test func turnOffWhenAlreadyOffChangesNothing() {
+            var book = QuickToggleRestoreBook()
+            let a = book.turnOff(.hideDesktopIcons, current: .bool(true))
+            #expect(a == .bool(true))
+            let b = book.turnOff(.hideDesktopIcons, current: .absent)
+            #expect(b == .absent)
+            let c = book.turnOff(.showHiddenFiles, current: .bool(false))
+            #expect(c == .bool(false))
+            // A leftover record for a setting that's already off is dropped, not replayed.
+            _ = book.turnOn(.showHiddenFiles, current: .absent)
+            let d = book.turnOff(.showHiddenFiles, current: .bool(false))
+            #expect(d == .bool(false))
+            #expect(book.records.isEmpty)
+        }
+
+        /// M2: two toggles in flight each commit their own record against the latest book.
+        @Test func concurrentChangesKeepBothRecords() {
+            var book = QuickToggleRestoreBook()
+            let desktop = book.change(.hideDesktopIcons, on: true, current: .absent)
+            let hidden = book.change(.showHiddenFiles, on: true, current: .bool(false))
+            #expect(desktop.write == .bool(false))
+            #expect(hidden.write == .bool(true))
+            #expect(book.records.isEmpty)          // planning changes nothing
+            book.commit(.showHiddenFiles, hidden)   // finishes first
+            book.commit(.hideDesktopIcons, desktop)
+            #expect(book.records[.hideDesktopIcons] == QuickToggleRestore(prior: .absent, applied: .bool(false)))
+            #expect(book.records[.showHiddenFiles] == QuickToggleRestore(prior: .bool(false), applied: .bool(true)))
+        }
+
+        /// M13: turning Dark Mode on while the appearance is Auto turns Auto off (so the choice sticks) and
+        /// remembers it; turning Dark Mode off brings Auto back.
+        @Test func darkModeRestoresAuto() {
+            var book = QuickToggleRestoreBook()
+            let on = book.change(.darkMode, on: true, current: .bool(false), automatic: true)
+            #expect(on.write == .bool(true))
+            #expect(on.automatic == false)
+            #expect(on.record?.priorAutomatic == true)
+            book.commit(.darkMode, on)
+            let off = book.change(.darkMode, on: false, current: .bool(true), automatic: false)
+            #expect(off.write == .bool(false))
+            #expect(off.automatic == true)
+            book.commit(.darkMode, off)
+            #expect(book.records.isEmpty)
+            // Not on Auto before: Auto is left alone both ways.
+            let manual = book.change(.darkMode, on: true, current: .bool(false), automatic: false)
+            #expect(manual.automatic == nil)
+            book.commit(.darkMode, manual)
+            #expect(book.change(.darkMode, on: false, current: .bool(true), automatic: false).automatic == nil)
+            // Old records (saved before priorAutomatic existed) still decode.
+            let legacy = Data(#"{"prior":{"absent":{}},"applied":{"bool":{"_0":false}}}"#.utf8)
+            #expect((try? JSONDecoder().decode(QuickToggleRestore.self, from: legacy))?.priorAutomatic == nil)
+        }
+
+        /// M6: network mounts are dropped from the mount table before any resource value is read, so a
+        /// stale SMB/NFS share can't stall the listing.
+        @Test func skipsNetworkMountsBeforeReadingThem() {
+            let mounts = [
+                MountEntry(path: "/", isLocal: true),
+                MountEntry(path: "/System/Volumes/Data", isLocal: true),
+                MountEntry(path: "/Volumes/Backup SSD", isLocal: true),
+                MountEntry(path: "/Volumes/Projects", isLocal: false),           // SMB
+                MountEntry(path: "/Volumes/NAS", isLocal: false),                // NFS
+                MountEntry(path: "/Library/Developer/CoreSimulator/Volumes/iOS_23F77", isLocal: true),
+                MountEntry(path: "/Volumes/Install Foo", isLocal: true),
+            ]
+            #expect(EjectableVolumeFilter.worthInspecting(mounts) == ["/Volumes/Backup SSD", "/Volumes/Install Foo"])
+        }
+
+        /// M7: the Do Not Disturb Shortcut can't hang the button: runs are cut off after a timeout.
+        @Test func shortcutRunTimesOut() async throws {
+            #expect(FocusShortcut.timeout == 15)
+            let fast = try await FocusShortcut.withTimeout(5) { 42 }
+            #expect(fast == 42)
+            let began = Date()
+            await #expect(throws: FocusShortcut.TimedOut.self) {
+                try await FocusShortcut.withTimeout(0.2) { try await Task.sleep(for: .seconds(30)) }
+            }
+            #expect(Date().timeIntervalSince(began) < 5)
+            // A real process is terminated when the timeout cancels it.
+            let processBegan = Date()
+            await #expect(throws: (any Error).self) {
+                try await FocusShortcut.withTimeout(0.3) {
+                    try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), ["30"])
+                }
+            }
+            #expect(Date().timeIntervalSince(processBegan) < 15)
+        }
+
+        /// I1: after the crosshair closes, focus goes back to the app the user was in.
+        @Test func focusGoesBackAfterOverlay() {
+            #expect(GrabTextFocus.afterOverlay(previousWasOrbit: false, orbitIsActive: true, previousAvailable: true) == .activatePrevious)
+            #expect(GrabTextFocus.afterOverlay(previousWasOrbit: false, orbitIsActive: true, previousAvailable: false) == .hideOrbit)
+            // The overlay never took focus (non-activating panel): nothing to give back.
+            #expect(GrabTextFocus.afterOverlay(previousWasOrbit: false, orbitIsActive: false, previousAvailable: true) == .none)
+            // Orbit was already in front (Settings open): leave it there.
+            #expect(GrabTextFocus.afterOverlay(previousWasOrbit: true, orbitIsActive: true, previousAvailable: true) == .none)
         }
     }
 }

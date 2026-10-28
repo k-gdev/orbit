@@ -87,6 +87,14 @@ public struct KeepAwakeSession: Codable, Equatable, Sendable {
         deadline.map { max(0, $0.timeIntervalSince(now)) }
     }
 
+    /// When a timed session should be checked again: its deadline while that is still ahead, nil when it
+    /// is due (evaluate ends it) or has no deadline. A timer that fired early (the clock was set back)
+    /// is re-armed for this date.
+    public func nextCheck(now: Date) -> Date? {
+        guard let deadline, deadline > now else { return nil }
+        return deadline
+    }
+
     /// Whether the session is over: its deadline passed, its app quit, or nothing is downloading.
     public func isExpired(now: Date, appRunning: Bool, downloadsActive: Bool) -> Bool {
         switch mode {
@@ -143,6 +151,10 @@ public final class KeepAwakeEngine {
     deinit { stop() }
 
     public var isActive: Bool { session != nil }
+
+    /// Whether the display assertion is actually held. macOS can refuse it while granting the system one;
+    /// then `session.keepDisplayAwake` (what was asked for) is true and this is false.
+    public var holdsDisplayAssertion: Bool { held.contains(.preventDisplaySleep) }
 
     /// Starts (or replaces) the session. The system assertion is kept across a replacement, so there is
     /// no moment without one. Returns false, holding nothing, when macOS refuses the assertion.
@@ -202,6 +214,16 @@ public final class KeepAwakeEngine {
 // MARK: - Formatting
 
 public enum KeepAwakeFormat {
+    /// The Keep Awake tile's status line: the session label, plus whether the display really stays on
+    /// ("· display can still sleep" when macOS refused the display assertion), or the off text.
+    public static func status(_ session: KeepAwakeSession?, now: Date, displayHeld: Bool,
+                              timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+        guard let session else { return "Off · your Mac sleeps as usual" }
+        let label = session.label(now: now, timeZone: timeZone, locale: locale)
+        guard session.keepDisplayAwake else { return label }
+        return label + (displayHeld ? " · display stays on" : " · display can still sleep")
+    }
+
     /// Time left, rounded up to whole minutes: "1 h 12 m left", "2 h left", "15 m left", "1 m left".
     public static func remaining(_ seconds: TimeInterval) -> String {
         let minutes = max(1, Int((max(0, seconds) / 60).rounded(.up)))
