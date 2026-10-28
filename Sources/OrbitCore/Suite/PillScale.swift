@@ -40,7 +40,20 @@ public struct PillScale: Sendable, Equatable {
         return clamped(rounded)
     }
 
-    /// `value` moved by `steps` steps of `step` (scroll wheel, arrow keys), rounded and clamped.
+    /// How far one scroll-wheel notch moves the value: a fiftieth of the range, at least one `step`, and a
+    /// whole number of steps.
+    public func wheelStep(step: Double = 1) -> Double {
+        guard step > 0 else { return maximum / 50 }
+        return max(step, ((maximum / 50) / step).rounded() * step)
+    }
+
+    /// `value` moved by `notches` scroll-wheel notches (`wheelStep`), on the `step` grid, clamped.
+    public func wheelNudged(_ value: Double, notches: Double, step: Double = 1) -> Double {
+        guard step > 0 else { return clamped(value + notches * wheelStep(step: step)) }
+        return nudged(value, by: notches * wheelStep(step: step) / step, step: step)
+    }
+
+    /// `value` moved by `steps` steps of `step` (arrow keys, accessibility increments), rounded and clamped.
     public func nudged(_ value: Double, by steps: Double, step: Double = 1) -> Double {
         let moved = value + steps * step
         let rounded = step > 0 ? (moved / step).rounded() * step : moved

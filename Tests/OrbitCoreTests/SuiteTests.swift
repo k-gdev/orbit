@@ -98,6 +98,39 @@ import Testing
         #expect(PillScale(maximum: 0).fraction(for: 10) == 0)
     }
 
+    /// The pill's fill is never narrower than a circle (it holds the leading icon), and a drag puts the
+    /// end of the fill under the pointer.
+    @Test func pillTrackGeometry() {
+        let t = PillTrack(width: 330, height: 30)
+        #expect(t.fillWidth(forFraction: 0) == 30)
+        #expect(t.fillWidth(forFraction: 1) == 330)
+        #expect(t.fillWidth(forFraction: 0.5) == 180)
+        #expect(t.fillWidth(forFraction: 2) == 330)
+        #expect(t.fraction(atX: 15) == 0)
+        #expect(t.fraction(atX: 315) == 1)
+        #expect(t.fraction(atX: 165) == 0.5)
+        #expect(t.fraction(atX: -50) == 0 && t.fraction(atX: 999) == 1)
+        // Too narrow to have a travel: everything maps to the start.
+        #expect(PillTrack(width: 20, height: 30).fraction(atX: 10) == 0)
+        #expect(PillTrack(width: 20, height: 30).fillWidth(forFraction: 1) == 20)
+        // Round trip through the scale: a drag to the middle of a 0...150 pill is 75.
+        #expect(PillScale(maximum: 150).value(forFraction: t.fraction(atX: 165)) == 75)
+    }
+
+    @Test func pillWheelStep() {
+        #expect(PillScale(maximum: 150).wheelStep(step: 1) == 3)
+        #expect(PillScale(maximum: 100).wheelStep(step: 1) == 2)
+        #expect(PillScale(maximum: 100).wheelStep(step: 5) == 5)
+        #expect(PillScale(maximum: 1).wheelStep(step: 0.01) == 0.02)
+        #expect(PillScale(maximum: 150).nudged(149, by: 1, step: 3) == 150)
+        #expect(PillScale(maximum: 150).nudged(2, by: -1, step: 3) == 0)
+        #expect(PillScale(maximum: 150).nudged(90, by: 2, step: 3) == 96)
+        // A wheel notch moves by the wheel step but stays on the slider's own step grid.
+        #expect(PillScale(maximum: 150).wheelNudged(91, notches: 1, step: 1) == 94)
+        #expect(PillScale(maximum: 150).wheelNudged(91, notches: -2, step: 1) == 85)
+        #expect(PillScale(maximum: 100).wheelNudged(99, notches: 1, step: 1) == 100)
+    }
+
     @Test func settingsPageArguments() {
         #expect(SettingsPage(argument: "sound") == .feature(.sound))
         #expect(SettingsPage(argument: "features") == .features)
