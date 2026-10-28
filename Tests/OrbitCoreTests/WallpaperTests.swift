@@ -172,6 +172,40 @@ enum WallpaperFixtures {
         #expect(AerialCatalog.parse(entriesJSON: twice, localizedStrings: [:]).map(\.name) == ["One"])
     }
 
+    @Test func oneBadEntryDoesNotEmptyTheCatalog() {
+        // Real manifests change between macOS releases: an odd field on one asset must cost that asset at most.
+        let json = Data("""
+        {
+          "assets": [
+            42,
+            {"id": 7, "accessibilityLabel": "Numeric id"},
+            {"accessibilityLabel": "No id at all"},
+            {"id": "A", "accessibilityLabel": "Order as text", "preferredOrder": "first"},
+            {"id": "B", "accessibilityLabel": "Fractional order", "preferredOrder": 0.5},
+            {"id": "C", "accessibilityLabel": "Categories as text", "categories": "\(WallpaperFixtures.landscapes)"},
+            {"id": "D", "accessibilityLabel": null, "localizedNameKey": 12, "shotID": "SHOT_D"},
+            {"id": "E", "accessibilityLabel": "Fine", "categories": ["\(WallpaperFixtures.landscapes)"], "preferredOrder": 1}
+          ],
+          "categories": [
+            {"id": "\(WallpaperFixtures.landscapes)", "localizedNameKey": "AerialCategoryLandscapes", "preferredOrder": "zero"},
+            {"localizedNameKey": "NoID"},
+            "garbage"
+          ]
+        }
+        """.utf8)
+        let aerials = AerialCatalog.parse(entriesJSON: json, localizedStrings: WallpaperFixtures.strings)
+        #expect(Set(aerials.map(\.id)) == ["A", "B", "C", "D", "E"])
+        let byID = Dictionary(uniqueKeysWithValues: aerials.map { ($0.id, $0) })
+        #expect(byID["D"]?.name == "SHOT_D")
+        #expect(byID["E"]?.category == "Landscape")
+        #expect(byID["C"]?.category == nil)
+        // Landscape (the only category) first; within it E; then the uncategorised by order: B (0.5), then A, C, D.
+        #expect(aerials.map(\.id) == ["E", "B", "A", "C", "D"])
+        // A manifest without an assets list is empty, not an error that takes anything else down.
+        #expect(AerialCatalog.parse(entriesJSON: Data(#"{"categories": []}"#.utf8), localizedStrings: [:]).isEmpty)
+        #expect(AerialCatalog.parse(entriesJSON: Data(#"{"assets": "nope"}"#.utf8), localizedStrings: [:]).isEmpty)
+    }
+
     @Test func readsLocTablePreferringTheUsersLanguage() throws {
         let table = try WallpaperFixtures.locTable([
             "en": ["K": "Hello", "ONLY_EN": "English"],
@@ -381,6 +415,26 @@ enum WallpaperFixtures {
         #expect(PauseReason.allCases.allSatisfy { !$0.label.isEmpty })
     }
 
+    @Test func unseenWindowCountsAsCoveredAfterTheGracePeriod() {
+        let grace = WallpaperVisibility.grace
+        #expect(grace > 0 && grace <= 10)
+        // Visible now: never covered.
+        #expect(!WallpaperVisibility.isCovered(visibleNow: true, everVisible: false, secondsSinceShown: 0))
+        #expect(!WallpaperVisibility.isCovered(visibleNow: true, everVisible: true, secondsSinceShown: 999))
+        // Seen before, hidden now: covered at once.
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: true, secondsSinceShown: 0.1))
+        // Never reported visible: plays while macOS may still be catching up, then counts as covered (no decoding
+        // for a window nobody can see, e.g. one drawn under the system wallpaper).
+        #expect(!WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: grace - 0.5))
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: grace))
+        #expect(WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: 3600))
+        // A window not shown yet is not covered.
+        #expect(!WallpaperVisibility.isCovered(visibleNow: false, everVisible: false, secondsSinceShown: nil))
+        let covered = DisplayConditions(screenCovered: WallpaperVisibility.isCovered(visibleNow: false, everVisible: false,
+                                                                                     secondsSinceShown: grace + 1))
+        #expect(WallpaperPausePolicy.state(for: covered) == .paused(.screenCovered))
+    }
+
     @Test func sharedPlayerPlaysWhileAnyDisplayPlays() {
         #expect(PlaybackState.combined([.paused(.screenCovered), .playing]) == .playing)
         #expect(PlaybackState.combined([.paused(.screenCovered), .paused(.screenLocked)]) == .paused(.screenLocked))
@@ -439,6 +493,12 @@ enum WallpaperFixtures {
 
     private func orbitStill(_ name: String = "aerial-X.png") -> URL { stills.appending(path: name) }
 
+    /// Kevo's own picture with "Fit to Screen" and a dark fill colour, as NSWorkspace reports it.
+    let mountainsPicture = DesktopPicture(url: URL(fileURLWithPath: "/System/Library/Desktop Pictures/Mountains.heic"),
+                                          options: DesktopPictureOptions(imageScaling: 3, allowClipping: false,
+                                                                         fillColor: [0.1, 0.1, 0.12, 1]))
+    let photoPicture = DesktopPicture(url: URL(fileURLWithPath: "/Users/kevo/Pictures/Beach.jpg"), options: nil)
+
     @Test func settingsRoundTrip() throws {
         let (defaults, cleanup) = Fixtures.defaults()
         defer { cleanup() }
@@ -447,59 +507,147 @@ enum WallpaperFixtures {
         #expect(fresh.pauseOnBattery == false)
         #expect(fresh.pauseInLowPower == true)
         #expect(fresh.setStillFrame == true)
-        #expect(fresh.previousDesktopPictures.isEmpty)
+        #expect(fresh.desktopPictures.isEmpty)
 
         fresh.assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: DisplayRef(key: "A", name: "P27u-20 (1)"))
         fresh.assignments.assign(.video(path: "/m/Rain.mov", bookmark: Data([7])), to: DisplayRef(key: "B", name: "K272HUL"))
         fresh.pauseOnBattery = true
         fresh.pauseInLowPower = false
         fresh.setStillFrame = false
-        fresh.previousDesktopPictures = ["A": mountains.absoluteString]
+        fresh.desktopPictures.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        fresh.desktopPictures.requestRestore("A")
 
         let reread = WallpaperSettings(defaults: defaults)
         #expect(reread.assignments == fresh.assignments)
         #expect(reread.pauseOnBattery == true)
         #expect(reread.pauseInLowPower == false)
         #expect(reread.setStillFrame == false)
-        #expect(reread.previousDesktopPictures == ["A": mountains.absoluteString])
+        #expect(reread.desktopPictures == fresh.desktopPictures)
+        #expect(reread.desktopPictures["A"]?.original == mountainsPicture)
+        #expect(reread.desktopPictures["A"]?.restorePending == true)
         // Every key is the feature's own.
         let keys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("wallpaper.") }
         #expect(Set(keys) == ["wallpaper.assignments", "wallpaper.pauseOnBattery", "wallpaper.pauseInLowPower",
-                              "wallpaper.setStillFrame", "wallpaper.previousDesktopPictures"])
-        // Unreadable assignments fall back to none rather than crashing.
+                              "wallpaper.setStillFrame", "wallpaper.desktopPictures"])
+        // Unreadable data falls back to none rather than crashing.
         defaults.set(Data("garbage".utf8), forKey: "wallpaper.assignments")
+        defaults.set(Data("garbage".utf8), forKey: "wallpaper.desktopPictures")
         #expect(WallpaperSettings(defaults: defaults).assignments.isEmpty)
+        #expect(WallpaperSettings(defaults: defaults).desktopPictures.isEmpty)
     }
 
-    @Test func remembersOnlyTheFirstDesktopPicture() {
+    @Test func migratesTheFirstBuildsPictureList() {
         let (defaults, cleanup) = Fixtures.defaults()
         defer { cleanup() }
+        defaults.set(["A": mountains.absoluteString], forKey: "wallpaper.previousDesktopPictures")
         let settings = WallpaperSettings(defaults: defaults)
-        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
-        // A later call (Orbit's own still is showing by then, or the user re-chose) never overwrites the original.
-        settings.rememberDesktopPicture(photo, for: "A", stillsFolder: stills)
-        settings.rememberDesktopPicture(orbitStill(), for: "A", stillsFolder: stills)
-        #expect(settings.previousDesktopPictures == ["A": mountains.absoluteString])
-        // Orbit's own still is never remembered as "the previous picture", nor is nothing.
-        settings.rememberDesktopPicture(orbitStill(), for: "B", stillsFolder: stills)
-        settings.rememberDesktopPicture(nil, for: "C", stillsFolder: stills)
-        #expect(settings.previousDesktopPictures.keys.sorted() == ["A"])
+        #expect(settings.desktopPictures["A"]?.original == DesktopPicture(url: mountains, options: nil))
+        #expect(settings.desktopPictures["A"]?.restorePending == false)
     }
 
-    @Test func restoresOnlyWhileOrbitsStillShows() {
-        let (defaults, cleanup) = Fixtures.defaults()
-        defer { cleanup() }
-        let settings = WallpaperSettings(defaults: defaults)
-        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
-        // Orbit's still is still the desktop picture: put the original back, and forget it.
-        #expect(settings.desktopPictureToRestore(for: "A", current: orbitStill(), stillsFolder: stills) == mountains)
-        #expect(settings.previousDesktopPictures.isEmpty)
-        // The user picked another picture since: leave theirs alone, and forget ours.
-        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
-        #expect(settings.desktopPictureToRestore(for: "A", current: photo, stillsFolder: stills) == nil)
-        #expect(settings.previousDesktopPictures.isEmpty)
-        // Nothing remembered: nothing to restore.
-        #expect(settings.desktopPictureToRestore(for: "Z", current: orbitStill(), stillsFolder: stills) == nil)
+    @Test func remembersTheUsersPictureBeforeTheFirstStill() {
+        var ledger = DesktopPictureLedger()
+        ledger.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        // While the display keeps a wallpaper, later stills never overwrite the original (another Space may show
+        // the user's own picture only because it never got a still).
+        ledger.willSetStill("aerial-Y.png", on: "A", current: photoPicture, stillsFolder: stills)
+        ledger.willSetStill("aerial-Y.png", on: "A", current: DesktopPicture(url: orbitStill("aerial-X.png"), options: nil),
+                            stillsFolder: stills)
+        #expect(ledger["A"]?.original == mountainsPicture)
+        #expect(ledger["A"]?.stills == ["aerial-X.png", "aerial-Y.png"])
+        #expect(ledger["A"]?.restorePending == false)
+        // Orbit's own still is never remembered as "the user's picture", nor is nothing.
+        ledger.willSetStill("aerial-X.png", on: "B", current: DesktopPicture(url: orbitStill(), options: nil), stillsFolder: stills)
+        ledger.willSetStill("aerial-X.png", on: "C", current: nil, stillsFolder: stills)
+        #expect(ledger["B"]?.original == nil)
+        #expect(ledger["C"]?.original == nil)
+        // The still list stays short.
+        for index in 0..<20 { ledger.willSetStill("video-\(index).png", on: "A", current: nil, stillsFolder: stills) }
+        #expect(ledger["A"]?.stills.count == DesktopPictureLedger.stillHistory)
+        #expect(ledger["A"]?.stills.last == "video-19.png")
+    }
+
+    @Test func restoreAttemptedWhileAnotherSpaceIsCurrent() {
+        // Space 1 got Orbit's still at launch; Kevo picks None (or quits) while on Space 2, which shows his photo.
+        var ledger = DesktopPictureLedger()
+        ledger.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        ledger.requestRestore("A")
+        #expect(ledger.restoreAction(for: "A", current: photo, stillsFolder: stills) == .leave)
+        // Nothing is forgotten: the saved picture waits, and so do the stills it protects.
+        #expect(ledger["A"]?.original == mountainsPicture)
+        #expect(ledger["A"]?.restorePending == true)
+        #expect(ledger.pendingKeys == ["A"])
+        #expect(ledger.protectedStills == ["aerial-X.png"])
+        // Back on Space 1 (still Orbit's still): the original goes back with its own scaling and fill colour.
+        #expect(ledger.restoreAction(for: "A", current: orbitStill("aerial-X.png"), stillsFolder: stills) == .restore(mountainsPicture))
+        // A third Space may show the still too: the entry stays pending for it.
+        #expect(ledger.restoreAction(for: "A", current: orbitStill("aerial-X.png"), stillsFolder: stills) == .restore(mountainsPicture))
+        // A display that never had a still, or one not waiting for a restore, is left alone.
+        #expect(ledger.restoreAction(for: "Z", current: orbitStill(), stillsFolder: stills) == .leave)
+        var active = DesktopPictureLedger()
+        active.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        #expect(active.restoreAction(for: "A", current: orbitStill("aerial-X.png"), stillsFolder: stills) == .leave)
+        // Without a remembered picture there is nothing to put back.
+        var unknown = DesktopPictureLedger()
+        unknown.willSetStill("aerial-X.png", on: "A", current: nil, stillsFolder: stills)
+        unknown.requestRestore("A")
+        #expect(unknown.restoreAction(for: "A", current: orbitStill("aerial-X.png"), stillsFolder: stills) == .leave)
+    }
+
+    @Test func aNewWallpaperAfterARestoreRemembersTheCurrentPicture() {
+        var ledger = DesktopPictureLedger()
+        ledger.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        ledger.requestRestore("A")
+        // Kevo chose a photo for that display meanwhile, then gives it a wallpaper again: the photo is what comes back.
+        ledger.willSetStill("aerial-Y.png", on: "A", current: photoPicture, stillsFolder: stills)
+        #expect(ledger["A"]?.original == photoPicture)
+        #expect(ledger["A"]?.restorePending == false)
+        // Still pending but the current Space shows Orbit's still: the original stays.
+        ledger.requestRestore("A")
+        ledger.willSetStill("aerial-Z.png", on: "A", current: DesktopPicture(url: orbitStill("aerial-Y.png"), options: nil),
+                            stillsFolder: stills)
+        #expect(ledger["A"]?.original == photoPicture)
+    }
+
+    @Test func stillWaitingForRestoreIsNeverDeleted() {
+        var ledger = DesktopPictureLedger()
+        ledger.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        ledger.willSetStill("aerial-Y.png", on: "A", current: nil, stillsFolder: stills)
+        ledger.willSetStill("aerial-Z.png", on: "B", current: photoPicture, stillsFolder: stills)
+        ledger.requestRestore("A")
+        let files = ["aerial-W.png", "aerial-X.png", "aerial-Y.png", "aerial-Z.png", "notes.txt"]
+        // A's stills may still be some Space's picture until its original is back: kept. B's still is kept only
+        // because a saved wallpaper uses it.
+        #expect(StillFrame.removable(files, keeping: ["aerial-Z.png"], ledger: ledger) == ["aerial-W.png"])
+        #expect(StillFrame.removable(files, keeping: [], ledger: ledger) == ["aerial-W.png", "aerial-Z.png"])
+        // Once A has a wallpaper again, its old stills are fair game.
+        ledger.willSetStill("aerial-Q.png", on: "A", current: nil, stillsFolder: stills)
+        #expect(StillFrame.removable(files, keeping: ["aerial-Z.png"], ledger: ledger) == ["aerial-W.png", "aerial-X.png", "aerial-Y.png"])
+    }
+
+    @Test func stopMarksEveryDisplayAndKeysCanMove() {
+        var ledger = DesktopPictureLedger()
+        ledger.willSetStill("aerial-X.png", on: "A", current: mountainsPicture, stillsFolder: stills)
+        ledger.willSetStill("aerial-Y.png", on: "B", current: photoPicture, stillsFolder: stills)
+        ledger.requestRestoreAll()
+        #expect(ledger.pendingKeys == ["A", "B"])
+        ledger.requestRestore("nobody")
+        #expect(ledger["nobody"] == nil)
+        ledger.move(from: "B", to: "B2")
+        #expect(ledger["B"] == nil)
+        #expect(ledger["B2"]?.original == photoPicture)
+        // Never onto a display that has its own entry.
+        ledger.move(from: "A", to: "B2")
+        #expect(ledger["A"]?.original == mountainsPicture)
+        #expect(ledger["B2"]?.original == photoPicture)
+    }
+
+    @Test func replacesOnlyStaleStillsOnSpaceChange() {
+        #expect(DesktopPictureLedger.shouldReplaceStill(current: orbitStill("aerial-old.png"), with: "aerial-new.png", stillsFolder: stills))
+        #expect(!DesktopPictureLedger.shouldReplaceStill(current: orbitStill("aerial-new.png"), with: "aerial-new.png", stillsFolder: stills))
+        // A Space showing the user's own picture keeps it.
+        #expect(!DesktopPictureLedger.shouldReplaceStill(current: photo, with: "aerial-new.png", stillsFolder: stills))
+        #expect(!DesktopPictureLedger.shouldReplaceStill(current: nil, with: "aerial-new.png", stillsFolder: stills))
     }
 
     @Test func stillFrameNames() {

@@ -33,7 +33,8 @@ struct WallpaperSettingsView: View {
 
             SettingsSection("Desktop picture", footnote: "Mission Control and switching Spaces show the normal desktop picture, "
                             + "so Orbit sets it to a frame of the wallpaper. When you remove a wallpaper or turn Wallpaper off, "
-                            + "Orbit puts back the picture you had, unless you chose another one since.") {
+                            + "Orbit puts back the picture you had, unless you chose another one since. macOS sets pictures one "
+                            + "Space at a time, so other Spaces get theirs back when you next visit them while Wallpaper is on.") {
                 Toggle("Use a still of the wallpaper as the desktop picture", isOn: $settings.setStillFrame)
             }
 
