@@ -731,6 +731,36 @@ extension SoundTests {
         }
 
 
+        /// N3: releasing a tap never waits for a start that may only return with the app's next sound. While the
+        /// tap's queue sits in such a start, the teardown runs from outside it; when the start returns afterwards,
+        /// the queue sees the tap is gone and stops there.
+        @Test func tapReleaseNeverWaitsForABlockedStart() {
+            var life = TapLifecycle()
+            let a1 = life.invalidate(); #expect(a1 == .onQueue)              // not waiting: the tap's own queue tears down
+            let a2 = life.beginWaitingStart(); #expect(!a2)                  // an invalidated tap never starts again
+            let a3 = life.claimTeardown(); #expect(a3)
+            let a4 = life.claimTeardown(); #expect(!a4)                      // exactly one teardown
+            let a5 = life.invalidate(); #expect(a5 == .alreadyDone)
+
+            var waiting = TapLifecycle()
+            let b1 = waiting.beginWaitingStart(); #expect(b1)
+            #expect(waiting.isWaitingForAudio)
+            let b2 = waiting.invalidate(); #expect(b2 == .fromOutside)       // blocked start: tear down from outside now
+            let b3 = waiting.claimTeardown(); #expect(b3)
+            let b4 = waiting.endWaitingStart(); #expect(!b4)                 // the start returned later: stop, report nothing
+            #expect(!waiting.isWaitingForAudio)
+
+            var normal = TapLifecycle()
+            let c1 = normal.beginWaitingStart(); #expect(c1)
+            let c2 = normal.endWaitingStart(); #expect(c2)                   // returned with the tap alive: carry on
+            let c3 = normal.invalidate(); #expect(c3 == .onQueue)
+
+            // A creation failure tears down by itself; a later release has nothing left to do.
+            var failed = TapLifecycle()
+            let d1 = failed.claimTeardown(); #expect(d1)
+            let d2 = failed.invalidate(); #expect(d2 == .alreadyDone)
+        }
+
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).
         @Test func noTapWithoutOutput() {
             #expect(!TapPlan(preference: AppAudioPreference(volume: 50), defaultOutputUID: nil).needsTap)

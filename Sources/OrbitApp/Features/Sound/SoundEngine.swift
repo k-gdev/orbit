@@ -112,9 +112,9 @@ final class SoundEngine {
         retiring = [:]
         all.forEach { $0.invalidate() }
         let deadline = DispatchTime.now() + Self.stopTimeout
-        // A tap paused for idleness may keep its queue in the re-armed start until the app's next sound; its IO
-        // isn't running (the app isn't muted) and its teardown runs right after, so don't wait for it.
-        for tap in all where !tap.isWaitingForAudio && !tap.waitUntilIdle(deadline: deadline) {
+        // Every tap releases promptly, including one whose queue waits in a TapAutoStart start (it is torn down
+        // from outside that queue), so this normally takes milliseconds.
+        for tap in all where !tap.waitUntilReleased(deadline: deadline) {
             Log.error("sound: teardown of \(tap.bundleID) is still pending after \(Self.stopTimeout) s")
         }
         if !all.isEmpty { Log.info("sound: released \(all.count) tap(s)") }

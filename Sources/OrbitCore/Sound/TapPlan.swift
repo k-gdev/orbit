@@ -100,6 +100,59 @@ public struct TapActivity: Equatable, Sendable {
     }
 }
 
+/// Who tears a tap down, and when, so releasing it never waits for a start that may block.
+///
+/// With `kAudioAggregateDeviceTapAutoStartKey`, `AudioDeviceStart` may only return with the app's next audio.
+/// A tap's HAL work runs on its own serial queue, so a release queued there could sit behind such a start
+/// indefinitely. Instead: while the queue is inside a waiting start, a release tears down from outside the
+/// queue at once; when the start returns afterwards, the queue sees the tap is gone and stops. Exactly one
+/// party performs the teardown (`claimTeardown`). The app keeps this behind a lock.
+public struct TapLifecycle: Equatable, Sendable {
+    public enum Teardown: Equatable, Sendable {
+        /// The queue is free (or will be soon): tear down on it.
+        case onQueue
+        /// The queue is inside a start that may block: tear down from outside it now.
+        case fromOutside
+        /// Already torn down (a creation failure, or a second release).
+        case alreadyDone
+    }
+
+    public private(set) var isWaitingForAudio = false
+    public private(set) var isInvalidated = false
+    public private(set) var isTornDown = false
+
+    public init() {}
+
+    /// The queue is about to call a start that may block until the app's next sound. False when the tap was
+    /// released already: don't start.
+    public mutating func beginWaitingStart() -> Bool {
+        guard !isInvalidated, !isTornDown else { return false }
+        isWaitingForAudio = true
+        return true
+    }
+
+    /// That start returned. True when the tap is still alive (carry on); false when it was released meanwhile
+    /// (stop there and report nothing: the teardown has happened or is happening elsewhere).
+    public mutating func endWaitingStart() -> Bool {
+        isWaitingForAudio = false
+        return !isInvalidated && !isTornDown
+    }
+
+    /// The tap is released. Where its teardown must run.
+    public mutating func invalidate() -> Teardown {
+        guard !isTornDown else { return .alreadyDone }
+        isInvalidated = true
+        return isWaitingForAudio ? .fromOutside : .onQueue
+    }
+
+    /// True exactly once: whoever gets it performs the HAL teardown.
+    public mutating func claimTeardown() -> Bool {
+        guard !isTornDown else { return false }
+        isTornDown = true
+        return true
+    }
+}
+
 /// The output devices each app last played on. Core Audio reports no devices for a process that is idle,
 /// so without this "Same as Output" would flip an idle app to the system output and back on every sound.
 /// An app's devices are kept while it has audio processes and forgotten when they are gone.
