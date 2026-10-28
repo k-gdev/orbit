@@ -273,6 +273,165 @@ import Testing
         }
     }
 
+    // MARK: Store
+
+    @Suite struct ClipboardStoreTests {
+        private static func makeItems() -> (items: [ClipboardItem], payloads: [String: Data]) {
+            var items: [ClipboardItem] = []
+            var payloads: [String: Data] = [:]
+            for (index, text) in ["first", "second é", "third"].enumerated() {
+                let capture = ClipboardCapture.text(text, sourceBundleID: "com.example.app", sourceName: "App",
+                                                    date: Date(timeIntervalSince1970: 1_700_000_000 + Double(index) * 60))
+                let name = ClipboardStore.newPayloadName(for: .text)
+                items.append(capture.makeItem(payloadFile: name))
+                payloads[name] = capture.payload
+            }
+            items[1].pinned = true
+            return (items, payloads)
+        }
+
+        @Test func storeRoundTrip() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let folder = root.appending(path: "Clipboard", directoryHint: .isDirectory)
+            let store = ClipboardStore(directory: folder)
+            // Nothing exists until something is written.
+            #expect(!FileManager.default.fileExists(atPath: folder.path))
+            let empty = store.load()
+            #expect(empty.items.isEmpty && empty.corruptBackup == nil)
+            #expect(!FileManager.default.fileExists(atPath: folder.path), "loading must not create the folder")
+
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+
+            let reopened = ClipboardStore(directory: folder).load()
+            #expect(reopened.items == items)
+            #expect(reopened.corruptBackup == nil)
+            for item in items {
+                let name = try #require(item.payloadFile)
+                #expect(store.readPayload(named: name) == payloads[name])
+                #expect(store.payloadExists(named: name))
+            }
+            #expect(store.readPayload(named: ClipboardStore.newPayloadName(for: .text)) == nil)
+        }
+
+        @Test func storeSurvivesCorruptIndex() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let garbage = Data("{ this is not json".utf8)
+            try garbage.write(to: store.indexURL)
+
+            let loaded = store.load()
+            #expect(loaded.items.isEmpty, "starts empty")
+            let backup = try #require(loaded.corruptBackup)
+            #expect(backup.lastPathComponent.hasPrefix("index.corrupt-") && backup.pathExtension == "json")
+            #expect(try Data(contentsOf: backup) == garbage, "the broken file is kept, untouched")
+            #expect(!FileManager.default.fileExists(atPath: store.indexURL.path), "and moved out of the way")
+
+            // The store keeps working, and a second corrupt index does not overwrite the first backup.
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            #expect(store.load().items == items)
+            let other = Data("[1, 2".utf8)
+            try other.write(to: store.indexURL)
+            let second = try #require(store.load().corruptBackup)
+            #expect(second != backup)
+            #expect(try Data(contentsOf: backup) == garbage)
+            #expect(try Data(contentsOf: second) == other)
+
+            // An index from a newer Orbit is treated the same way: kept, not interpreted or overwritten.
+            try Data(#"{"version": 99, "items": []}"#.utf8).write(to: store.indexURL)
+            #expect(store.load().corruptBackup != nil)
+        }
+
+        @Test func storeKeepsGoodItemsAroundABadOne() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            // Break one entry only (an unknown kind).
+            var json = try #require(String(data: Data(contentsOf: store.indexURL), encoding: .utf8))
+            json = json.replacingOccurrences(of: "\"kind\":\"text\"", with: "\"kind\":\"hologram\"", options: [], range: json.range(of: "\"kind\":\"text\""))
+            try Data(json.utf8).write(to: store.indexURL)
+
+            let loaded = store.load()
+            #expect(loaded.items.count == 2)
+            #expect(loaded.droppedCount == 1)
+            #expect(loaded.corruptBackup != nil, "the original is kept before anything is dropped")
+        }
+
+        @Test func storeDropsItemsWithMissingBlobs() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads where name != items[0].payloadFile { try store.writePayload(data, named: name) }
+            let usable = store.itemsWithPayloads(items)
+            #expect(usable.map(\.preview) == ["second é", "third"])
+        }
+
+        @Test func storeRefusesUnsafeBlobNames() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root.appending(path: "Clipboard"))
+            for bad in ["../evil.txt", "index.json", "a/b.txt", "", ".", "..", "notes.txt", "x.exe"] {
+                #expect(!ClipboardStore.isSafePayloadName(bad), "\(bad) must be refused")
+                #expect(throws: (any Error).self) { try store.writePayload(Data("x".utf8), named: bad) }
+                #expect(store.readPayload(named: bad) == nil)
+            }
+            #expect(ClipboardStore.isSafePayloadName(ClipboardStore.newPayloadName(for: .image)))
+            #expect(ClipboardStore.newPayloadName(for: .image).hasSuffix(".png"))
+            #expect(ClipboardStore.newPayloadName(for: .richText).hasSuffix(".rtf"))
+            #expect(ClipboardStore.newPayloadName(for: .files).hasSuffix(".json"))
+            #expect(ClipboardStore.newPayloadName(for: .text).hasSuffix(".txt"))
+        }
+
+        @Test func storeDeletesAndSweepsOnlyItsOwnBlobs() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let kept = ClipboardStore.newPayloadName(for: .text)
+            let orphan = ClipboardStore.newPayloadName(for: .image)
+            let deleted = ClipboardStore.newPayloadName(for: .text)
+            for name in [kept, orphan, deleted] { try store.writePayload(Data("x".utf8), named: name) }
+            // Files this store did not write are none of its business.
+            let stranger = root.appending(path: "notes.txt")
+            try Data("mine".utf8).write(to: stranger)
+            try store.save([])
+
+            store.deletePayloads([deleted, "../outside.txt", "index.json"])
+            #expect(!store.payloadExists(named: deleted))
+            #expect(FileManager.default.fileExists(atPath: store.indexURL.path), "the index is not a blob")
+
+            let swept = store.removeOrphans(keeping: [kept])
+            #expect(swept == [orphan])
+            #expect(store.payloadExists(named: kept))
+            #expect(!store.payloadExists(named: orphan))
+            #expect(try Data(contentsOf: stranger) == Data("mine".utf8))
+        }
+
+        @Test func storeIsPrivate() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let folder = root.appending(path: "Clipboard", directoryHint: .isDirectory)
+            let store = ClipboardStore(directory: folder)
+            let name = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("secret".utf8), named: name)
+            try store.save([])
+            func mode(_ url: URL) throws -> Int {
+                try #require(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+            }
+            #expect(try mode(folder) == 0o700)
+            #expect(try mode(folder.appending(path: name)) == 0o600)
+            #expect(try mode(store.indexURL) == 0o600)
+        }
+    }
+
     // MARK: Items and captures
 
     @Suite struct ClipboardItemTests {
