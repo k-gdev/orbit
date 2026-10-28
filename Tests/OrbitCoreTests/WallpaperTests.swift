@@ -429,3 +429,99 @@ enum WallpaperFixtures {
         #expect(WallpaperPlan.changes(from: current, to: [:]) == WallpaperPlan.Changes(close: ["A", "B"], open: [], change: []))
     }
 }
+
+// MARK: - Settings, the desktop picture ledger and still frames
+
+@Suite struct WallpaperSettingsTests {
+    let stills = URL(fileURLWithPath: "/Users/kevo/Library/Application Support/Orbit/Wallpaper/stills", isDirectory: true)
+    let mountains = URL(fileURLWithPath: "/System/Library/Desktop Pictures/Mountains.heic")
+    let photo = URL(fileURLWithPath: "/Users/kevo/Pictures/Beach.jpg")
+
+    private func orbitStill(_ name: String = "aerial-X.png") -> URL { stills.appending(path: name) }
+
+    @Test func settingsRoundTrip() throws {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let fresh = WallpaperSettings(defaults: defaults)
+        #expect(fresh.assignments.isEmpty)
+        #expect(fresh.pauseOnBattery == false)
+        #expect(fresh.pauseInLowPower == true)
+        #expect(fresh.setStillFrame == true)
+        #expect(fresh.previousDesktopPictures.isEmpty)
+
+        fresh.assignments.assign(.aerial(id: WallpaperFixtures.tahoe), to: DisplayRef(key: "A", name: "P27u-20 (1)"))
+        fresh.assignments.assign(.video(path: "/m/Rain.mov", bookmark: Data([7])), to: DisplayRef(key: "B", name: "K272HUL"))
+        fresh.pauseOnBattery = true
+        fresh.pauseInLowPower = false
+        fresh.setStillFrame = false
+        fresh.previousDesktopPictures = ["A": mountains.absoluteString]
+
+        let reread = WallpaperSettings(defaults: defaults)
+        #expect(reread.assignments == fresh.assignments)
+        #expect(reread.pauseOnBattery == true)
+        #expect(reread.pauseInLowPower == false)
+        #expect(reread.setStillFrame == false)
+        #expect(reread.previousDesktopPictures == ["A": mountains.absoluteString])
+        // Every key is the feature's own.
+        let keys = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix("wallpaper.") }
+        #expect(Set(keys) == ["wallpaper.assignments", "wallpaper.pauseOnBattery", "wallpaper.pauseInLowPower",
+                              "wallpaper.setStillFrame", "wallpaper.previousDesktopPictures"])
+        // Unreadable assignments fall back to none rather than crashing.
+        defaults.set(Data("garbage".utf8), forKey: "wallpaper.assignments")
+        #expect(WallpaperSettings(defaults: defaults).assignments.isEmpty)
+    }
+
+    @Test func remembersOnlyTheFirstDesktopPicture() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let settings = WallpaperSettings(defaults: defaults)
+        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
+        // A later call (Orbit's own still is showing by then, or the user re-chose) never overwrites the original.
+        settings.rememberDesktopPicture(photo, for: "A", stillsFolder: stills)
+        settings.rememberDesktopPicture(orbitStill(), for: "A", stillsFolder: stills)
+        #expect(settings.previousDesktopPictures == ["A": mountains.absoluteString])
+        // Orbit's own still is never remembered as "the previous picture", nor is nothing.
+        settings.rememberDesktopPicture(orbitStill(), for: "B", stillsFolder: stills)
+        settings.rememberDesktopPicture(nil, for: "C", stillsFolder: stills)
+        #expect(settings.previousDesktopPictures.keys.sorted() == ["A"])
+    }
+
+    @Test func restoresOnlyWhileOrbitsStillShows() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let settings = WallpaperSettings(defaults: defaults)
+        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
+        // Orbit's still is still the desktop picture: put the original back, and forget it.
+        #expect(settings.desktopPictureToRestore(for: "A", current: orbitStill(), stillsFolder: stills) == mountains)
+        #expect(settings.previousDesktopPictures.isEmpty)
+        // The user picked another picture since: leave theirs alone, and forget ours.
+        settings.rememberDesktopPicture(mountains, for: "A", stillsFolder: stills)
+        #expect(settings.desktopPictureToRestore(for: "A", current: photo, stillsFolder: stills) == nil)
+        #expect(settings.previousDesktopPictures.isEmpty)
+        // Nothing remembered: nothing to restore.
+        #expect(settings.desktopPictureToRestore(for: "Z", current: orbitStill(), stillsFolder: stills) == nil)
+    }
+
+    @Test func stillFrameNames() {
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(StillFrame.fileName(for: .aerial(id: WallpaperFixtures.tahoe), modified: nil)
+                == "aerial-\(WallpaperFixtures.tahoe).png")
+        #expect(StillFrame.fileName(for: .aerial(id: "../../evil"), modified: nil) == "aerial-evil.png")
+        let video = StillFrame.fileName(for: .video(path: "/m/Rain.mov", bookmark: nil), modified: date)
+        #expect(video.hasPrefix("video-") && video.hasSuffix(".png"))
+        // Stable for the same file and date (bookmark ignored); new when the file changes or moves.
+        #expect(StillFrame.fileName(for: .video(path: "/m/Rain.mov", bookmark: Data([1])), modified: date) == video)
+        #expect(StillFrame.fileName(for: .video(path: "/m/Rain.mov", bookmark: nil), modified: date.addingTimeInterval(1)) != video)
+        #expect(StillFrame.fileName(for: .video(path: "/m/Snow.mov", bookmark: nil), modified: date) != video)
+    }
+
+    @Test func recognisesOrbitsOwnStills() {
+        #expect(StillFrame.isStill(orbitStill(), in: stills))
+        #expect(!StillFrame.isStill(photo, in: stills))
+        #expect(!StillFrame.isStill(URL(fileURLWithPath: stills.path + "-old/aerial-X.png"), in: stills))
+        #expect(!StillFrame.isStill(URL(string: "https://example.invalid/aerial-X.png")!, in: stills))
+        // Cleanup only ever considers Orbit's own still names.
+        let files = ["aerial-A.png", "aerial-B.png", "video-0123.png", "notes.txt", "Beach.jpg", "aerial-C.heic"]
+        #expect(StillFrame.unused(files, keeping: ["aerial-B.png"]) == ["aerial-A.png", "video-0123.png"])
+    }
+}
