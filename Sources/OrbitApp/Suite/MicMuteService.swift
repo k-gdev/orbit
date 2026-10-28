@@ -38,6 +38,10 @@ final class MicMuteService: NSObject, ObservableObject {
     private var shortcutSubscription: AnyCancellable?
     /// What Orbit's mute changed, and mutes still to undo on devices that went away (`MicMuteState`).
     private var state = MicMuteState()
+    /// Keeps a reading taken before Orbit's own write has landed from being misread.
+    private var confirmation = MicWriteConfirmation()
+    /// The one look at the device scheduled for when the confirmation window ends.
+    private var confirmationCheck: DispatchWorkItem?
     /// Where that record survives a crash or a failed quit (nil for the fixture).
     private let restoreDefaults: UserDefaults?
     private var didRecover = false
@@ -89,7 +93,9 @@ final class MicMuteService: NSObject, ObservableObject {
     /// going inactive and on quit); unmuting undoes Orbit's mute, or switches off a mute made elsewhere.
     /// Does nothing when no device is available; a write that fails leaves the state as it was.
     func setMuted(_ muted: Bool) {
-        guard muted != isMuted else { return }
+        // An unmute always gets through while Orbit's own mute is on record, even when that mute sits on a mic that
+        // is no longer the input (and so doesn't show in `isMuted`): it must stay clearable.
+        guard muted != isMuted || (!muted && state.isMuted) else { return }
         if isFixture {
             isMuted = muted
             isMutedByOrbit = muted
@@ -110,6 +116,9 @@ final class MicMuteService: NSObject, ObservableObject {
         active = on
         if on {
             updateSystemListening()
+            // Orbit's mute still on record from a failed undo, on a mic that is no longer the input: nobody asked to
+            // mute now, so retry the undo rather than moving the mute to the current mic.
+            if let uid = state.deviceUID, uid != MicHAL.uid(of: MicHAL.defaultInputDevice()) { _ = restoreOrbitMute() }
             refreshLiveState()
             updateShortcut()
             shortcutSubscription = settings.$muteShortcut.dropFirst().sink { [weak self] _ in
@@ -135,6 +144,8 @@ final class MicMuteService: NSObject, ObservableObject {
         if state.isMuted { _ = restoreOrbitMute() }
         processPending()
         saveRecord()
+        confirmationCheck?.cancel()
+        confirmationCheck = nil
         hotKeys?.unregister(id: Self.hotKeyID)
         removeBadge()
         unwatchInput()
@@ -184,8 +195,9 @@ final class MicMuteService: NSObject, ObservableObject {
     }
 
     @objc private func badgeClicked() {
-        if state.isMuted && !active {
-            // Inactive with an undo that failed before: try again.
+        if state.isMuted {
+            // Orbit's own mute (possibly on a mic that is no longer the input, or left by an undo that failed while
+            // inactive): undo exactly that.
             _ = restoreOrbitMute()
             refreshLiveState()
         } else {
@@ -208,12 +220,15 @@ final class MicMuteService: NSObject, ObservableObject {
     private func refreshLiveState() {
         guard !isFixture else { return }
         let device = MicHAL.defaultInputDevice()
-        let reading = MicHAL.reading(for: device)
-        if let reading, state.isMuted, !state.deviceChanged(reading) {
-            Log.info("mic mute: \(reading.deviceUID) was unmuted outside Orbit")
+        // A write can take effect asynchronously: right after Orbit's own mute (or unmute) the device may still read
+        // as it was. Until the write shows (or evidently didn't take), the reading is shown as the write will
+        // leave it and nothing is concluded from it (`MicMuteState.observe`).
+        let observed = MicHAL.reading(for: device).map { state.observe($0, confirming: &confirmation, now: Date()) }
+        if let observed, observed.unmutedOutside {
+            Log.info("mic mute: \(observed.shown.deviceUID) was unmuted outside Orbit")
             saveRecord()
         }
-        let presentation = state.presentation(for: reading)
+        let presentation = state.presentation(for: observed?.shown)
         isAvailable = presentation != .unavailable
         isMutedByOrbit = presentation == .mutedByOrbit
         isMuted = presentation == .mutedByOrbit || presentation == .mutedElsewhere
@@ -221,23 +236,50 @@ final class MicMuteService: NSObject, ObservableObject {
         updateBadge()
     }
 
-    /// Orbit's mute on the current input device, remembering its previous state. True when it took.
+    /// Orbit's mute on the current input device, remembering its previous state. True when it took. The previous
+    /// state is the device as Orbit's own writes still landing will leave it (right after Orbit's unmute it can still
+    /// read muted), so a quick second press mutes for real.
     @discardableResult
     private func muteInput() -> Bool {
         let device = MicHAL.defaultInputDevice()
-        guard let reading = MicHAL.reading(for: device), let actions = state.mute(reading) else {
+        guard let reading = MicHAL.reading(for: device),
+              let actions = state.mute(reading, confirming: &confirmation, now: Date()) else {
             Log.info("mic mute: the input device can't be muted")
             return false
         }
         guard perform(actions) else {
             Log.error("mic mute: muting \(reading.deviceUID) failed; putting it back")
-            if perform(state.restoreActions()) { state.commitRestore() } else { state.setAside() }
+            let undo = state.restoreActions()
+            if perform(undo) {
+                state.commitRestore()
+                noteWrite(undo)
+            } else {
+                state.setAside()
+            }
             saveRecord()
             updateSystemListening()
             return false
         }
+        noteWrite(actions)
         saveRecord()
         return true
+    }
+
+    /// Orbit just wrote `actions` (every write of Orbit's goes through here, to whichever mic): readings are
+    /// reviewed against them until they show. One look is scheduled for just after the confirmation window of the
+    /// latest write (which ends after every earlier one's), so a write the driver silently ignored is noticed even
+    /// if no listener fires. Writing nothing changes nothing: a write still landing keeps its wait and its look.
+    private func noteWrite(_ actions: [MicMuteAction]) {
+        guard !actions.isEmpty else { return }
+        confirmation.wrote(actions, at: Date())
+        confirmationCheck?.cancel()
+        confirmationCheck = nil
+        let work = DispatchWorkItem { [weak self] in
+            self?.confirmationCheck = nil
+            self?.refreshLiveState()
+        }
+        confirmationCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + MicWriteConfirmation.timeout + 0.1, execute: work)
     }
 
     /// Undoes Orbit's mute, or switches off a mute made elsewhere (the user asked). True when the mic is no
@@ -249,7 +291,7 @@ final class MicMuteService: NSObject, ObservableObject {
         let actions = MicMuteState.directUnmute(reading)
         guard !actions.isEmpty else { return true }
         let ok = perform(actions)
-        if !ok { Log.error("mic mute: unmuting \(reading.deviceUID) failed") }
+        if ok { noteWrite(actions) } else { Log.error("mic mute: unmuting \(reading.deviceUID) failed") }
         return ok
     }
 
@@ -266,23 +308,35 @@ final class MicMuteService: NSObject, ObservableObject {
             updateSystemListening()
             return true
         }
-        guard perform(state.restoreActions()) else {
+        let actions = state.restoreActions()
+        guard perform(actions) else {
             Log.error("mic mute: unmuting \(uid) failed; keeping the mute and its record to retry")
             saveRecord()
             return false
         }
         state.commitRestore()
+        noteWrite(actions)
         saveRecord()
+        // With Sound and Controls off, the system listeners only existed for this record: drop them now.
+        updateSystemListening()
         return true
     }
 
     /// Finishes mutes still on record for devices that went away: once a device is back and still as Orbit
     /// left it, it is unmuted; if the user changed it meanwhile, the record is simply dropped.
     private func processPending() {
-        guard !state.pending.isEmpty else { return }
+        guard !state.pending.isEmpty else {
+            updateSystemListening()
+            return
+        }
         let work = state.pendingWork { uid in MicHAL.device(uid: uid).flatMap { MicHAL.reading(for: $0) } }
         for item in work where item.actions.isEmpty || perform(item.actions) {
-            if !item.actions.isEmpty { Log.info("mic mute: \(item.deviceUID) is back; undid Orbit's mute") }
+            if !item.actions.isEmpty {
+                Log.info("mic mute: \(item.deviceUID) is back; undid Orbit's mute")
+                // Often the reconnected mic is the input again at once: until the undo shows, it must not read as
+                // "muted outside Orbit".
+                noteWrite(item.actions)
+            }
             state.resolvePending(deviceUID: item.deviceUID)
         }
         saveRecord()
@@ -334,8 +388,11 @@ final class MicMuteService: NSObject, ObservableObject {
     /// is gone or can't be written), and the mute moves to the new one.
     private func followInput() {
         guard let uid = state.deviceUID, uid != MicHAL.uid(of: MicHAL.defaultInputDevice()) else { return }
-        if MicHAL.device(uid: uid) != nil, perform(state.restoreActions()) {
+        let putBack = state.restoreActions()
+        if MicHAL.device(uid: uid) != nil, perform(putBack) {
             state.commitRestore()
+            // Confirmed like any write of Orbit's, in case the input switches straight back to this mic.
+            noteWrite(putBack)
         } else {
             state.setAside()
         }
@@ -345,12 +402,14 @@ final class MicMuteService: NSObject, ObservableObject {
     }
 
     /// Listens to the current input device's mute and volume (the live state). Re-attached when the device
-    /// changes, including a device re-enumerated under a new object ID.
+    /// object changes, including a device re-enumerated under a new object ID; a device on which no listener
+    /// could be installed is not retried on every refresh.
     private func watchInput(_ device: AudioObjectID) {
-        guard device != watchedInput || inputListeners.isEmpty else { return }
-        unwatchInput()
-        guard device != kAudioObjectUnknown else { return }
+        guard device != watchedInput else { return }
+        inputListeners.forEach { $0.remove() }
+        inputListeners = []
         watchedInput = device
+        guard device != kAudioObjectUnknown else { return }
         let changed: () -> Void = { [weak self] in self?.refreshLiveState() }
         inputListeners = [
             MicHALListener(object: device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeInput, action: changed),

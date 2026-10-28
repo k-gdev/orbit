@@ -483,6 +483,220 @@ extension SoundTests {
             #expect(state.restoreActions() == [.setMute(deviceUID: "Headset", muted: false)])
         }
 
+        /// N1: a write can take effect asynchronously, so a reading taken right after Orbit's own mute may still say
+        /// "unmuted". That must not be taken for the user unmuting elsewhere: until a reading shows Orbit's write
+        /// (or `timeout` passes) it is projected to what the write will leave and not trusted.
+        @Test func ownWriteIsNotMistakenForOutsideUnmute() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 2000)
+            var state = MicMuteState()
+            var guardian = MicWriteConfirmation()
+            let r0 = guardian.review(headset, now: t0)
+            #expect(r0.trusted && r0.reading == headset)                         // nothing written: no wait
+            let actions = state.mute(headset) ?? []
+            guardian.wrote(actions, at: t0)
+            #expect(guardian.isWaiting)
+            // Still reads unmuted a moment later: shown as muted, not trusted, Orbit's mute stays.
+            let r1 = guardian.review(headset, now: t0.addingTimeInterval(0.02))
+            #expect(!r1.trusted)
+            #expect(r1.reading.isMuted)
+            #expect(state.presentation(for: r1.reading) == .mutedByOrbit)
+            #expect(state.isMuted)
+            // The write lands: confirmed, the wait ends.
+            var muted = headset
+            muted.isMuted = true
+            let r2 = guardian.review(muted, now: t0.addingTimeInterval(0.05))
+            #expect(r2.trusted)
+            #expect(!guardian.isWaiting)
+            let stillMuted = state.deviceChanged(r2.reading)
+            #expect(stillMuted)
+            // Later the user really unmutes elsewhere: trusted, Orbit lets go.
+            let r3 = guardian.review(headset, now: t0.addingTimeInterval(9))
+            #expect(r3.trusted)
+            let after = state.deviceChanged(r3.reading)
+            #expect(!after)
+            // A write that never shows up: after the timeout the reading counts again (the mute didn't take).
+            let again = state.mute(headset) ?? []
+            guardian.wrote(again, at: t0)
+            let r4 = guardian.review(headset, now: t0.addingTimeInterval(MicWriteConfirmation.timeout - 0.1))
+            #expect(!r4.trusted)
+            let r5 = guardian.review(headset, now: t0.addingTimeInterval(MicWriteConfirmation.timeout))
+            #expect(r5.trusted && r5.reading == headset)
+            #expect(!guardian.isWaiting)
+            // Volume-muted: projected to 0 until the volume reads 0.
+            var volumeState = MicMuteState()
+            let noMute = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            guardian.wrote(volumeState.mute(noMute) ?? [], at: t0)
+            let r6 = guardian.review(noMute, now: t0.addingTimeInterval(0.01))
+            #expect(!r6.trusted && r6.reading.volume == 0)
+            var atZero = noMute
+            atZero.volume = 0
+            let r7 = guardian.review(atZero, now: t0.addingTimeInterval(0.02))
+            #expect(r7.trusted)
+            #expect(volumeState.reflects(atZero))
+            #expect(!volumeState.reflects(noMute))
+            // A reading of another device says nothing about the write: taken as it is, the wait goes on.
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: true)], at: t0)
+            var other = headset
+            other.deviceUID = "Other"
+            let r8 = guardian.review(other, now: t0.addingTimeInterval(0.01))
+            #expect(r8.trusted && r8.reading == other)
+            #expect(guardian.isWaiting)
+            // Writing nothing waits for nothing, and doesn't end the wait for a write still landing.
+            guardian.wrote([], at: t0)
+            #expect(guardian.isWaiting)
+            var idle = MicWriteConfirmation()
+            idle.wrote([], at: t0)
+            #expect(!idle.isWaiting)
+        }
+
+        /// R3: right after Orbit's own unmute the device may still read muted. It must not flash "Muted outside Orbit",
+        /// and a quick second press must mute (not unmute again): the reading is projected to unmuted until the
+        /// unmute shows, or the timeout passes (then the device's own state shows: the unmute didn't take).
+        @Test func ownUnmuteDoesNotFlashOutsideMute() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 3000)
+            var state = MicMuteState()
+            _ = state.mute(headset)
+            let undo = state.restoreActions()
+            state.commitRestore()
+            var guardian = MicWriteConfirmation()
+            guardian.wrote(undo, at: t0)
+            var stillMuted = headset
+            stillMuted.isMuted = true
+            let r1 = guardian.review(stillMuted, now: t0.addingTimeInterval(0.02))
+            #expect(!r1.trusted)
+            #expect(!r1.reading.isMuted)
+            #expect(state.presentation(for: r1.reading) == .unmuted)            // not .mutedElsewhere
+            let r2 = guardian.review(headset, now: t0.addingTimeInterval(0.05))  // the unmute landed
+            #expect(r2.trusted && !guardian.isWaiting)
+            // An unmute that never lands: after the timeout the device's own (muted) state shows.
+            guardian.wrote(undo, at: t0)
+            let r3 = guardian.review(stillMuted, now: t0.addingTimeInterval(MicWriteConfirmation.timeout))
+            #expect(r3.trusted && r3.reading.isMuted)
+            #expect(state.presentation(for: r3.reading) == .mutedElsewhere)
+            // Unmuting a mute made elsewhere (a direct user action) is covered the same way.
+            guardian.wrote(MicMuteState.directUnmute(stillMuted), at: t0)
+            let r4 = guardian.review(stillMuted, now: t0.addingTimeInterval(0.01))
+            #expect(!r4.trusted && !r4.reading.isMuted)
+            // A volume restore is projected to the restored volume.
+            let atZero = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0)
+            guardian.wrote([.setVolume(deviceUID: "USB", volume: 0.62)], at: t0)
+            let r5 = guardian.review(atZero, now: t0.addingTimeInterval(0.01))
+            #expect(!r5.trusted && r5.reading.volume == 0.62)
+        }
+
+        /// F1: a quick second press right after Orbit's own unmute, while the device still reads muted. The mute is
+        /// built from the device as the unmute will leave it, so it really writes a mute (recorded as "was unmuted"),
+        /// and the unmute landing afterwards is not taken for the user unmuting elsewhere: the mic ends up muted, as
+        /// the last press asked. Writing nothing never ends the wait for a write still landing.
+        @Test func quickMuteAfterOwnUnmuteIsNotLost() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 4000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var muted = headset
+            muted.isMuted = true
+            var state = MicMuteState()
+            var guardian = MicWriteConfirmation()
+            // Orbit's mute, landed.
+            let first = state.mute(headset, confirming: &guardian, now: t0) ?? []
+            guardian.wrote(first, at: t0)
+            let shown = state.observe(muted, confirming: &guardian, now: at(0.05))
+            #expect(!shown.unmutedOutside && state.isMuted && !guardian.isWaiting)
+            // Orbit's unmute is written; the device still reads muted for a moment.
+            let undo = state.restoreActions()
+            state.commitRestore()
+            guardian.wrote(undo, at: at(1))
+            let between = state.observe(muted, confirming: &guardian, now: at(1.01))
+            #expect(state.presentation(for: between.shown) == .unmuted)
+            // The second press, from that stale reading: a real mute of an unmuted mic.
+            let second = state.mute(muted, confirming: &guardian, now: at(1.02))
+            #expect(second == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.applied?.method == .muteFlag(wasMuted: false))
+            guardian.wrote(second ?? [], at: at(1.02))
+            // The unmute lands: Orbit's mute stays (shown muted, nothing concluded from it).
+            let landed = state.observe(headset, confirming: &guardian, now: at(1.05))
+            #expect(!landed.unmutedOutside)
+            #expect(state.isMuted)
+            #expect(state.presentation(for: landed.shown) == .mutedByOrbit)
+            // The mute lands: confirmed, and the next unmute really unmutes.
+            let confirmed = state.observe(muted, confirming: &guardian, now: at(1.08))
+            #expect(!confirmed.unmutedOutside)
+            #expect(!guardian.isWaiting)
+            #expect(state.isMuted)
+            #expect(state.restoreActions() == [.setMute(deviceUID: "Headset", muted: false)])
+
+            // Writing nothing (say, a press on a mic that already reads muted) leaves a write still landing waiting.
+            guardian.wrote(undo, at: at(10))
+            guardian.wrote([], at: at(10.01))
+            #expect(guardian.isWaiting)
+            let stale = guardian.review(muted, now: at(10.02))
+            #expect(!stale.trusted && !stale.reading.isMuted)
+
+            // Volume fallback: the second mute records the volume being restored, not the stale 0.
+            let usb = MicDeviceReading(deviceUID: "USB", canSetMute: false, isMuted: false, canSetVolume: true, volume: 0.62)
+            var atZero = usb
+            atZero.volume = 0
+            var volumeState = MicMuteState()
+            var volumeGuardian = MicWriteConfirmation()
+            let down = volumeState.mute(usb, confirming: &volumeGuardian, now: t0) ?? []
+            volumeGuardian.wrote(down, at: t0)
+            _ = volumeState.observe(atZero, confirming: &volumeGuardian, now: at(0.05))
+            let up = volumeState.restoreActions()
+            volumeState.commitRestore()
+            volumeGuardian.wrote(up, at: at(1))
+            let again = volumeState.mute(atZero, confirming: &volumeGuardian, now: at(1.02))
+            #expect(again == [.setVolume(deviceUID: "USB", volume: 0)])
+            #expect(volumeState.applied?.method == .volume(previous: 0.62))
+            volumeGuardian.wrote(again ?? [], at: at(1.02))
+            let raised = volumeState.observe(usb, confirming: &volumeGuardian, now: at(1.05))
+            #expect(!raised.unmutedOutside)
+            #expect(volumeState.isMuted)
+        }
+
+        /// F4: every one of Orbit's writes is confirmed (a reconnected mic's pending undo, the old mic put back when the
+        /// input moves, a failed mute rolled back), and a write to one device never ends the wait for another. The input
+        /// moves from the headset to the built-in mic (headset put back, built-in muted) and straight back while the
+        /// headset still reads muted: the put-back still covers it, so muting it again records "was unmuted".
+        @Test func writesToSeveralDevicesWaitApart() {
+            let t0 = Date(timeIntervalSinceReferenceDate: 5000)
+            func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+            var mutedHeadset = headset
+            mutedHeadset.isMuted = true
+            let builtIn = MicDeviceReading(deviceUID: "BuiltIn", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
+            var mutedBuiltIn = builtIn
+            mutedBuiltIn.isMuted = true
+            var guardian = MicWriteConfirmation()
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: false)], at: t0)
+            guardian.wrote([.setMute(deviceUID: "BuiltIn", muted: true)], at: t0)
+            let builtInStale = guardian.review(builtIn, now: at(0.01))
+            #expect(!builtInStale.trusted && builtInStale.reading.isMuted)
+            let headsetStale = guardian.review(mutedHeadset, now: at(0.02))
+            #expect(!headsetStale.trusted && !headsetStale.reading.isMuted)
+            var state = MicMuteState()
+            let back = state.mute(mutedHeadset, confirming: &guardian, now: at(0.03))
+            #expect(back == [.setMute(deviceUID: "Headset", muted: true)])
+            #expect(state.applied?.method == .muteFlag(wasMuted: false))
+            // One device confirming leaves the other waiting.
+            let builtInLanded = guardian.review(mutedBuiltIn, now: at(0.04))
+            #expect(builtInLanded.trusted)
+            #expect(guardian.isWaiting)
+            let headsetLanded = guardian.review(headset, now: at(0.05))
+            #expect(headsetLanded.trusted)
+            #expect(!guardian.isWaiting)
+            // A later write to the same control replaces the earlier one: the device will show the later one.
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: true)], at: at(1))
+            guardian.wrote([.setMute(deviceUID: "Headset", muted: false)], at: at(1.01))
+            let superseded = guardian.review(mutedHeadset, now: at(1.02))
+            #expect(!superseded.trusted && !superseded.reading.isMuted)
+            // Each write has its own timeout, and one that never shows stops waiting even if its mic isn't read again.
+            guardian.wrote([.setMute(deviceUID: "BuiltIn", muted: true)], at: at(2.5))
+            let headsetExpired = guardian.review(mutedHeadset, now: at(1.01 + MicWriteConfirmation.timeout))
+            #expect(headsetExpired.trusted && headsetExpired.reading.isMuted)
+            let builtInWaits = guardian.review(builtIn, now: at(1.01 + MicWriteConfirmation.timeout))
+            #expect(!builtInWaits.trusted)
+            let other = MicDeviceReading(deviceUID: "Other", canSetMute: true, isMuted: false, canSetVolume: false, volume: nil)
+            _ = guardian.review(other, now: at(2.5 + MicWriteConfirmation.timeout))
+            #expect(!guardian.isWaiting)
+        }
+
         /// M2: the mic's live state, whoever muted it. A mute made outside Orbit shows as such; a direct unmute
         /// clears it, and Orbit never "restores" it on its own.
         @Test func liveStateShowsOutsideMute() {
@@ -694,6 +908,22 @@ extension SoundTests {
             #expect(memory.devices(for: "com.google.Chrome") == ["Speakers"])
         }
 
+        /// N4: an idle app that follows the system output had the old output remembered. When the system output
+        /// changes, that memory goes, so the app follows the switch; an app on its own device keeps it.
+        @Test func systemOutputChangeDropsFollowers() {
+            var memory = AppOutputMemory()
+            _ = memory.observe(app: "com.google.Chrome", deviceUIDs: ["Headset"], hasProcesses: true)   // follows the system
+            _ = memory.observe(app: "com.hnc.Discord", deviceUIDs: ["Speakers"], hasProcesses: true)    // its own choice
+            memory.systemOutputChanged(from: "Headset")
+            #expect(memory.devices(for: "com.google.Chrome").isEmpty)
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Speakers"])
+            let chrome = memory.observe(app: "com.google.Chrome", deviceUIDs: [], hasProcesses: true)  // still idle
+            #expect(TapPlan.followedOutput(appDeviceUIDs: chrome, systemOutputUID: "Speakers",
+                                           availableOutputUIDs: ["Headset", "Speakers"]) == "Speakers")
+            memory.systemOutputChanged(from: nil)                     // no previous output: nothing to drop
+            #expect(memory.devices(for: "com.hnc.Discord") == ["Speakers"])
+        }
+
         /// A tap's aggregate stops doing IO once its app has been quiet for `idleDelay`, and only once per quiet
         /// spell; playing again re-arms it (the aggregate restarts itself with the app's next audio).
         @Test func tapPausesAfterIdleDelay() {
@@ -716,11 +946,235 @@ extension SoundTests {
             #expect(activity.update(isPlaying: false, now: at(100)) == nil)
             #expect(activity.nextCheck() == at(100 + TapActivity.idleDelay))
             #expect(activity.update(isPlaying: false, now: at(100 + TapActivity.idleDelay)) == .pause)
-            // A tap built while its app is quiet starts counting at once.
+            // N2: a tap built while its app is quiet is already waiting for audio (its own TapAutoStart start), so
+            // it counts as paused: no pause gets queued behind that start to fire on the first sound.
             var quiet = TapActivity(now: t0, isPlaying: false)
-            #expect(quiet.nextCheck() == at(TapActivity.idleDelay))
-            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == .pause)
+            #expect(quiet.isPaused)
+            #expect(quiet.nextCheck() == nil)
+            #expect(quiet.update(isPlaying: false, now: at(TapActivity.idleDelay)) == nil)
+            #expect(quiet.update(isPlaying: false, now: at(60)) == nil)
+            // Once it has played, the usual quiet spell applies.
+            #expect(quiet.update(isPlaying: true, now: at(61)) == nil)
+            #expect(!quiet.isPaused)
+            #expect(quiet.update(isPlaying: false, now: at(70)) == nil)
+            #expect(quiet.update(isPlaying: false, now: at(70 + TapActivity.idleDelay)) == .pause)
             #expect(TapActivity.idleDelay >= 2 && TapActivity.idleDelay <= 10)
+        }
+
+        /// N3: releasing a tap never waits for a start that may only return with the app's next sound. While the
+        /// tap's queue sits in such a start, the teardown runs from outside it; when the start returns afterwards,
+        /// the queue sees the tap is gone and stops there.
+        @Test func tapReleaseNeverWaitsForABlockedStart() {
+            var life = TapLifecycle()
+            let a1 = life.invalidate(); #expect(a1 == .onQueue)              // not waiting: the tap's own queue tears down
+            let a2 = life.beginWaitingStart(); #expect(!a2)                  // an invalidated tap never starts again
+            let a3 = life.claimTeardown(); #expect(a3)
+            let a4 = life.claimTeardown(); #expect(!a4)                      // exactly one teardown
+            let a5 = life.invalidate(); #expect(a5 == .alreadyDone)
+
+            var waiting = TapLifecycle()
+            let b1 = waiting.beginWaitingStart(); #expect(b1)
+            #expect(waiting.isWaitingForAudio)
+            let b2 = waiting.invalidate(); #expect(b2 == .fromOutside)       // blocked start: tear down from outside now
+            let b3 = waiting.claimTeardown(); #expect(b3)
+            let b4 = waiting.endWaitingStart(); #expect(!b4)                 // the start returned later: stop, report nothing
+            #expect(!waiting.isWaitingForAudio)
+
+            var normal = TapLifecycle()
+            let c1 = normal.beginWaitingStart(); #expect(c1)
+            let c2 = normal.endWaitingStart(); #expect(c2)                   // returned with the tap alive: carry on
+            let c3 = normal.invalidate(); #expect(c3 == .onQueue)
+
+            // A creation failure tears down by itself; a later release has nothing left to do.
+            var failed = TapLifecycle()
+            let d1 = failed.claimTeardown(); #expect(d1)
+            let d2 = failed.invalidate(); #expect(d2 == .alreadyDone)
+        }
+
+        /// R1: a replaced tap stays alive only until its successor starts, and never outlives its app's release.
+        /// Scenario 1: Chrome's paused tap A (Headset, 50 %) is replaced by B (Speakers), whose first start waits;
+        /// Chrome is reset to 100 % before B starts. Both A and B go: nothing is left to play Chrome at 50 %.
+        @Test func releasingAnAppReleasesItsReplacedTaps() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            let a = roster.started("A", for: "chrome"); #expect(a.isEmpty)
+            roster.install("B", for: "chrome")
+            #expect(roster.current(for: "chrome") == "B")
+            #expect(roster.retiring(for: "chrome") == ["A"])
+            let released = roster.release("chrome")
+            #expect(Set(released) == ["A", "B"])
+            #expect(roster.isEmpty)
+            // B never reports (released before it got going); a late report of either changes nothing.
+            let lateB = roster.started("B", for: "chrome"); #expect(lateB.isEmpty)
+            let lateA = roster.failed("A", for: "chrome"); #expect(lateA.isEmpty)
+        }
+
+        /// Scenario 2: released while B is still being built (no start yet): same rule, A (playing) goes with it.
+        @Test func releasingDuringCreationReleasesThePredecessor() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
+            roster.install("B", for: "chrome")                    // B is still being created
+            #expect(Set(roster.release("chrome")) == ["A", "B"])
+            #expect(roster.current(for: "chrome") == nil)
+            #expect(roster.retiring(for: "chrome").isEmpty)
+            // Other apps are untouched.
+            roster.install("X", for: "discord")
+            roster.install("C", for: "chrome")
+            #expect(roster.release("chrome") == ["C"])
+            #expect(roster.current(for: "discord") == "X")
+        }
+
+        /// Scenario 3: a chain A → B → C where C starts before B did. C's start releases every tap built before it, so A
+        /// (playing) can't keep playing alongside C; B, which never started, already went when C replaced it. A start
+        /// of B reported after C replaced it changes nothing. A B that did start before C was built is the one kept.
+        @Test func aStartReleasesEveryOlderTap() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
+            roster.install("B", for: "chrome")
+            let replaced = roster.install("C", for: "chrome")
+            #expect(replaced == ["B"])
+            #expect(roster.retiring(for: "chrome") == ["A"])
+            let lateB = roster.started("B", for: "chrome")
+            #expect(lateB.isEmpty)
+            let c = roster.started("C", for: "chrome")
+            #expect(c == ["A"])
+            #expect(roster.retiring(for: "chrome").isEmpty)
+            #expect(roster.current(for: "chrome") == "C")
+
+            var other = TapRoster<String>()
+            other.install("A", for: "chrome")
+            _ = other.started("A", for: "chrome")
+            other.install("B", for: "chrome")
+            let b = other.started("B", for: "chrome")
+            #expect(b == ["A"])
+            let none = other.install("C", for: "chrome")
+            #expect(none.isEmpty)
+            #expect(other.retiring(for: "chrome") == ["B"])
+            let c2 = other.started("C", for: "chrome")
+            #expect(c2 == ["B"])
+            #expect(Set(other.all) == ["C"])
+        }
+
+        /// A failed current tap goes with every tap built before it (the app then plays as usual, and no successor is
+        /// left to release them). `releaseAll` empties everything (feature off, quit).
+        @Test func aFailureReleasesItAndOlderTaps() {
+            var roster = TapRoster<String>()
+            roster.install("A", for: "chrome")
+            _ = roster.started("A", for: "chrome")
+            roster.install("B", for: "chrome")
+            #expect(Set(roster.failed("B", for: "chrome")) == ["A", "B"])
+            #expect(roster.isEmpty)
+            roster.install("C", for: "chrome")
+            roster.install("X", for: "discord")
+            #expect(Set(roster.releaseAll()) == ["C", "X"])
+            #expect(roster.isEmpty)
+            #expect(roster.currentByApp.isEmpty)
+        }
+
+        /// F3: a retiring tap that fails takes only itself. Chrome plays through A at 50 %; B replaced it, then C replaced
+        /// B while C is still being built; B fails. A keeps Chrome at 50 % until C starts, instead of Chrome being heard
+        /// unattenuated meanwhile. Nothing is stranded: C's start, C's failure or Chrome's release takes A.
+        @Test func aFailedRetiringTapReleasesOnlyItself() {
+            func chain() -> TapRoster<String> {
+                var roster = TapRoster<String>()
+                roster.install("A", for: "chrome")
+                _ = roster.started("A", for: "chrome")
+                roster.install("B", for: "chrome")
+                roster.install("C", for: "chrome")
+                return roster
+            }
+            var roster = chain()
+            let b = roster.failed("B", for: "chrome")
+            #expect(!b.contains("A"))
+            #expect(Set(roster.all) == ["A", "C"])
+            #expect(roster.current(for: "chrome") == "C")
+            let c = roster.started("C", for: "chrome")
+            #expect(c == ["A"])
+            #expect(roster.all == ["C"])
+            var failing = chain()
+            _ = failing.failed("B", for: "chrome")
+            let cFailed = failing.failed("C", for: "chrome")
+            #expect(Set(cFailed) == ["A", "C"])
+            #expect(failing.isEmpty)
+            var reset = chain()
+            _ = reset.failed("B", for: "chrome")
+            let released = reset.release("chrome")
+            #expect(Set(released) == ["A", "C"])
+            #expect(reset.isEmpty)
+        }
+
+        /// F2: a quiet app with a remembered setting, rebuilt again and again while none of its taps starts (AirPods
+        /// flapping between outputs, process-list churn). Each rebuild releases the replaced taps that never started:
+        /// they aren't playing, so that is silent, and they can't pile up, each holding a process tap, an aggregate and
+        /// a thread blocked in its start, to all start at the app's first sound at stale gains and devices. A tap that
+        /// has started (playing, or paused and re-armed) stays until its successor starts, but only the newest one.
+        @Test func rebuildsOfAQuietAppDoNotPileUp() {
+            var slack = TapRoster<Int>()
+            let first = slack.install(1, for: "slack")
+            #expect(first.isEmpty)
+            for serial in 2...20 {
+                let released = slack.install(serial, for: "slack")
+                #expect(released == [serial - 1])
+            }
+            #expect(slack.all == [20])
+            #expect(slack.retiring(for: "slack").isEmpty)
+
+            // Chrome played through A, then is rebuilt on and on while quiet: only A is kept, for when it plays again.
+            var chrome = TapRoster<String>()
+            chrome.install("A", for: "chrome")
+            _ = chrome.started("A", for: "chrome")
+            let b = chrome.install("B", for: "chrome")
+            #expect(b.isEmpty)                                       // A may be playing: it waits for B's start
+            let c = chrome.install("C", for: "chrome")
+            #expect(c == ["B"])                                      // B never started
+            let d = chrome.install("D", for: "chrome")
+            #expect(d == ["C"])
+            #expect(chrome.retiring(for: "chrome") == ["A"])
+            // Late reports from the released ones change nothing.
+            let lateB = chrome.started("B", for: "chrome")
+            let lateC = chrome.failed("C", for: "chrome")
+            #expect(lateB.isEmpty && lateC.isEmpty)
+            #expect(Set(chrome.all) == ["A", "D"])
+            // D starts: A goes. D is then the newest tap that started, and the one kept through the next rebuilds.
+            let dStarted = chrome.started("D", for: "chrome")
+            #expect(dStarted == ["A"])
+            let e = chrome.install("E", for: "chrome")
+            let f = chrome.install("F", for: "chrome")
+            #expect(e.isEmpty && f == ["E"])
+            #expect(chrome.retiring(for: "chrome") == ["D"])
+            // The kept tap failing takes only itself; the app's release takes the rest.
+            let dFailed = chrome.failed("D", for: "chrome")
+            #expect(dFailed == ["D"])
+            #expect(chrome.release("chrome") == ["F"])
+            #expect(chrome.isEmpty)
+
+            // Any mix of rebuilds, starts and failures: at most one replaced tap stays, and only one that started.
+            var roster = TapRoster<Int>()
+            var started: Set<Int> = []
+            var seed: UInt64 = 7
+            func next(_ bound: Int) -> Int {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return Int((seed >> 33) % UInt64(bound))
+            }
+            var serial = 0
+            for _ in 0..<500 {
+                switch next(4) {
+                case 0, 1:
+                    serial += 1
+                    _ = roster.install(serial, for: "app")
+                case 2:
+                    let tap = next(serial + 1)
+                    if roster.all.contains(tap) { started.insert(tap) }
+                    _ = roster.started(tap, for: "app")
+                default:
+                    _ = roster.failed(next(serial + 1), for: "app")
+                }
+                let retiring = roster.retiring(for: "app")
+                #expect(retiring.count <= 1)
+                #expect(retiring.allSatisfy(started.contains))
+            }
         }
 
         /// No output device at all: nothing to play on, so never a tap (it would only mute the app).

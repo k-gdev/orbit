@@ -38,6 +38,86 @@ public enum MicMutePresentation: Equatable, Sendable {
     case mutedElsewhere
 }
 
+/// Keeps Orbit's own mute and unmute writes from being misread while they land.
+///
+/// `AudioObjectSetPropertyData` may take effect asynchronously, so a reading taken right after one of Orbit's
+/// writes can still show the device as it was: after a mute, "unmuted" (which must not be taken for the user
+/// unmuting elsewhere, or Orbit would forget its mute); after an unmute, "muted" (which must not flash
+/// "Muted outside Orbit", or make a quick second press unmute again). After `wrote(_:at:)`, a reading of that
+/// device that doesn't show the write yet is projected to what the write will leave and marked untrusted
+/// (nothing may be concluded from it), until a reading confirms the write or `timeout` passes (then the write
+/// evidently didn't take, and the device's own state shows again). Each write waits on its own: one to another
+/// device (the old mic put back as the input moves, a reconnected mic's pending undo) never ends the wait for the
+/// current input, and still covers its device if the input switches straight back to it.
+public struct MicWriteConfirmation: Equatable, Sendable {
+    public static let timeout: TimeInterval = 2
+
+    /// One write of Orbit's that hasn't shown yet, and when it was made.
+    private struct Written: Equatable, Sendable {
+        var action: MicMuteAction
+        var at: Date
+    }
+
+    private var written: [Written] = []
+
+    public init() {}
+
+    /// A write of Orbit's is waiting to show up.
+    public var isWaiting: Bool { !written.isEmpty }
+
+    /// Orbit just wrote `actions`. Each replaces an earlier write of the same control on the same device (the device
+    /// will show the later one); other writes keep waiting. Writing nothing changes nothing: a write still landing
+    /// keeps its wait (ending it would let that write's late arrival be taken for a change made outside Orbit).
+    public mutating func wrote(_ actions: [MicMuteAction], at now: Date) {
+        for action in actions {
+            written.removeAll { Self.sameControl($0.action, action) }
+            written.append(Written(action: action, at: now))
+        }
+    }
+
+    /// A fresh reading as it should be shown, and whether it may be taken at face value (fed to
+    /// `MicMuteState.deviceChanged`). Readings of other devices pass through untouched.
+    public mutating func review(_ reading: MicDeviceReading, now: Date) -> (reading: MicDeviceReading, trusted: Bool) {
+        // A write that hasn't shown within the timeout evidently didn't take. Dropped on every review, so a write to a
+        // mic that isn't read again doesn't wait forever.
+        written.removeAll { now.timeIntervalSince($0.at) >= Self.timeout }
+        let mine = written.filter { Self.device(of: $0.action) == reading.deviceUID }
+        guard !mine.isEmpty else { return (reading, true) }
+        if mine.allSatisfy({ Self.shows($0.action, in: reading) }) {
+            written.removeAll { Self.device(of: $0.action) == reading.deviceUID }
+            return (reading, true)
+        }
+        var projected = reading
+        for entry in mine {
+            switch entry.action {
+            case .setMute(_, let muted): projected.isMuted = muted
+            case .setVolume(_, let volume): projected.volume = volume
+            }
+        }
+        return (projected, false)
+    }
+
+    private static func device(of action: MicMuteAction) -> String {
+        switch action {
+        case .setMute(let uid, _), .setVolume(let uid, _): uid
+        }
+    }
+
+    private static func sameControl(_ a: MicMuteAction, _ b: MicMuteAction) -> Bool {
+        switch (a, b) {
+        case (.setMute(let x, _), .setMute(let y, _)), (.setVolume(let x, _), .setVolume(let y, _)): x == y
+        default: false
+        }
+    }
+
+    private static func shows(_ action: MicMuteAction, in reading: MicDeviceReading) -> Bool {
+        switch action {
+        case .setMute(_, let muted): reading.isMuted == muted
+        case .setVolume(_, let volume): reading.volume.map { abs($0 - volume) < 0.01 } ?? false
+        }
+    }
+}
+
 /// The logic of the shared mic mute (Sound and Controls, spec §8.3), free of Core Audio so it can be tested.
 ///
 /// Muting uses the device's mute control when it has one, otherwise turns its input volume to 0. Either way
@@ -154,6 +234,28 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         return isMuted
     }
 
+    // MARK: Readings taken while Orbit's own writes land
+
+    /// `mute(_:)` for a fresh reading of the device, taken while one of Orbit's own writes may still be landing: the
+    /// mute is built from the device as that write will leave it (`MicWriteConfirmation.review`), not from the stale
+    /// reading. Right after Orbit's unmute the device can still read muted; muting from that would record "muted
+    /// before Orbit" and write nothing, and the unmute landing afterwards would look like the user unmuting
+    /// elsewhere, leaving the mic live although the last press was a mute.
+    public mutating func mute(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
+                              now: Date) -> [MicMuteAction]? {
+        mute(confirmation.review(reading, now: now).reading)
+    }
+
+    /// A fresh reading of the input device, reviewed against Orbit's own writes still landing: the reading to show,
+    /// and whether it shows that the user unmuted Orbit's mute outside Orbit (Orbit's mute is then over, with nothing
+    /// to restore). Only a reading that may be taken at face value can say so.
+    public mutating func observe(_ reading: MicDeviceReading, confirming confirmation: inout MicWriteConfirmation,
+                                 now: Date) -> (shown: MicDeviceReading, unmutedOutside: Bool) {
+        let reviewed = confirmation.review(reading, now: now)
+        guard reviewed.trusted, isMuted else { return (reviewed.reading, false) }
+        return (reviewed.reading, !deviceChanged(reviewed.reading))
+    }
+
     // MARK: Pending records
 
     /// For each pending record whose device is connected (`reading` returns it): the actions that undo
@@ -202,6 +304,16 @@ public struct MicMuteState: Codable, Equatable, Sendable {
         if let applied, reading == nil || reading?.deviceUID == applied.deviceUID { return .mutedByOrbit }
         guard let reading, reading.canSetMute || reading.canSetVolume else { return .unavailable }
         return reading.canSetMute && reading.isMuted ? .mutedElsewhere : .unmuted
+    }
+
+    /// Whether `reading` shows Orbit's mute in effect on its device: the mute control on, or (volume mute) the
+    /// volume at 0. False for another device, or when Orbit's mute is not in effect.
+    public func reflects(_ reading: MicDeviceReading) -> Bool {
+        guard let applied, applied.deviceUID == reading.deviceUID else { return false }
+        switch applied.method {
+        case .muteFlag: return reading.isMuted
+        case .volume: return (reading.volume ?? 1) <= Self.silent
+        }
     }
 
     /// The user asked to unmute a mic that was muted outside Orbit: switch its mute control off (a direct user

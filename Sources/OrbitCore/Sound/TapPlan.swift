@@ -72,8 +72,11 @@ public struct TapActivity: Equatable, Sendable {
     /// When the app went quiet; nil while it plays.
     private var quietSince: Date?
 
+    /// A tap built while its app is quiet counts as paused from the start: its first start already waits for
+    /// the app's audio (TapAutoStart), so a pause queued behind it would only fire on the first sound.
     public init(now: Date, isPlaying: Bool) {
         quietSince = isPlaying ? nil : now
+        isPaused = !isPlaying
     }
 
     /// Feeds whether the app is playing now (`kAudioProcessPropertyIsRunningOutput`). Returns `.pause` once per
@@ -94,6 +97,162 @@ public struct TapActivity: Equatable, Sendable {
     public func nextCheck() -> Date? {
         guard !isPaused, let since = quietSince else { return nil }
         return since.addingTimeInterval(Self.idleDelay)
+    }
+}
+
+/// Who tears a tap down, and when, so releasing it never waits for a start that may block.
+///
+/// With `kAudioAggregateDeviceTapAutoStartKey`, `AudioDeviceStart` may only return with the app's next audio.
+/// A tap's HAL work runs on its own serial queue, so a release queued there could sit behind such a start
+/// indefinitely. Instead: while the queue is inside a waiting start, a release tears down from outside the
+/// queue at once; when the start returns afterwards, the queue sees the tap is gone and stops. Exactly one
+/// party performs the teardown (`claimTeardown`). The app keeps this behind a lock.
+public struct TapLifecycle: Equatable, Sendable {
+    public enum Teardown: Equatable, Sendable {
+        /// The queue is free (or will be soon): tear down on it.
+        case onQueue
+        /// The queue is inside a start that may block: tear down from outside it now.
+        case fromOutside
+        /// Already torn down (a creation failure, or a second release).
+        case alreadyDone
+    }
+
+    public private(set) var isWaitingForAudio = false
+    public private(set) var isInvalidated = false
+    public private(set) var isTornDown = false
+
+    public init() {}
+
+    /// The queue is about to call a start that may block until the app's next sound. False when the tap was
+    /// released already: don't start.
+    public mutating func beginWaitingStart() -> Bool {
+        guard !isInvalidated, !isTornDown else { return false }
+        isWaitingForAudio = true
+        return true
+    }
+
+    /// That start returned. True when the tap is still alive (carry on); false when it was released meanwhile
+    /// (stop there and report nothing: the teardown has happened or is happening elsewhere).
+    public mutating func endWaitingStart() -> Bool {
+        isWaitingForAudio = false
+        return !isInvalidated && !isTornDown
+    }
+
+    /// The tap is released. Where its teardown must run.
+    public mutating func invalidate() -> Teardown {
+        guard !isTornDown else { return .alreadyDone }
+        isInvalidated = true
+        return isWaitingForAudio ? .fromOutside : .onQueue
+    }
+
+    /// True exactly once: whoever gets it performs the HAL teardown.
+    public mutating func claimTeardown() -> Bool {
+        guard !isTornDown else { return false }
+        isTornDown = true
+        return true
+    }
+}
+
+/// Which taps each app has: its current one, and the ones it replaced that are still alive.
+///
+/// A replacement tap is started before the one it replaces is released (so the app is never heard
+/// unattenuated in between); the old one "retires" until its successor has started. The rules here make sure
+/// no retired tap outlives that: a start releases every tap built before it, a failure of the current tap
+/// releases it and every older one (a failed retiring tap takes only itself), and releasing an app releases its
+/// current tap and all its predecessors (a tap released before it got going reports nothing, so its
+/// predecessors can't wait for its report). Only a tap that has started can be playing the app, so a new tap
+/// keeps just the newest such predecessor and releases the others at once: a quiet app rebuilt again and again
+/// (an output flapping, its processes churning) never piles up replaced taps. Pure bookkeeping; the engine
+/// invalidates what the calls return.
+public struct TapRoster<ID: Hashable & Sendable>: Equatable, Sendable {
+    /// Each app's current tap.
+    public private(set) var currentByApp: [String: ID] = [:]
+    /// Each app's replaced taps still alive, oldest first (after an install, at most one: one that has started).
+    private var retiringByApp: [String: [ID]] = [:]
+    /// The live taps that have started (their IO has run, so they may be playing, or paused and re-armed).
+    private var startedTaps: Set<ID> = []
+
+    public init() {}
+
+    public func current(for app: String) -> ID? { currentByApp[app] }
+    public func retiring(for app: String) -> [ID] { retiringByApp[app] ?? [] }
+    /// Every tap still alive.
+    public var all: [ID] { Array(currentByApp.values) + retiringByApp.values.flatMap { $0 } }
+    public var isEmpty: Bool { currentByApp.isEmpty && retiringByApp.isEmpty }
+
+    /// `tap` becomes the app's current tap. Of the taps it replaces, only the newest one that has started stays
+    /// (it may be playing the app at its setting) until `tap` starts. The others never started: their start still
+    /// waits for the app's audio, so they aren't playing and releasing them is silent. Kept, each would hold a
+    /// process tap, an aggregate and a thread blocked in its start, and they would all start at the app's first
+    /// sound at stale gains and devices. Returns those to release.
+    @discardableResult
+    public mutating func install(_ tap: ID, for app: String) -> [ID] {
+        var replaced = retiringByApp.removeValue(forKey: app) ?? []
+        if let old = currentByApp[app] { replaced.append(old) }
+        currentByApp[app] = tap
+        let kept = replaced.last(where: startedTaps.contains)
+        if let kept { retiringByApp[app] = [kept] }
+        return forget(replaced.filter { $0 != kept })
+    }
+
+    /// `tap` has started: every tap of the app built before it is done. Returns those to release.
+    public mutating func started(_ tap: ID, for app: String) -> [ID] {
+        if currentByApp[app] == tap {
+            startedTaps.insert(tap)
+            return removeRetiring(app, upTo: nil)
+        }
+        guard let index = retiringByApp[app]?.firstIndex(of: tap) else { return [] }
+        startedTaps.insert(tap)
+        return removeRetiring(app, upTo: index)
+    }
+
+    /// `tap` failed (or stopped working). Returns those to release:
+    /// - the current tap: it and every tap of the app built before it (the app plays as usual meanwhile, and no
+    ///   successor is left whose start would release them);
+    /// - a retiring tap: only itself. An older one may still be playing the app at its setting, and goes when the
+    ///   current tap starts or fails, or the app is released.
+    public mutating func failed(_ tap: ID, for app: String) -> [ID] {
+        if currentByApp[app] == tap {
+            currentByApp[app] = nil
+            return removeRetiring(app, upTo: nil) + forget([tap])
+        }
+        guard var list = retiringByApp[app], let index = list.firstIndex(of: tap) else { return [] }
+        list.remove(at: index)
+        retiringByApp[app] = list.isEmpty ? nil : list
+        return forget([tap])
+    }
+
+    /// The app needs no tap any more: its current tap and every predecessor. Returns those to release.
+    public mutating func release(_ app: String) -> [ID] {
+        var released: [ID] = []
+        if let current = currentByApp.removeValue(forKey: app) { released.append(current) }
+        released += retiringByApp.removeValue(forKey: app) ?? []
+        return forget(released)
+    }
+
+    /// Everything (the feature is turned off, Orbit quits).
+    public mutating func releaseAll() -> [ID] {
+        let everything = all
+        currentByApp = [:]
+        retiringByApp = [:]
+        startedTaps = []
+        return everything
+    }
+
+    /// Removes and returns the app's retiring taps before index `end` (all of them when nil).
+    private mutating func removeRetiring(_ app: String, upTo end: Int?) -> [ID] {
+        guard var list = retiringByApp[app] else { return [] }
+        let count = min(end ?? list.count, list.count)
+        let removed = Array(list.prefix(count))
+        list.removeFirst(count)
+        retiringByApp[app] = list.isEmpty ? nil : list
+        return forget(removed)
+    }
+
+    /// Released taps are no longer tracked as started; returns them.
+    private mutating func forget(_ released: [ID]) -> [ID] {
+        released.forEach { startedTaps.remove($0) }
+        return released
     }
 }
 
@@ -125,5 +284,13 @@ public struct AppOutputMemory: Equatable, Sendable {
     /// Forgets every app not in `apps` (apps whose processes went away).
     public mutating func forgetApps(notIn apps: Set<String>) {
         remembered = remembered.filter { apps.contains($0.key) }
+    }
+
+    /// The system output changed from `old`. Apps remembered on exactly that device were following the system
+    /// output (macOS moves them along), so their memory goes and an idle one follows the switch; apps on a
+    /// device of their own keep it.
+    public mutating func systemOutputChanged(from old: String?) {
+        guard let old else { return }
+        remembered = remembered.filter { !$0.value.allSatisfy { $0 == old } }
     }
 }
