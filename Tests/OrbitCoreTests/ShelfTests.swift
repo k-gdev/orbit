@@ -202,4 +202,85 @@ import Testing
         #expect(removed == [gone])
         #expect(items.urls == [kept])
     }
+
+    // MARK: Store
+
+    /// A throwaway folder with a few real files, and a store whose folder does not exist yet.
+    private struct StoreFixture {
+        let root = Fixtures.tempDir()
+        var storeDirectory: URL { root.appending(path: "Shelf", directoryHint: .isDirectory) }
+        var store: ShelfStore { ShelfStore(directory: storeDirectory) }
+        func file(_ name: String, _ text: String = "x") -> URL { Fixtures.file(name, text, in: root) }
+        func remove() { try? FileManager.default.removeItem(at: root) }
+    }
+
+    @Test func storeRoundTrip() throws {
+        let fixture = StoreFixture()
+        defer { fixture.remove() }
+        let one = fixture.file("one.txt")
+        let two = fixture.file("two with spaces.png")
+        let folder = fixture.root.appending(path: "a folder", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+
+        let store = fixture.store
+        // Nothing saved yet: an empty shelf, and loading did not create anything.
+        #expect(store.load().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fixture.storeDirectory.path))
+
+        try store.save(ShelfItems([one, two, folder]))
+        // A new store on the same folder (a relaunch) sees the same items in the same order.
+        let loaded = ShelfStore(directory: fixture.storeDirectory).load()
+        #expect(loaded.urls.map(\.path) == [one, two, folder].map { $0.standardizedFileURL.path })
+
+        // The file is JSON: a path and bookmark data per item, with no security scope involved.
+        let data = try Data(contentsOf: store.fileURL)
+        let root = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let entries = try #require(root["items"] as? [[String: Any]])
+        #expect(entries.count == 3)
+        #expect(entries.allSatisfy { ($0["path"] as? String)?.hasPrefix("/") == true })
+        #expect(entries.allSatisfy { ($0["bookmark"] as? String)?.isEmpty == false })
+
+        // Saving an empty shelf empties it.
+        try store.save(ShelfItems())
+        #expect(ShelfStore(directory: fixture.storeDirectory).load().isEmpty)
+    }
+
+    @Test func storeFindsAMovedFileThroughItsBookmark() throws {
+        let fixture = StoreFixture()
+        defer { fixture.remove() }
+        let original = fixture.file("before.txt", "hello")
+        try fixture.store.save(ShelfItems([original]))
+        let renamed = fixture.root.appending(path: "after.txt", directoryHint: .notDirectory)
+        try FileManager.default.moveItem(at: original, to: renamed)
+
+        let loaded = ShelfStore(directory: fixture.storeDirectory).load()
+        #expect(loaded.count == 1)
+        // /var and /private/var are the same place; compare what the files really are.
+        #expect(loaded.urls.first?.resolvingSymlinksInPath().path == renamed.resolvingSymlinksInPath().path)
+    }
+
+    @Test func storeKeepsAMissingFileByPath() throws {
+        let fixture = StoreFixture()
+        defer { fixture.remove() }
+        let gone = fixture.file("gone.txt")
+        try fixture.store.save(ShelfItems([gone]))
+        try FileManager.default.removeItem(at: gone)
+        // Not found by path or bookmark: still listed (at its old path) so the caller decides to prune it.
+        var loaded = ShelfStore(directory: fixture.storeDirectory).load()
+        #expect(loaded.urls.map(\.path) == [gone.standardizedFileURL.path])
+        let removed = loaded.removeMissing()
+        #expect(removed.count == 1)
+        #expect(loaded.isEmpty)
+    }
+
+    @Test func storeSurvivesUnreadableData() throws {
+        let fixture = StoreFixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.storeDirectory, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: fixture.store.fileURL)
+        #expect(fixture.store.load().isEmpty)
+        // A shelf file written by something that doesn't know the format is ignored, not a crash.
+        try Data(#"{"items": [{"nope": 1}]}"#.utf8).write(to: fixture.store.fileURL, options: .atomic)
+        #expect(fixture.store.load().isEmpty)
+    }
 }
