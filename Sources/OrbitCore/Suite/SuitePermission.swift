@@ -23,6 +23,22 @@ public enum SuitePermission: String, CaseIterable, Sendable {
         }
         return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
     }
+
+    /// The first macOS that has this permission (and its System Settings pane), or nil when every
+    /// supported system does. System Audio Recording arrived with process taps in 14.2.
+    public var minimumSystemVersion: OperatingSystemVersion? {
+        switch self {
+        case .systemAudioRecording: OperatingSystemVersion(majorVersion: 14, minorVersion: 2, patchVersion: 0)
+        case .accessibility, .screenRecording: nil
+        }
+    }
+
+    /// Whether the permission exists on `version` (pass `ProcessInfo.processInfo.operatingSystemVersion`).
+    public func isAvailable(on version: OperatingSystemVersion) -> Bool {
+        guard let minimum = minimumSystemVersion else { return true }
+        return (version.majorVersion, version.minorVersion, version.patchVersion)
+            >= (minimum.majorVersion, minimum.minorVersion, minimum.patchVersion)
+    }
 }
 
 /// How one feature uses one permission.

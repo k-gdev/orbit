@@ -57,13 +57,25 @@ final class FeatureRegistry: ObservableObject {
     }
 
     /// Turns `id` on or off: persists it, then on → asks for its `requestOnEnable` permissions that are
-    /// not granted yet and starts it; off → stops it.
+    /// not granted yet and starts it; off → stops it. Calling it with the state the feature is already in
+    /// asks for nothing and opens nothing; it only makes sure the feature's running state matches. A
+    /// feature that can't fully work on this macOS (`unavailableReason`) and permissions this macOS
+    /// doesn't have are never requested.
     func setEnabled(_ id: FeatureID, _ on: Bool) {
+        guard isEnabled(id) != on else {
+            if on { start(id) } else { stop(id) }
+            updateMicMute()
+            return
+        }
         context.suite.setEnabled(id, on)
         if on {
             context.permissions.refresh()
-            for use in id.permissions where use.requestOnEnable && context.permissions.status(use.permission) != .granted {
-                context.permissions.request(use.permission)
+            if id.unavailableReason == nil {
+                for use in id.permissions where use.requestOnEnable
+                    && context.permissions.isAvailable(use.permission)
+                    && context.permissions.status(use.permission) != .granted {
+                    context.permissions.request(use.permission)
+                }
             }
             start(id)
         } else {

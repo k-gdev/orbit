@@ -48,6 +48,9 @@ final class MenuBarPanelController {
 
     func show(from button: NSStatusBarButton) {
         anchor = button
+        // The panel never activates Orbit, so grants made in System Settings since the last look are
+        // picked up here, before the visible feature's panelDidAppear().
+        registry.context.permissions.refresh()
         let screen = button.window?.screen ?? NSScreen.main
         model.contentMaxHeight = Self.contentMaxHeight(for: screen)
         model.update(tabs: registry.enabledInOrder, preferred: registry.context.suite.lastTab)

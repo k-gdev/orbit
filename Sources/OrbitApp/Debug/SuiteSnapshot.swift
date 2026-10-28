@@ -177,18 +177,12 @@ enum SuiteSnapshot {
         }
     }
 
-    /// A defaults suite that lives only for `body`, so snapshots never read or write the real settings.
-    /// Its plist sits in a temp folder (an absolute-path suite name), never in ~/Library/Preferences.
+    /// A defaults suite that lives only for `body` (`SnapshotFixtures.scopedDefaults`: a temp folder, never
+    /// ~/Library/Preferences), so snapshots never read or write the real settings.
     @MainActor
     private static func withThrowawayDefaults<T>(_ body: (UserDefaults) throws -> T) throws -> T {
-        let folder = FileManager.default.temporaryDirectory.appending(path: "orbit-snapshot-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-        let name = folder.appending(path: "prefs", directoryHint: .notDirectory).path
-        guard let defaults = UserDefaults(suiteName: name) else { throw SnapshotRenderer.Failure(description: "no defaults suite") }
-        defer {
-            defaults.removePersistentDomain(forName: name)
-            try? FileManager.default.removeItem(at: folder)
-        }
+        let (defaults, cleanup) = SnapshotFixtures.scopedDefaults()
+        defer { cleanup() }
         return try body(defaults)
     }
 }

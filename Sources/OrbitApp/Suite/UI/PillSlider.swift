@@ -11,7 +11,8 @@ import SwiftUI
 ///   the fill reaches it, and the filled part of that zone is tinted.
 /// - Dragging anywhere on the pill sets the value (the fill's end follows the pointer); a mouse wheel
 ///   nudges it by `scale.wheelStep`; a sideways trackpad swipe moves it continuously (vertical trackpad
-///   scrolling is left to the enclosing scroll view). VoiceOver increments and decrements it.
+///   scrolling is left to the enclosing scroll view, and momentum after lift-off is ignored). Scrolls only
+///   count while the pointer is over this pill in a visible window. VoiceOver increments and decrements it.
 /// - `onLeadingTap` makes the leading content a button (for example click the app icon to mute).
 /// - `onEditingEnded` fires when a drag ends or a burst of scrolling settles: commit expensive work
 ///   (DDC writes, persisting) there and apply cheap previews in the binding's setter.
@@ -67,6 +68,7 @@ struct PillSlider: View {
             let fillWidth = CGFloat(track.fillWidth(forFraction: scale.fraction(for: value)))
             let boostX = scale.hasBoost ? CGFloat(track.fillWidth(forFraction: scale.boostStartFraction)) : width
             pill(width: width, fillWidth: fillWidth, boostX: boostX)
+                .background(PillWindowProbe(state: wheel))
                 .contentShape(Capsule())
                 .gesture(dragGesture(track))
                 .onHover { inside in
@@ -173,7 +175,10 @@ struct PillSlider: View {
             .onEnded { _ in onEditingEnded?() }
     }
 
-    /// Scroll input arrives through a local monitor, installed only while the pointer is over this pill.
+    /// Scroll input arrives through a local monitor, installed while the pointer is over this pill. Hover
+    /// exit and disappearance remove it; because neither is guaranteed when a window is ordered out under
+    /// the pointer, `handleScroll` also checks every event against the pill's real window and frame and
+    /// lets anything else through, and an orphaned monitor (pill view gone) removes itself.
     private func installWheelMonitor(_ track: PillTrack) {
         removeWheelMonitor()
         let wheel = self.wheel
@@ -190,6 +195,14 @@ struct PillSlider: View {
 
     /// Returns true when the event moved the value (and is consumed).
     private func handleScroll(_ event: NSEvent, track: PillTrack) -> Bool {
+        guard wheel.isOverPill(event) else {
+            // Elsewhere (the pointer left without a hover-exit, or the window was ordered out): pass the
+            // event on untouched. A monitor whose pill view no longer exists removes itself.
+            if wheel.probe == nil { removeWheelMonitor() }
+            return false
+        }
+        // Trackpad inertia after the fingers lift belongs to whatever scrolls, never to the pill.
+        guard event.momentumPhase.isEmpty else { return false }
         if !event.hasPreciseScrollingDeltas {
             // Mouse wheel: one notch per event, away from you = up.
             let up = event.isDirectionInvertedFromDevice ? -event.scrollingDeltaY : event.scrollingDeltaY
@@ -227,4 +240,32 @@ private final class WheelState {
     var monitor: Any?
     var residual: Double = 0
     var settle: DispatchWorkItem?
+    /// An empty AppKit view laid out exactly over the pill (see `PillWindowProbe`).
+    weak var probe: NSView?
+
+    /// Whether `event` happened over the pill, in the pill's own window, while that window is on screen.
+    func isOverPill(_ event: NSEvent) -> Bool {
+        guard let probe, let window = probe.window, event.window === window, window.isVisible else { return false }
+        return probe.convert(probe.bounds, to: nil).contains(event.locationInWindow)
+    }
+}
+
+/// Places an invisible, hit-test-transparent `NSView` behind the pill so scroll events can be checked
+/// against the pill's real window and frame.
+private struct PillWindowProbe: NSViewRepresentable {
+    let state: WheelState
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ProbeView()
+        state.probe = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        state.probe = nsView
+    }
+
+    private final class ProbeView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
 }

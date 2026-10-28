@@ -30,7 +30,20 @@ import SwiftUI
 //   to the screen (see `managesOwnScrolling` to opt out) and supplies `\.panelContentMaxHeight`.
 // - `snapshotViews()` returns the same panel and settings views over FIXTURE data, for
 //   `Orbit --snapshot-panel <id>` / `--snapshot-settings-page <id>`: no hardware access, no
-//   permissions, no real `UserDefaults` (use `UserDefaults(suiteName:)` throwaways), no file writes.
+//   permissions, no real `UserDefaults` and nothing written outside a temp folder. Build fixture
+//   settings on `SnapshotFixtures.defaults()` and put fixture files in `SnapshotFixtures.directory()`;
+//   never `UserDefaults(suiteName: "name")`, which leaves a plist in ~/Library/Preferences.
+//
+// Permissions:
+// - `start()` may run before the permissions it needs are granted: turning a feature on fires
+//   `PermissionCenter.request` for its `requestOnEnable` permissions and starts it straight away, and
+//   the user may grant (or never grant) later. Observe `context.permissions.$statuses` (or re-check
+//   `context.permissions.status(_:)` in `panelDidAppear()`, which follows a fresh refresh) and begin
+//   permission-gated work only once the status is `.granted`; until then show what's missing with a
+//   button to `context.permissions.openSettings(_:)`.
+// - Never prompt yourself (no direct `AXIsProcessTrustedWithOptions`, `CGRequestScreenCaptureAccess`,
+//   `SCShareableContent` probes that prompt, ...): requests go through `context.permissions.request(_:)`,
+//   and only in response to something the user did.
 //
 // Persisted data: `UserDefaults` keys prefixed with the feature's raw id (`sound.`, `displays.`, ...)
 // through a `<Name>Settings: ObservableObject` in OrbitCore built on `context.defaults`; files under

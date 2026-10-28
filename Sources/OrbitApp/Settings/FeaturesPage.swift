@@ -52,7 +52,8 @@ struct FeatureCard: View {
             if !feature.permissions.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(feature.permissions, id: \.permission) { use in
-                        PermissionRow(use: use, status: permissions.status(use.permission)) {
+                        PermissionRow(use: use, status: permissions.status(use.permission),
+                                      unavailableReason: use.permission.unavailableReason) {
                             permissions.openSettings(use.permission)
                         }
                     }
@@ -85,7 +86,16 @@ struct FeatureIcon: View {
 struct PermissionRow: View {
     let use: PermissionUse
     let status: PermissionStatus
+    /// Set when this macOS doesn't have the permission: shown instead of the status and button.
+    var unavailableReason: String?
     let openSettings: () -> Void
+
+    init(use: PermissionUse, status: PermissionStatus, unavailableReason: String? = nil, openSettings: @escaping () -> Void) {
+        self.use = use
+        self.status = status
+        self.unavailableReason = unavailableReason
+        self.openSettings = openSettings
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -102,9 +112,13 @@ struct PermissionRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            PermissionBadge(status: status)
-            Button("Open System Settings", action: openSettings)
-                .controlSize(.small)
+            if let unavailableReason {
+                Label(unavailableReason, systemImage: "minus.circle").foregroundStyle(.secondary).font(.caption)
+            } else {
+                PermissionBadge(status: status)
+                Button("Open System Settings", action: openSettings)
+                    .controlSize(.small)
+            }
         }
     }
 }
@@ -132,7 +146,7 @@ extension FeatureID {
         switch self {
         case .sound:
             if #available(macOS 14.2, *) { return nil }
-            return "Per-app volume and output need macOS 14.2 or later; the mic mute shortcut still works."
+            return "Per-app volume and output need macOS 14.2 or later, so Orbit won't ask for System Audio Recording here. The mic mute shortcut still works."
         default:
             return nil
         }

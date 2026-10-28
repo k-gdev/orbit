@@ -25,10 +25,14 @@ final class PermissionCenter: ObservableObject {
     private var pollTimer: Timer?
     private var pollDeadline = Date.distantPast
     private let readsLive: Bool
+    /// Remembers which permissions Orbit has asked for before (macOS prompts only the first time).
+    private let defaults: UserDefaults
 
-    /// `live: false` (snapshots) never touches TCC: every status is `fixed`.
-    init(live: Bool = true, fixed: [SuitePermission: PermissionStatus] = [:]) {
+    /// `live: false` (snapshots) never touches TCC: every status is `fixed`. `defaults` records which
+    /// permissions have been requested before (key `suite.permissionAsked.<permission>`).
+    init(live: Bool = true, fixed: [SuitePermission: PermissionStatus] = [:], defaults: UserDefaults = .standard) {
         readsLive = live
+        self.defaults = defaults
         guard live else {
             statuses = Dictionary(uniqueKeysWithValues: SuitePermission.allCases.map { ($0, fixed[$0] ?? .notGranted) })
             return
@@ -44,6 +48,11 @@ final class PermissionCenter: ObservableObject {
         statuses[permission] ?? .unknown
     }
 
+    /// Whether this macOS has the permission at all (System Audio Recording needs 14.2).
+    func isAvailable(_ permission: SuitePermission) -> Bool {
+        permission.isAvailableOnThisMac
+    }
+
     /// Re-reads every status. Never prompts.
     func refresh() {
         guard readsLive else { return }
@@ -56,14 +65,23 @@ final class PermissionCenter: ObservableObject {
     /// System Settings, so this also opens the right pane when the prompt can't appear again).
     func request(_ permission: SuitePermission) {
         guard readsLive else { return }
-        Log.info("requesting permission: \(permission.rawValue)")
+        guard permission.isAvailableOnThisMac else {
+            Log.info("not requesting \(permission.rawValue): \(permission.unavailableReason ?? "unavailable")")
+            return
+        }
+        let askedKey = "suite.permissionAsked.\(permission.rawValue)"
+        let askedBefore = defaults.bool(forKey: askedKey)
+        defaults.set(true, forKey: askedKey)
+        Log.info("requesting permission: \(permission.rawValue)\(askedBefore ? " (asked before)" : "")")
         switch permission {
         case .accessibility:
+            // Its prompt offers Open System Settings itself, every time access is missing.
             let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
         case .screenRecording:
-            if !CGRequestScreenCaptureAccess() && Self.read(.screenRecording) != .granted {
-                // macOS shows its prompt only once per app; after that, the pane is the only route.
+            // The first request shows macOS's prompt and returns false while it is up, so the pane opens
+            // only when this permission was requested before (macOS won't prompt a second time).
+            if !CGRequestScreenCaptureAccess() && askedBefore && Self.read(.screenRecording) != .granted {
                 openSettingsLater(permission)
             }
         case .systemAudioRecording:
@@ -77,8 +95,9 @@ final class PermissionCenter: ObservableObject {
         pollAfterRequest()
     }
 
-    /// Opens System Settings at this permission's list.
+    /// Opens System Settings at this permission's list (nothing when this macOS doesn't have it).
     func openSettings(_ permission: SuitePermission) {
+        guard permission.isAvailableOnThisMac else { return }
         NSWorkspace.shared.open(permission.settingsURL)
         pollAfterRequest()
     }
@@ -110,6 +129,17 @@ final class PermissionCenter: ObservableObject {
         case .screenRecording: CGPreflightScreenCaptureAccess() ? .granted : .notGranted
         case .systemAudioRecording: AudioCaptureTCC.preflight()
         }
+    }
+}
+
+extension SuitePermission {
+    /// Whether the running macOS has this permission (and its System Settings pane).
+    var isAvailableOnThisMac: Bool { isAvailable(on: ProcessInfo.processInfo.operatingSystemVersion) }
+
+    /// Why the permission can't be granted on this Mac, or nil.
+    var unavailableReason: String? {
+        guard !isAvailableOnThisMac, let v = minimumSystemVersion else { return nil }
+        return "Needs macOS \(v.majorVersion).\(v.minorVersion) or later"
     }
 }
 

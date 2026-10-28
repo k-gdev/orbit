@@ -40,6 +40,22 @@ import Testing
         #expect(SuitePermission.allCases.allSatisfy { !$0.title.isEmpty })
     }
 
+    /// Process taps (System Audio Recording) arrived in macOS 14.2; the other permissions exist on 14.0.
+    @Test func permissionSystemRequirements() {
+        let v14_0 = OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0)
+        let v14_1 = OperatingSystemVersion(majorVersion: 14, minorVersion: 1, patchVersion: 9)
+        let v14_2 = OperatingSystemVersion(majorVersion: 14, minorVersion: 2, patchVersion: 0)
+        let v26 = OperatingSystemVersion(majorVersion: 26, minorVersion: 5, patchVersion: 0)
+        #expect(!SuitePermission.systemAudioRecording.isAvailable(on: v14_0))
+        #expect(!SuitePermission.systemAudioRecording.isAvailable(on: v14_1))
+        #expect(SuitePermission.systemAudioRecording.isAvailable(on: v14_2))
+        #expect(SuitePermission.systemAudioRecording.isAvailable(on: v26))
+        #expect(SuitePermission.accessibility.isAvailable(on: v14_0))
+        #expect(SuitePermission.screenRecording.isAvailable(on: v14_0))
+        #expect(SuitePermission.systemAudioRecording.minimumSystemVersion?.minorVersion == 2)
+        #expect(SuitePermission.accessibility.minimumSystemVersion == nil)
+    }
+
     @Test func keyComboDisplay() throws {
         #expect(KeyCombo.micMuteDefault.display == "⌃⌥M")
         #expect(KeyCombo.clipboardDefault.display == "⇧⌘V")
