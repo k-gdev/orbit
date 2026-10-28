@@ -47,21 +47,16 @@ final class AppControlService {
 
     // MARK: Actions
 
-    /// Brings the app forward like clicking its Dock icon: unhides it and activates it through Launch
-    /// Services (which reopens a window for an app that has none), falling back to plain activation.
+    /// Brings the app forward like clicking its Dock icon: unhides it and activates it cooperatively with
+    /// all its windows (`AppActivation`), then asks Launch Services to reopen it, so an app with no windows
+    /// opens one.
     func focus(_ pid: pid_t) {
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
-        if app.isHidden { app.unhide() }
-        guard let url = app.bundleURL else {
-            app.activate(options: [.activateAllWindows])
-            return
-        }
+        AppActivation.activate(app, allWindows: true)
+        guard let url = app.bundleURL else { return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
-            guard error != nil else { return }
-            DispatchQueue.main.async { app.activate(options: [.activateAllWindows]) }
-        }
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in }
     }
 
     func setHidden(_ pid: pid_t, _ hidden: Bool) {

@@ -80,12 +80,15 @@ enum WindowsFixtures {
             ("Orbit Suite — Pull Request #5 · k-gdev/orbit", .browser, CGSize(width: 1440, height: 900)),
             ("Apple Developer Documentation", .docs, CGSize(width: 1200, height: 900)),
             ("Reading List", nil, CGSize(width: 1280, height: 860)),
+            // Full screen on another Space: only ScreenCaptureKit sees it (and only with Screen Recording).
+            ("macOS Tahoe Release Notes", .article, CGSize(width: 1512, height: 945)),
         ]
-        let items = windows.enumerated().map { index, window in
-            DockPreviewItem(id: "\(index)", title: window.0, isMinimised: window.1 == nil,
+        let shown = titlesOnly ? Array(windows.prefix(3)) : windows
+        let items = shown.enumerated().map { index, window in
+            DockPreviewItem(id: "\(index)", title: window.0, isMinimised: window.1 == nil, isElsewhere: index == 3,
                             thumbnail: titlesOnly ? nil : window.1.flatMap { thumbnail($0, size: window.2) })
         }
-        return (items, windows.map { $0.2.width / $0.2.height })
+        return (items, shown.map { $0.2.width / $0.2.height })
     }
 
     /// Fake window art rendered offscreen, about the size ScreenCaptureKit would deliver.
@@ -101,7 +104,7 @@ enum WindowsFixtures {
 /// A made-up window for thumbnails: a title bar with traffic lights and a page (a pull request, a
 /// documentation page). Shapes only, so `ImageRenderer` draws it.
 struct FakeWindowArt: View {
-    enum Kind { case browser, docs }
+    enum Kind { case browser, docs, article }
 
     let kind: Kind
 
@@ -111,6 +114,7 @@ struct FakeWindowArt: View {
             switch kind {
             case .browser: pullRequest
             case .docs: documentation
+            case .article: article
             }
         }
         .background(Color.white)
@@ -167,6 +171,24 @@ struct FakeWindowArt: View {
             Spacer(minLength: 0)
         }
         .padding(20)
+    }
+
+    private var article: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            LinearGradient(colors: [Color(red: 0.18, green: 0.42, blue: 0.86), Color(red: 0.55, green: 0.33, blue: 0.86),
+                                    Color(red: 0.95, green: 0.55, blue: 0.45)],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(height: 150)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(alignment: .center) {
+                    VStack(spacing: 10) { bar(260, 18, .white.opacity(0.92)); bar(170, 9, .white.opacity(0.7)) }
+                }
+            bar(320, 14, Color.black.opacity(0.6))
+            ForEach(0..<6, id: \.self) { row in bar(CGFloat([520, 480, 540, 300, 500, 420][row]), 8) }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 60)
+        .padding(.vertical, 22)
     }
 
     private var documentation: some View {

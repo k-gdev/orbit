@@ -7,6 +7,8 @@ struct DockPreviewItem: Identifiable {
     let id: String
     let title: String
     let isMinimised: Bool
+    /// Seen only by ScreenCaptureKit, on another Space or in full screen (choosing it activates the app).
+    var isElsewhere = false
     /// The captured thumbnail; nil until it arrives, or for good (minimised, no Screen Recording, capture failed).
     var thumbnail: CGImage?
 }
@@ -91,6 +93,13 @@ private struct DockPreviewCell: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
+    /// "Minimised", or "Other Space" for a window only ScreenCaptureKit sees.
+    private var badge: (title: String, symbol: String)? {
+        if item.isMinimised { return ("Minimised", "minus.rectangle") }
+        if item.isElsewhere { return ("Other Space", "rectangle.on.rectangle") }
+        return nil
+    }
+
     var body: some View {
         let style = PanelStyle.colors(for: colorScheme)
         let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -121,8 +130,8 @@ private struct DockPreviewCell: View {
         .overlay(shape.strokeBorder(isHovered ? PanelStyle.accent(for: colorScheme) : style.tileStroke.opacity(2),
                                     lineWidth: isHovered ? 2.5 : 0.5))
         .overlay(alignment: .bottomLeading) {
-            if item.isMinimised {
-                Label("Minimised", systemImage: "minus.rectangle")
+            if let badge {
+                Label(badge.title, systemImage: badge.symbol)
                     .font(.system(size: 10, weight: .semibold))
                     .labelStyle(.titleAndIcon)
                     .foregroundStyle(style.inkOnTrack)
@@ -135,7 +144,7 @@ private struct DockPreviewCell: View {
         .scaleEffect(isHovered ? 1.025 : 1)
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .accessibilityElement()
-        .accessibilityLabel("\(item.title)\(item.isMinimised ? ", minimised" : "")")
+        .accessibilityLabel("\(item.title)\(badge.map { ", \($0.title.lowercased())" } ?? "")")
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -153,7 +162,8 @@ final class DockPreviewPanel: NSPanel {
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         contentView = container
         level = .popUpMenu
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle, .transient]
+        // `.transient` like `MenuBarPanel` (not also `.stationary`: the two are exclusive).
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true

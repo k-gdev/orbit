@@ -79,15 +79,18 @@ final class WindowsFeature: SuiteFeature {
     }
 
     func makeSettingsView() -> AnyView {
-        AnyView(WindowsSettingsView(settings: settings, permissions: context.permissions))
+        AnyView(WindowsSettingsView(settings: settings, permissions: context.permissions, suite: context.suite))
     }
 
     static func snapshotViews() -> FeatureSnapshotViews {
-        let settings = WindowsSettings(defaults: WindowsFixtures.defaults())
-        // The same permission state as the Settings snapshot's header: Accessibility yes, Screen Recording no.
+        let defaults = WindowsFixtures.defaults()
+        let settings = WindowsSettings(defaults: defaults)
+        // The same state as the Settings snapshot's header: Windows off (a new install's default),
+        // Accessibility granted, Screen Recording not.
+        let suite = SuiteSettings(defaults: defaults)
         let permissions = PermissionCenter(live: false, fixed: [.accessibility: .granted, .screenRecording: .notGranted])
         return FeatureSnapshotViews(panel: WindowsPanelView(model: WindowsFixtures.panelModel(.granted)),
-                                    settings: WindowsSettingsView(settings: settings, permissions: permissions))
+                                    settings: WindowsSettingsView(settings: settings, permissions: permissions, suite: suite))
     }
 
     // MARK: Internals
@@ -105,10 +108,11 @@ final class WindowsFeature: SuiteFeature {
 
     /// Runs the Dock preview exactly when it can and should: feature on, "Dock preview" on, Accessibility granted.
     private func updateDockPreview() {
-        let readiness = DockPreviewReadiness(enabled: settings.dockPreviewEnabled,
+        let readiness = DockPreviewReadiness(featureOn: isRunning,
+                                             enabled: settings.dockPreviewEnabled,
                                              accessibility: context.permissions.status(.accessibility) == .granted,
                                              screenRecording: context.permissions.status(.screenRecording) == .granted)
-        let wanted = isRunning && readiness.watchesDock
+        let wanted = readiness.watchesDock
         if wanted, dockPreview == nil {
             let controller = DockPreviewController(settings: settings)
             controller.start()

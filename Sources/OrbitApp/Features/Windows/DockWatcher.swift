@@ -3,11 +3,15 @@ import ApplicationServices
 import OrbitCore
 
 /// A running app's Dock icon under the pointer.
-struct DockHover: Equatable {
+struct DockHover {
     let pid: pid_t
     let name: String
-    /// The icon's frame in AppKit screen coordinates (y up).
-    let iconFrame: CGRect
+    /// The icon's frame in AppKit screen coordinates (y up), when the Dock reported the hover. An
+    /// auto-hiding Dock may still be sliding in and a magnifying one growing, so read it again with
+    /// `DockWatcher.currentIconFrame(of:)` before placing the strip.
+    var iconFrame: CGRect
+    /// The Dock item (with `AX.timeout`), kept to re-read its frame.
+    let item: AXUIElement
 }
 
 /// Reports which running app's Dock icon the pointer is over, through an `AXObserver` on the Dock's icon
@@ -72,10 +76,9 @@ final class DockWatcher {
         detach()
         guard isRunning, AXIsProcessTrusted(),
               let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockBundleID).first else { return }
-        let app = AXUIElementCreateApplication(dock.processIdentifier)
-        AXUIElementSetMessagingTimeout(app, 0.5)
-        let children: [AXUIElement] = AX.copy(app, kAXChildrenAttribute) ?? []
-        guard let list = children.first(where: { (AX.copy($0, kAXRoleAttribute) as String?) == kAXListRole }) else {
+        // Every element read here (the Dock, its list, each hovered item) carries `AX.timeout`.
+        let app = AX.application(dock.processIdentifier)
+        guard let list = AX.elements(app, kAXChildrenAttribute).first(where: { (AX.value($0, kAXRoleAttribute) as String?) == kAXListRole }) else {
             // A Dock that has just launched may not have built its list yet.
             scheduleAttach(after: 1)
             return
@@ -127,19 +130,28 @@ final class DockWatcher {
 
     private func selectionChanged() {
         guard isRunning, let list else { return }
-        let selected: [AXUIElement] = AX.copy(list, kAXSelectedChildrenAttribute) ?? []
-        onHover(selected.first.flatMap(hover(for:)))
+        onHover(AX.elements(list, kAXSelectedChildrenAttribute).first.flatMap(hover(for:)))
     }
 
     private func hover(for item: AXUIElement) -> DockHover? {
-        guard (AX.copy(item, kAXSubroleAttribute) as String?) == "AXApplicationDockItem",
-              let origin = AX.point(item, kAXPositionAttribute), let size = AX.size(item, kAXSizeAttribute) else { return nil }
-        let url: URL? = (AX.copy(item, kAXURLAttribute) as NSURL?).map { $0 as URL }
-        let title: String? = AX.copy(item, kAXTitleAttribute)
+        guard (AX.value(item, kAXSubroleAttribute) as String?) == "AXApplicationDockItem",
+              let frame = Self.frame(of: item) else { return nil }
+        let url: URL? = (AX.value(item, kAXURLAttribute) as NSURL?).map { $0 as URL }
+        let title: String? = AX.value(item, kAXTitleAttribute)
         guard let app = Self.runningApp(url: url, title: title) else { return nil }
+        return DockHover(pid: app.processIdentifier, name: app.localizedName ?? title ?? "", iconFrame: frame, item: item)
+    }
+
+    /// The hovered icon's frame now, read again from the Dock (short timeout); nil if the item is gone.
+    static func currentIconFrame(of hover: DockHover) -> CGRect? {
+        frame(of: hover.item)
+    }
+
+    /// A Dock item's frame in AppKit coordinates.
+    private static func frame(of item: AXUIElement) -> CGRect? {
+        guard let origin = AX.point(item, kAXPositionAttribute), let size = AX.size(item, kAXSizeAttribute) else { return nil }
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-        return DockHover(pid: app.processIdentifier, name: app.localizedName ?? title ?? "",
-                         iconFrame: ScreenSpace.flip(CGRect(origin: origin, size: size), primaryHeight: primaryHeight))
+        return ScreenSpace.flip(CGRect(origin: origin, size: size), primaryHeight: primaryHeight)
     }
 
     /// The running app behind a Dock item: by bundle location, else by name among regular apps.

@@ -29,11 +29,16 @@ public struct TimedCache<Key: Hashable, Value> {
     /// Stores `value` (replacing any older one and restarting its lifetime), dropping expired entries and,
     /// past `capacity`, the oldest.
     public mutating func insert(_ value: Value, for key: Key, now: Date) {
-        entries = entries.filter { now.timeIntervalSince($0.value.stored) <= lifetime }
+        removeExpired(now: now)
         entries[key] = (value, now)
         while entries.count > capacity, let oldest = entries.min(by: { $0.value.stored < $1.value.stored })?.key {
             entries[oldest] = nil
         }
+    }
+
+    /// Drops every entry older than `lifetime` (lookups and inserts do this too, but only when they happen).
+    public mutating func removeExpired(now: Date) {
+        entries = entries.filter { now.timeIntervalSince($0.value.stored) <= lifetime }
     }
 
     public mutating func removeAll() {

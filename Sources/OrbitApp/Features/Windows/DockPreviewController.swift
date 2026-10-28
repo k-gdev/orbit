@@ -1,5 +1,6 @@
 import AppKit
 import OrbitCore
+import ScreenCaptureKit
 
 /// The Dock preview: hovering a running app's Dock icon for `previewDelay` shows a glass strip of its
 /// windows above the icon (thumbnails with Screen Recording, title cards without); hovering a thumbnail
@@ -26,7 +27,11 @@ final class DockPreviewController {
     private var delayWork: DispatchWorkItem?
     /// Bumped whenever what is shown changes, so late window reads and captures are dropped.
     private var generation = 0
-    private var shownWindows: [AXWindow] = []
+    /// What each thumbnail stands for, and the app they belong to, while the strip is up.
+    private var shownTargets: [PreviewTarget] = []
+    private var shownPID: pid_t?
+    /// One pending purge of the thumbnail cache, just after its lifetime, once the strip has hidden.
+    private var purgeWork: DispatchWorkItem?
 
     private var pointerTimer: Timer?
     private var outsideSince: Date?
@@ -55,6 +60,8 @@ final class DockPreviewController {
         cancelDelay()
         dismiss()
         thumbnailer.clear()
+        purgeWork?.cancel()
+        purgeWork = nil
         panel?.close()
         panel = nil
     }
@@ -80,9 +87,12 @@ final class DockPreviewController {
                 }
             }
             delayWork = work
+            // A click during the wait (on the Dock icon, say) cancels the preview before it opens.
+            installClickMonitor()
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         case .cancelSchedule:
             cancelDelay()
+            if model.layout == nil { removeClickMonitor() }
         case .show(let pid):
             show(pid)
         case .hide:
@@ -97,38 +107,63 @@ final class DockPreviewController {
 
     // MARK: Showing
 
-    /// Reads the app's windows off the main thread, then shows the strip at once with title cards and fills
-    /// in thumbnails as they are captured.
+    /// Reads the app's Accessibility windows off the main thread and, with Screen Recording, its
+    /// ScreenCaptureKit windows (every Space), merges them (`PreviewWindowList`), shows the strip at once with
+    /// title cards and fills in thumbnails as they are captured.
     private func show(_ pid: pid_t) {
-        guard let hover, hover.pid == pid else { return }
+        guard var hover, hover.pid == pid else {
+            // The pointer has moved on: reset (this also removes the click monitor the wait installed).
+            policy.dismissed()
+            hideStrip()
+            return
+        }
+        // The frame reported at hover time can be stale by now (an auto-hiding Dock sliding in, magnification).
+        if let fresh = DockWatcher.currentIconFrame(of: hover) {
+            hover.iconFrame = fresh
+            self.hover = hover
+        }
         generation += 1
         let generation = generation
         let showMinimised = settings.showMinimised
-        Self.axQueue.async {
-            let windows = AXWindowService.listedWindows(of: pid, showMinimised: showMinimised)
-            DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated { self?.present(windows, for: hover, generation: generation) }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let accessibility = await Self.readWindows(of: pid)
+            let capture = WindowThumbnailer.canCapture ? await self.thumbnailer.captureWindows(of: pid) : []
+            guard generation == self.generation else { return }
+            let entries = PreviewWindowList.merge(accessibility: accessibility.map(\.info), capture: capture.map(\.info),
+                                                  showMinimised: showMinimised)
+            let targets = entries.map { entry in
+                PreviewTarget(entry: entry, window: entry.accessibilityIndex.map { accessibility[$0] },
+                              capture: entry.captureIndex.map { capture[$0] })
             }
+            self.present(targets, for: hover, generation: generation)
         }
     }
 
-    private func present(_ windows: [AXWindow], for hover: DockHover, generation: Int) {
+    private static func readWindows(of pid: pid_t) async -> [AXWindow] {
+        await withCheckedContinuation { continuation in
+            axQueue.async { continuation.resume(returning: AXWindowService.windows(of: pid)) }
+        }
+    }
+
+    private func present(_ targets: [PreviewTarget], for hover: DockHover, generation: Int) {
         guard isRunning, generation == self.generation, policy.shown == hover.pid else { return }
         let screen = Self.screen(containing: hover.iconFrame)
-        guard !windows.isEmpty, let screen,
-              let layout = DockPreviewLayout.make(aspectRatios: windows.map { $0.frame.width / max($0.frame.height, 1) },
+        guard !targets.isEmpty, let screen,
+              let layout = DockPreviewLayout.make(aspectRatios: targets.map { $0.entry.frame.width / max($0.entry.frame.height, 1) },
                                                   iconFrame: hover.iconFrame, edge: Self.dockEdge, visibleFrame: screen.visibleFrame) else {
             // Nothing to show (no windows): close any strip of another app, and wait for the next hover.
             policy.dismissed()
             hideStrip()
             return
         }
-        shownWindows = windows
+        shownTargets = targets
+        shownPID = hover.pid
         model.appName = hover.name
         model.appIcon = NSRunningApplication(processIdentifier: hover.pid)?.icon
-        model.items = windows.map { window in
-            DockPreviewItem(id: window.id, title: WindowListing.displayTitle(window.title, appName: hover.name),
-                            isMinimised: window.isMinimised, thumbnail: nil)
+        model.items = targets.map { target in
+            DockPreviewItem(id: target.id, title: WindowListing.displayTitle(target.entry.title, appName: hover.name),
+                            isMinimised: target.entry.isMinimised, isElsewhere: target.entry.isElsewhere, thumbnail: nil)
         }
         model.layout = layout
         model.hovered = layout.thumbnailIndex(at: NSEvent.mouseLocation)
@@ -139,24 +174,21 @@ final class DockPreviewController {
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         startTracking()
-        loadThumbnails(for: windows, pid: hover.pid, generation: generation, scale: screen.backingScaleFactor)
+        loadThumbnails(for: targets, generation: generation, scale: screen.backingScaleFactor)
     }
 
-    private func loadThumbnails(for windows: [AXWindow], pid: pid_t, generation: Int, scale: CGFloat) {
-        guard WindowThumbnailer.canCapture, windows.contains(where: { !$0.isMinimised }) else { return }
+    /// Captures the thumbnails one by one (minimised windows have none to capture).
+    private func loadThumbnails(for targets: [PreviewTarget], generation: Int, scale: CGFloat) {
+        let wanted = targets.enumerated().filter { $0.element.capture != nil && !$0.element.entry.isMinimised }
+        guard !wanted.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            let captureWindows = await self.thumbnailer.captureWindows(of: pid)
-            guard generation == self.generation else { return }
-            let pairs = WindowMatcher.match(
-                axWindows: windows.map(\.descriptor),
-                captureWindows: captureWindows.map { WindowDescriptor(number: Int($0.windowID), title: $0.title, frame: $0.frame) })
-            for pair in pairs where !windows[pair.ax].isMinimised {
-                let image = await self.thumbnailer.thumbnail(of: captureWindows[pair.capture], scale: scale)
+            for (index, target) in wanted {
+                guard let self, let capture = target.capture else { return }
+                let image = await self.thumbnailer.thumbnail(of: capture, scale: scale)
                 guard generation == self.generation else { return }
-                if let image { self.model.setThumbnail(image, at: pair.ax) }
+                if let image { self.model.setThumbnail(image, at: index) }
             }
-            self.panel?.invalidateShadow()
+            self?.panel?.invalidateShadow()
         }
     }
 
@@ -171,12 +203,7 @@ final class DockPreviewController {
             RunLoop.main.add(timer, forMode: .common)
             pointerTimer = timer
         }
-        if clickMonitor == nil {
-            // Clicks anywhere else (the Dock icon itself included) close the strip; clicks in it are local.
-            clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-                MainActor.assumeIsolated { self?.dismiss() }
-            }
-        }
+        installClickMonitor()
         if spaceObserver == nil {
             spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -185,11 +212,25 @@ final class DockPreviewController {
         }
     }
 
+    /// A click anywhere outside Orbit (the Dock icon itself included) cancels a pending preview or closes the
+    /// strip; clicks in the strip are local events and don't reach it. Installed from the moment the hover
+    /// delay starts until the strip is gone or the wait is cancelled.
+    private func installClickMonitor() {
+        guard clickMonitor == nil else { return }
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismiss() }
+        }
+    }
+
+    private func removeClickMonitor() {
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        clickMonitor = nil
+    }
+
     private func stopTracking() {
         pointerTimer?.invalidate()
         pointerTimer = nil
-        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-        clickMonitor = nil
+        removeClickMonitor()
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
         spaceObserver = nil
         outsideSince = nil
@@ -213,12 +254,19 @@ final class DockPreviewController {
         if now.timeIntervalSince(since) >= Self.leaveGrace { perform(policy.pointerLeft()) }
     }
 
+    /// A window Accessibility can reach is brought forward; one seen only elsewhere (another Space, full
+    /// screen) activates its app, and macOS switches to a Space with its windows.
     private func clicked() {
         guard let layout = model.layout, let index = layout.thumbnailIndex(at: NSEvent.mouseLocation),
-              shownWindows.indices.contains(index) else { return }
-        let window = shownWindows[index]
+              shownTargets.indices.contains(index) else { return }
+        let target = shownTargets[index]
+        let pid = shownPID
         dismiss()
-        AXWindowService.bringForward(window)
+        if let window = target.window {
+            AXWindowService.bringForward(window)
+        } else if let pid, let app = NSRunningApplication(processIdentifier: pid) {
+            AppActivation.activate(app)
+        }
     }
 
     /// Closes the strip for a reason other than the pointer leaving; the next hover waits for the delay.
@@ -233,7 +281,16 @@ final class DockPreviewController {
         stopTracking()
         panel?.orderOut(nil)
         model.clear()
-        shownWindows = []
+        shownTargets = []
+        shownPID = nil
+        // Drop what has expired now, and the rest once it expires, so a one-off hover keeps no images around.
+        thumbnailer.purgeExpired()
+        purgeWork?.cancel()
+        let purge = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.thumbnailer.purgeExpired() }
+        }
+        purgeWork = purge
+        DispatchQueue.main.asyncAfter(deadline: .now() + WindowThumbnailer.lifetime + 0.1, execute: purge)
     }
 
     // MARK: Screen and Dock
@@ -248,5 +305,36 @@ final class DockPreviewController {
     private static var dockEdge: DockEdge {
         let value = CFPreferencesCopyAppValue("orientation" as CFString, DockWatcher.dockBundleID as CFString) as? String
         return DockEdge(orientation: value)
+    }
+}
+
+/// One thumbnail of the strip: its merged entry, the Accessibility window to raise (nil for a window seen
+/// only on another Space) and the capture window for its thumbnail (nil without Screen Recording or a match).
+private struct PreviewTarget {
+    let entry: PreviewWindowEntry
+    let window: AXWindow?
+    let capture: SCWindow?
+    /// The thumbnail's identity in the strip (every entry has a window, a capture window or both).
+    let id: String
+
+    init(entry: PreviewWindowEntry, window: AXWindow?, capture: SCWindow?) {
+        self.entry = entry
+        self.window = window
+        self.capture = capture
+        id = window?.id ?? capture.map { "c\($0.windowID)" } ?? "e\(entry.captureIndex ?? -1)"
+    }
+}
+
+extension AXWindow {
+    /// What the merge and matching need.
+    var info: AccessibilityWindowInfo {
+        AccessibilityWindowInfo(number: number.map(Int.init), title: title, frame: frame, isMinimised: isMinimised, subrole: subrole)
+    }
+}
+
+extension SCWindow {
+    /// What the merge and matching need.
+    var info: CaptureWindowInfo {
+        CaptureWindowInfo(number: Int(windowID), title: title, frame: frame, isOnScreen: isOnScreen, layer: windowLayer)
     }
 }

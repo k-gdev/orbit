@@ -50,6 +50,11 @@ final class WindowThumbnailer {
         }
     }
 
+    /// Forgets thumbnails past their lifetime (the strip hid: nothing else would look them up soon).
+    func purgeExpired() {
+        cache.removeExpired(now: Date())
+    }
+
     /// Forgets every thumbnail (the preview was turned off).
     func clear() {
         cache.removeAll()
