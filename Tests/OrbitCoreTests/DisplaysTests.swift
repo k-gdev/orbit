@@ -89,3 +89,44 @@ import Testing
         #expect(DDC.parseVCPReply(length + [xor(0x50, length)], code: 0x10) == nil)
     }
 }
+
+/// Link brightness: proportional moves, clamped.
+@Suite struct BrightnessLinkTests {
+    private func close(_ a: [String: Double], _ b: [String: Double]) -> Bool {
+        a.keys.sorted() == b.keys.sorted() && a.allSatisfy { key, value in abs(value - (b[key] ?? .nan)) < 1e-9 }
+    }
+
+    @Test func linkProportional() {
+        let start = ["tv-left": 0.5, "tv-right": 0.8, "aoc": 0.2]
+        // Halving one halves the others.
+        #expect(close(BrightnessLink.values(changing: "tv-left", to: 0.25, current: start),
+                      ["tv-left": 0.25, "tv-right": 0.4, "aoc": 0.1]))
+        // Up by 20 %.
+        #expect(close(BrightnessLink.values(changing: "tv-left", to: 0.6, current: start),
+                      ["tv-left": 0.6, "tv-right": 0.96, "aoc": 0.24]))
+        // No change, no movement.
+        #expect(close(BrightnessLink.values(changing: "aoc", to: 0.2, current: start), start))
+        // A display the caller didn't list joins at its new value and moves nobody.
+        #expect(close(BrightnessLink.values(changing: "new", to: 0.7, current: start),
+                      start.merging(["new": 0.7]) { $1 }))
+        // Alone, it just takes the new value.
+        #expect(close(BrightnessLink.values(changing: "only", to: 0.3, current: ["only": 0.9]), ["only": 0.3]))
+    }
+
+    @Test func linkClamps() {
+        let start = ["a": 0.5, "b": 0.8, "c": 0.2, "d": 0.0]
+        // Doubling: b would be 1.6; d has no ratio and shifts by +0.5.
+        #expect(close(BrightnessLink.values(changing: "a", to: 1.0, current: start),
+                      ["a": 1.0, "b": 1.0, "c": 0.4, "d": 0.5]))
+        // The moved value itself is clamped first (1.4 → 1, -0.2 → 0).
+        #expect(close(BrightnessLink.values(changing: "a", to: 1.4, current: start),
+                      ["a": 1.0, "b": 1.0, "c": 0.4, "d": 0.5]))
+        #expect(close(BrightnessLink.values(changing: "a", to: -0.2, current: start),
+                      ["a": 0.0, "b": 0.0, "c": 0.0, "d": 0.0]))
+        // From zero there is no ratio: everything shifts by the same amount.
+        #expect(close(BrightnessLink.values(changing: "d", to: 0.3, current: start),
+                      ["a": 0.8, "b": 1.0, "c": 0.5, "d": 0.3]))
+        // Out-of-range inputs for the others are clamped too.
+        #expect(close(BrightnessLink.values(changing: "a", to: 0.5, current: ["a": 0.5, "z": 1.7]), ["a": 0.5, "z": 1.0]))
+    }
+}
