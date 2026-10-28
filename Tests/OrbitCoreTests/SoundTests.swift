@@ -203,6 +203,70 @@ import Testing
         #expect(merged.first?.isPlaying == true)
     }
 
+    // MARK: Devices
+
+    /// "Keep preferred mic" switches back only when it is on, a preferred mic is set, the input moved
+    /// away from it, and the preferred mic is still connected.
+    @Test func preferredMicSwitchBackOnlyWhenAvailable() {
+        let available: Set<String> = ["Headset", "BuiltInMicrophoneDevice", "Teams"]
+        #expect(PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: "Headset", availableUIDs: available, keep: true))
+        #expect(PreferredMicPolicy.shouldSwitchBack(currentUID: nil, preferredUID: "Headset", availableUIDs: available, keep: true))
+        // Unplugged: leave macOS's choice alone.
+        #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "BuiltInMicrophoneDevice", preferredUID: "Headset",
+                                                     availableUIDs: ["BuiltInMicrophoneDevice"], keep: true))
+        #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Headset", preferredUID: "Headset", availableUIDs: available, keep: true))
+        #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: "Headset", availableUIDs: available, keep: false))
+        #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: nil, availableUIDs: available, keep: true))
+        #expect(!PreferredMicPolicy.shouldSwitchBack(currentUID: "Teams", preferredUID: "", availableUIDs: available, keep: true))
+    }
+
+    /// Kevo's Mac has two monitors both called "P27u-20": the menus must tell them apart.
+    @Test func duplicateDeviceNamesAreNumbered() {
+        let devices = [
+            AudioDeviceSummary(uid: "K", name: "K272HUL", inputChannels: 0, outputChannels: 2, transport: .displayPort),
+            AudioDeviceSummary(uid: "P1", name: "P27u-20", inputChannels: 0, outputChannels: 2, transport: .displayPort),
+            AudioDeviceSummary(uid: "P2", name: "P27u-20", inputChannels: 0, outputChannels: 2, transport: .displayPort),
+            AudioDeviceSummary(uid: "S", name: "SteelSeries Arctis Nova 5", inputChannels: 1, outputChannels: 2, transport: .usb),
+            AudioDeviceSummary(uid: "E", name: "", inputChannels: 0, outputChannels: 2, transport: .unknown),
+        ]
+        let names = AudioDeviceNaming.displayNames(for: devices)
+        #expect(names["K"] == "K272HUL")
+        #expect(names["P1"] == "P27u-20")
+        #expect(names["P2"] == "P27u-20 (2)")
+        #expect(names["S"] == "SteelSeries Arctis Nova 5")
+        #expect(names["E"] == "Unnamed device")
+    }
+
+    @Test func deviceIconHints() {
+        func device(_ name: String, _ transport: AudioTransport, input: Int = 0, output: Int = 2) -> AudioDeviceSummary {
+            AudioDeviceSummary(uid: name, name: name, inputChannels: input, outputChannels: output, transport: transport)
+        }
+        #expect(device("MacBook Pro Speakers", .builtIn).symbol(forInput: false) == "laptopcomputer")
+        #expect(device("MacBook Pro Microphone", .builtIn, input: 1, output: 0).symbol(forInput: true) == "laptopcomputer")
+        #expect(device("SteelSeries Arctis Nova 5", .usb, input: 1).symbol(forInput: false) == "headphones")
+        #expect(device("SteelSeries Arctis Nova 5", .usb, input: 1).symbol(forInput: true) == "headphones")
+        #expect(device("USB Audio CODEC", .usb).symbol(forInput: false) == "hifispeaker")
+        #expect(device("Yeti Stereo Microphone", .usb, input: 2, output: 0).symbol(forInput: true) == "mic")
+        #expect(device("P27u-20", .displayPort).symbol(forInput: false) == "display")
+        #expect(device("LG TV", .hdmi).symbol(forInput: false) == "display")
+        #expect(device("Kevo's AirPods Pro", .bluetooth).symbol(forInput: false) == "airpodspro")
+        #expect(device("AirPods Max", .bluetooth).symbol(forInput: false) == "airpodsmax")
+        #expect(device("AirPods", .bluetooth).symbol(forInput: false) == "airpods")
+        #expect(device("WH-1000XM5", .bluetooth).symbol(forInput: false) == "headphones")
+        #expect(device("Microsoft Teams Audio", .virtual, input: 1, output: 1).symbol(forInput: false) == "waveform")
+        #expect(device("Living Room", .airPlay).symbol(forInput: false) == "airplayaudio")
+        #expect(device("Multi-Output Device", .aggregate).symbol(forInput: false) == "square.stack.3d.up")
+        // Transport codes are Core Audio's four-character codes.
+        #expect(AudioTransport(fourCC: 0x626C_746E) == .builtIn)      // 'bltn'
+        #expect(AudioTransport(fourCC: 0x7573_6220) == .usb)          // 'usb '
+        #expect(AudioTransport(fourCC: 0x6470_7274) == .displayPort)  // 'dprt'
+        #expect(AudioTransport(fourCC: 0x7669_7274) == .virtual)      // 'virt'
+        #expect(AudioTransport(fourCC: 0x626C_7565) == .bluetooth)    // 'blue'
+        #expect(AudioTransport(fourCC: 0x6772_7570) == .aggregate)    // 'grup'
+        #expect(AudioTransport(fourCC: 0) == .unknown)
+        #expect(device("x", .usb, input: 1, output: 0).hasInput && !device("x", .usb, input: 1, output: 0).hasOutput)
+    }
+
     @Test func settingsRejectBadData() throws {
         let (d, cleanup) = Fixtures.defaults()
         defer { cleanup() }
