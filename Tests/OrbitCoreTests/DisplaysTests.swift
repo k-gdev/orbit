@@ -271,6 +271,31 @@ import Testing
     }
 }
 
+/// Gamma-table dimming for displays without DDC.
+@Suite struct SoftwareDimTests {
+    @Test func softwareDimFactorHasAFloor() {
+        #expect(SoftwareDim.factor(forBrightness: 100) == 1)
+        #expect(SoftwareDim.factor(forBrightness: 0) == SoftwareDim.floor)
+        #expect(abs(SoftwareDim.factor(forBrightness: 50) - 0.55) < 1e-9)
+        #expect(SoftwareDim.factor(forBrightness: 140) == 1)
+        #expect(SoftwareDim.factor(forBrightness: -20) == SoftwareDim.floor)
+        #expect(SoftwareDim.factor(forBrightness: .nan) == 1)
+        #expect(SoftwareDim.dims(99))
+        #expect(!SoftwareDim.dims(100))
+        #expect(!SoftwareDim.dims(.nan))
+    }
+
+    @Test func softwareDimScalesTables() {
+        let identity: [Float] = [0, 0.25, 0.5, 1]
+        #expect(SoftwareDim.scaled(identity, by: 0.5) == [0, 0.125, 0.25, 0.5])
+        #expect(SoftwareDim.scaled(identity, by: 1) == identity)
+        // Factors and entries are clamped to 0...1.
+        #expect(SoftwareDim.scaled(identity, by: 3) == identity)
+        #expect(SoftwareDim.scaled([1.2, -0.1], by: 1) == [1, 0])
+        #expect(SoftwareDim.scaled([], by: 0.5).isEmpty)
+    }
+}
+
 /// `DisplaySettings` persistence (throwaway defaults suites only).
 @Suite struct DisplaySettingsTests {
     @Test func settingsRoundTrip() {
