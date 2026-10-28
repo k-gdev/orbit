@@ -197,4 +197,36 @@ import Testing
         // Nothing frontmost (Orbit's own panel has focus): plain name order.
         #expect(RunningAppList.sort([app(1, "b"), app(2, "a")]).map(\.name) == ["a", "b"])
     }
+
+    // MARK: Settings
+
+    @Test func settingsRoundTrip() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let fresh = WindowsSettings(defaults: d)
+        #expect(fresh.dockPreviewEnabled == true)
+        #expect(fresh.previewDelay == 0.35)
+        #expect(fresh.showMinimised == true)
+
+        fresh.dockPreviewEnabled = false
+        fresh.previewDelay = 0.8
+        fresh.showMinimised = false
+        let read = WindowsSettings(defaults: d)
+        #expect(read.dockPreviewEnabled == false)
+        #expect(read.previewDelay == 0.8)
+        #expect(read.showMinimised == false)
+        // Keys carry the feature id.
+        #expect(d.object(forKey: "windows.dockPreviewEnabled") as? Bool == false)
+        #expect(d.object(forKey: "windows.previewDelay") as? Double == 0.8)
+        #expect(d.object(forKey: "windows.showMinimised") as? Bool == false)
+
+        // The delay stays within its range, whether set here or found in the defaults.
+        read.previewDelay = 9
+        #expect(read.previewDelay == WindowsSettings.previewDelayRange.upperBound)
+        #expect(WindowsSettings(defaults: d).previewDelay == WindowsSettings.previewDelayRange.upperBound)
+        d.set(-1.0, forKey: "windows.previewDelay")
+        #expect(WindowsSettings(defaults: d).previewDelay == 0)
+        d.set("soon", forKey: "windows.previewDelay")
+        #expect(WindowsSettings(defaults: d).previewDelay == 0.35)
+    }
 }
