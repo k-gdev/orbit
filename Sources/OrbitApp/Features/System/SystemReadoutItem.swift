@@ -20,6 +20,8 @@ final class SystemReadoutItem: NSObject {
         self.settings = settings
         self.openSettings = openSettings
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Keeps the position the user ⌘-drags it to across launches and readout on/off.
+        item.autosaveName = "OrbitSystemReadout"
         super.init()
         item.button?.toolTip = "Orbit System readout"
         item.button?.target = self
