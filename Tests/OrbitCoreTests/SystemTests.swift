@@ -368,4 +368,54 @@ import Testing
         #expect(BatteryParser.registryDevices([["Product": "Beats Studio Buds", "BatteryPercent": 50]]).first?.kind == .headphones)
         #expect(BatteryParser.registryDevices([["Product": "Pen", "BatteryPercent": 50]]).first?.kind == .other)
     }
+
+    // MARK: Settings
+
+    @Test func settingsRoundTrip() {
+        let (defaults, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let fresh = SystemSettings(defaults: defaults)
+        #expect(fresh.menuBarReadout == .off)
+        #expect(fresh.sampleInterval == 1)
+        #expect(fresh.showPerCluster)
+
+        fresh.menuBarReadout = .cpuAndTemperature
+        fresh.sampleInterval = 2
+        fresh.showPerCluster = false
+        #expect(defaults.string(forKey: "system.menuBarReadout") == "cpuAndTemperature")
+        #expect(defaults.double(forKey: "system.sampleInterval") == 2)
+        #expect(defaults.object(forKey: "system.showPerCluster") as? Bool == false)
+
+        let reloaded = SystemSettings(defaults: defaults)
+        #expect(reloaded.menuBarReadout == .cpuAndTemperature)
+        #expect(reloaded.sampleInterval == 2)
+        #expect(!reloaded.showPerCluster)
+
+        // Junk on disk falls back to the defaults; the interval stays within its range.
+        defaults.set("sideways", forKey: "system.menuBarReadout")
+        defaults.set(0.01, forKey: "system.sampleInterval")
+        #expect(SystemSettings(defaults: defaults).menuBarReadout == .off)
+        #expect(SystemSettings(defaults: defaults).sampleInterval == SystemSettings.intervalRange.lowerBound)
+        defaults.set(3600.0, forKey: "system.sampleInterval")
+        #expect(SystemSettings(defaults: defaults).sampleInterval == SystemSettings.intervalRange.upperBound)
+        #expect(SystemSettings.intervalChoices == [1, 2, 5])
+        #expect(SystemSettings.intervalChoices.allSatisfy(SystemSettings.intervalRange.contains))
+    }
+
+    @Test func menuBarReadoutText() {
+        #expect(MenuBarReadout.allCases == [.off, .cpu, .temperature, .cpuAndTemperature])
+        #expect(MenuBarReadout.allCases.map(\.title) == ["Off", "CPU load", "Temperature", "CPU load and temperature"])
+        #expect(MenuBarReadout.off.text(cpu: 0.2, celsius: 50) == nil)
+        #expect(MenuBarReadout.cpu.text(cpu: 0.234, celsius: 50) == "CPU 23%")
+        #expect(MenuBarReadout.temperature.text(cpu: 0.2, celsius: 53.4) == "53°C")
+        #expect(MenuBarReadout.cpuAndTemperature.text(cpu: 0.07, celsius: 53.6) == "7% · 54°C")
+        // Before the first sample (or without sensors) a dash holds the place.
+        #expect(MenuBarReadout.cpu.text(cpu: nil, celsius: nil) == "CPU —")
+        #expect(MenuBarReadout.temperature.text(cpu: nil, celsius: nil) == "—°C")
+        #expect(MenuBarReadout.cpuAndTemperature.text(cpu: nil, celsius: nil) == "— · —°C")
+        #expect(MenuBarReadout.off.metrics.isEmpty)
+        #expect(MenuBarReadout.cpu.metrics == [.cpu])
+        #expect(MenuBarReadout.temperature.metrics == [.temperature])
+        #expect(MenuBarReadout.cpuAndTemperature.metrics == [.cpu, .temperature])
+    }
 }
