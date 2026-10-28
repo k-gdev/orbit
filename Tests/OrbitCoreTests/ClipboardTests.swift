@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import OrbitCore
@@ -246,6 +247,29 @@ import Testing
             #expect(history.items.allSatisfy { $0.pinned })
         }
 
+        @Test func pinnedEntriesDoNotCountTowardBudgets() {
+            // Pinned entries are exempt from the count and size budgets. If they counted, a few big pins
+            // would use the whole budget up and every new copy would be written and evicted at once:
+            // the history would silently stop.
+            var history = ClipboardHistory()
+            for n in 0..<3 { history.add(ClipboardTests.item("pin\(n)", minutesAgo: 100 + Double(n), pinned: true, size: 600)) }
+            history.add(ClipboardTests.item("fresh", minutesAgo: 1, size: 100))
+            let limits = Self.limits(items: 2, totalBytes: 500)
+            let none = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(none.isEmpty, "the new copy fits the budget for unpinned entries")
+            #expect(history.count == 4)
+
+            // The unpinned entries are still held to their own budgets.
+            history.add(ClipboardTests.item("second", minutesAgo: 0, size: 450))
+            let evicted = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(evicted.map(\.preview) == ["fresh"], "100 + 450 bytes is over 500: the oldest unpinned goes")
+            #expect(history.items.filter { $0.pinned }.count == 3)
+            history.add(ClipboardTests.item("third", minutesAgo: 0, size: 10))
+            history.add(ClipboardTests.item("fourth", minutesAgo: 0, size: 10))
+            let overCount = history.enforce(limits: limits, now: ClipboardTests.base)
+            #expect(overCount.map(\.preview) == ["second"], "three unpinned entries against a budget of two")
+        }
+
         @Test func limitsFromSettingsUnits() {
             let limits = ClipboardLimits(maxItems: 200, maxAgeDays: 30, maxMegabytes: 200, maxItemMegabytes: 20)
             #expect(limits.maxItems == 200)
@@ -418,6 +442,133 @@ import Testing
             #expect(try Data(contentsOf: stranger) == Data("mine".utf8))
         }
 
+        // MARK: Unreadable index must never cost blobs
+
+        private struct MoveFailure: Error {}
+
+        /// A store with three blobs on disk and an index that is then wrecked (cut off mid-way).
+        private static func storeWithWreckedIndex() throws -> (root: URL, store: ClipboardStore, blobs: [String]) {
+            let root = Fixtures.tempDir()
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            let whole = try Data(contentsOf: store.indexURL)
+            try whole.prefix(whole.count * 3 / 4).write(to: store.indexURL)   // truncated JSON
+            return (root, store, items.compactMap(\.payloadFile))
+        }
+
+        @Test func unreadableIndexNeverSweepsBlobs() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let loaded = store.load()
+            #expect(loaded.items.isEmpty)
+            #expect(loaded.indexWasUnreadable)
+            #expect(loaded.corruptBackup != nil)
+            // The caller's tidy-up must do nothing: those blobs are what the user lost track of.
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+        }
+
+        @Test func failedMoveStillCountsAsUnreadable() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let original = try Data(contentsOf: store.indexURL)
+            // The rename fails: a copy keeps the bytes, and the index still counts as unreadable.
+            let loaded = store.load(move: { _, _ in throw MoveFailure() })
+            #expect(loaded.indexWasUnreadable)
+            let backup = try #require(loaded.corruptBackup, "falls back to copying the file")
+            #expect(try Data(contentsOf: backup) == original)
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+
+            // Neither a rename nor a copy works: nothing is kept, so the caller must not touch anything.
+            let stuck = store.load(move: { _, _ in throw MoveFailure() }, copy: { _, _ in throw MoveFailure() })
+            #expect(stuck.indexWasUnreadable)
+            #expect(stuck.corruptBackup == nil)
+            #expect(store.sweepOrphans(after: stuck, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+        }
+
+        @Test func readOnlyFolderLosesNothing() throws {
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+                try? FileManager.default.removeItem(at: root)
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+            let loaded = store.load()   // the real rename and copy both fail here
+            #expect(loaded.indexWasUnreadable)
+            #expect(loaded.items.isEmpty)
+            #expect(store.sweepOrphans(after: loaded, keeping: []).isEmpty)
+            for name in blobs { #expect(store.payloadExists(named: name)) }
+            #expect(FileManager.default.fileExists(atPath: store.indexURL.path), "the unreadable index is still there")
+        }
+
+        @Test func sweepNeedsAHealthyIndex() throws {
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let kept = ClipboardStore.newPayloadName(for: .text)
+            let orphan = ClipboardStore.newPayloadName(for: .text)
+            for name in [kept, orphan] { try store.writePayload(Data("x".utf8), named: name) }
+            // Healthy: the orphan goes.
+            let healthy = ClipboardStore.LoadResult(items: [])
+            #expect(store.sweepOrphans(after: healthy, keeping: [kept]) == [orphan])
+            // Entries were dropped on load: hold off, their blobs may be recoverable.
+            let partial = ClipboardStore.LoadResult(items: [], droppedCount: 1, corruptBackup: nil)
+            let again = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: again)
+            #expect(store.sweepOrphans(after: partial, keeping: [kept]).isEmpty)
+            #expect(store.payloadExists(named: again))
+        }
+
+        @Test func backupsKeepTheirBlobs() throws {
+            // One entry of the index was unreadable: the good ones were kept and the original was copied
+            // aside. On the next launch the blob only the backup names must survive the sweep, while a
+            // true orphan still goes.
+            let root = Fixtures.tempDir()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = ClipboardStore(directory: root)
+            let (items, payloads) = Self.makeItems()
+            for (name, data) in payloads { try store.writePayload(data, named: name) }
+            try store.save(items)
+            var json = try #require(String(data: Data(contentsOf: store.indexURL), encoding: .utf8))
+            json = json.replacingOccurrences(of: "\"kind\":\"text\"", with: "\"kind\":\"hologram\"", options: [], range: json.range(of: "\"kind\":\"text\""))
+            try Data(json.utf8).write(to: store.indexURL)
+
+            let first = store.load()
+            #expect(first.droppedCount == 1)
+            #expect(first.corruptBackup != nil)
+            let lost = try #require(items.first { entry in !first.items.contains { $0.id == entry.id } }?.payloadFile)
+            try store.save(first.items)   // the cleaned-up history
+            let stranger = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: stranger)
+
+            let second = store.load()
+            #expect(!second.indexWasUnreadable && second.droppedCount == 0)
+            let swept = store.sweepOrphans(after: second, keeping: Set(second.items.compactMap(\.payloadFile)))
+            #expect(swept == [stranger], "only the blob no entry and no backup names is an orphan")
+            #expect(store.payloadExists(named: lost), "the backup still names this one")
+        }
+
+        @Test func aBrokenBackupBlocksSweepingAltogether() throws {
+            // The index was cut off, set aside, and a fresh one written. The backup can't be read, so no
+            // blob can be proven unneeded: nothing is deleted on later launches either.
+            let (root, store, blobs) = try Self.storeWithWreckedIndex()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let first = store.load()
+            #expect(first.corruptBackup != nil)
+            try store.save([])   // the history started over
+            let stranger = ClipboardStore.newPayloadName(for: .text)
+            try store.writePayload(Data("x".utf8), named: stranger)
+
+            let second = store.load()
+            #expect(!second.indexWasUnreadable)
+            #expect(store.sweepOrphans(after: second, keeping: []).isEmpty)
+            for name in blobs + [stranger] { #expect(store.payloadExists(named: name)) }
+        }
+
         @Test func storeIsPrivate() throws {
             let root = Fixtures.tempDir()
             defer { try? FileManager.default.removeItem(at: root) }
@@ -432,6 +583,106 @@ import Testing
             #expect(try mode(folder) == 0o700)
             #expect(try mode(folder.appending(path: name)) == 0o600)
             #expect(try mode(store.indexURL) == 0o600)
+        }
+    }
+
+    // MARK: Raw copies (decoded off the main thread)
+
+    @Suite struct RawPasteboardCopyTests {
+        private static let date = Date(timeIntervalSince1970: 3_000)
+
+        private static func copy(_ content: RawPasteboardCopy.Content) -> RawPasteboardCopy {
+            RawPasteboardCopy(content: content, sourceBundleID: "com.example.app", sourceName: "App", date: date)
+        }
+
+        private static func capture(_ content: RawPasteboardCopy.Content, max: Int = 1_000_000) -> ClipboardCapture? {
+            if case .capture(let c) = copy(content).makeCapture(maxItemBytes: max) { return c }
+            return nil
+        }
+
+        private static func skipReason(_ content: RawPasteboardCopy.Content, max: Int = 1_000_000) -> String? {
+            if case .skipped(let reason) = copy(content).makeCapture(maxItemBytes: max) { return reason }
+            return nil
+        }
+
+        /// A bitmap of `side` × `side` pixels: flat colour, or noise that PNG cannot compress.
+        private static func bitmap(side: Int, noisy: Bool) -> NSBitmapImageRep {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+                                       hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            if let pixels = rep.bitmapData {
+                var generator = SystemRandomNumberGenerator()
+                for i in 0..<(rep.bytesPerRow * side) { pixels[i] = noisy ? UInt8.random(in: 0...255, using: &generator) : 200 }
+            }
+            return rep
+        }
+
+        @Test func textIsDecodedPreviewedAndHashed() throws {
+            let c = try #require(Self.capture(.text(Data("Hello  there\nworld".utf8))))
+            #expect(c.kind == .text)
+            #expect(c.preview == "Hello there world")
+            #expect(c.sourceName == "App" && c.date == Self.date)
+            // The hash is computed here (off the main thread), not later when the entry is made.
+            #expect(c.contentHash == ClipboardHash.make(kind: .text, payload: c.payload))
+            #expect(c.makeItem(payloadFile: nil).contentHash == c.contentHash)
+        }
+
+        @Test func oversizeAndWhitespaceAreSkippedBeforeAnyDecoding() {
+            #expect(Self.skipReason(.text(Data(repeating: 0x61, count: 101)), max: 100) != nil)
+            #expect(Self.capture(.text(Data(repeating: 0x61, count: 100)), max: 100) != nil)
+            #expect(Self.skipReason(.text(Data("  \n\t ".utf8))) != nil)
+            #expect(Self.skipReason(.richText(rtf: Data(repeating: 0x20, count: 101), plain: Data("x".utf8)), max: 100) != nil)
+        }
+
+        @Test func richTextTakesItsPreviewFromThePlainText() throws {
+            let attributed = NSAttributedString(string: "Bold words", attributes: [.font: NSFont.boldSystemFont(ofSize: 14)])
+            let rtf = try #require(attributed.rtf(from: NSRange(location: 0, length: attributed.length), documentAttributes: [:]))
+            let withPlain = try #require(Self.capture(.richText(rtf: rtf, plain: Data("Given plain".utf8))))
+            #expect(withPlain.kind == .richText && withPlain.preview == "Given plain" && withPlain.payload == rtf)
+            // No plain text offered: it comes from the RTF itself.
+            let derived = try #require(Self.capture(.richText(rtf: rtf, plain: nil)))
+            #expect(derived.preview == "Bold words")
+            #expect(derived.contentHash != nil)
+        }
+
+        @Test func tiffIsConvertedAndTheLimitAppliesToTheStoredPNG() throws {
+            let flat = Self.bitmap(side: 300, noisy: false)
+            let tiff = try #require(flat.representation(using: .tiff, properties: [:]))
+            #expect(tiff.count > 100_000, "the uncompressed TIFF is bigger than the per-copy limit used below")
+            // The stored PNG is tiny, so this copy is fine even though its TIFF is not.
+            let c = try #require(Self.capture(.image(tiff), max: 100_000))
+            #expect(c.kind == .image && c.preview == "Image 300 × 300")
+            #expect(c.payload.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]), "stored as PNG")
+            #expect(c.payload.count <= 100_000)
+            #expect(c.contentHash != nil)
+
+            // Noise does not compress: the PNG is over the limit, so it is refused.
+            let noise = Self.bitmap(side: 300, noisy: true)
+            let noisyTIFF = try #require(noise.representation(using: .tiff, properties: [:]))
+            #expect(Self.skipReason(.image(noisyTIFF), max: 100_000) != nil)
+            // ... but is accepted when the limit allows it.
+            #expect(Self.capture(.image(noisyTIFF), max: 5_000_000) != nil)
+        }
+
+        @Test func pngPassesThroughUnchangedAndGarbageIsRefused() throws {
+            let png = try #require(Self.bitmap(side: 40, noisy: false).representation(using: .png, properties: [:]))
+            let c = try #require(Self.capture(.image(png)))
+            #expect(c.payload == png)
+            #expect(c.preview == "Image 40 × 40")
+            #expect(Self.skipReason(.image(Data("definitely not an image".utf8))) != nil)
+            // A PNG over the limit is refused as it is.
+            #expect(Self.skipReason(.image(png), max: png.count - 1) != nil)
+        }
+
+        @Test func filesKeepTheirPaths() throws {
+            let c = try #require(Self.capture(.files(["/a/report.pdf", "/a/notes.txt"])))
+            #expect(c.kind == .files && c.preview == "report.pdf, notes.txt")
+            #expect(ClipboardPayload.filePaths(from: c.payload) == ["/a/report.pdf", "/a/notes.txt"])
+        }
+
+        @Test func rawImageReadLimitIsTenTimesTheStoredLimit() {
+            let limits = ClipboardLimits(maxItems: 10, maxAgeDays: 1, maxMegabytes: 200, maxItemMegabytes: 20)
+            #expect(limits.maxRawImageBytes == 200_000_000)
+            #expect(ClipboardLimits(maxItems: 1, maxAge: 1, maxTotalBytes: .max, maxItemBytes: .max).maxRawImageBytes == .max)
         }
     }
 

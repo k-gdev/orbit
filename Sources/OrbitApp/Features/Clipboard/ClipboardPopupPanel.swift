@@ -116,7 +116,7 @@ final class ClipboardPopupController {
         self.panel = nil
         isHiding = false
         if restoreFocus, let app = previousApp {
-            Task { await PasteInjector.bringToFront(app) }
+            Task { _ = await PasteInjector.bringToFront(app) }
         }
     }
 

@@ -43,9 +43,9 @@ final class ClipboardFeature: SuiteFeature {
         model.loadIfNeeded()
         watcher.start(
             policy: { [settings] in
-                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, maxItemBytes: settings.limits.maxItemBytes)
+                PasteboardPolicy(ignoredBundleIDs: settings.ignoredBundleIDs, limits: settings.limits)
             },
-            onCapture: { [weak self] capture in self?.model.record(capture) })
+            onCapture: { [weak self] copy in self?.model.ingest(copy) })
         registerHotKey(settings.popupShortcut)
         // Re-register when the shortcut is changed in Settings. `$popupShortcut` fires before the value
         // is stored, so use the value it delivers.
@@ -60,6 +60,7 @@ final class ClipboardFeature: SuiteFeature {
         isRunning = false
         shortcutSubscription = nil
         watcher.stop()
+        model.cancelIngest()
         context.hotKeys.unregister(id: Self.hotKeyID)
         shortcutProblem = nil
         popup.hide(restoreFocus: false)
@@ -147,11 +148,25 @@ final class ClipboardFeature: SuiteFeature {
             showCopiedHint(settings.pasteDirectly ? "Press ⌘V to paste. Orbit needs Accessibility to do it for you." : "Press ⌘V to paste.")
             return
         }
+        // No app to go back to (the popup opened over Orbit itself): nowhere to press ⌘V.
+        guard let app else {
+            showCopiedHint("Press ⌘V to paste.")
+            return
+        }
         Task { @MainActor in
-            await PasteInjector.bringToFront(app)
-            // Give the app a beat to take focus back before the key press arrives.
+            // ⌘V goes to whatever is frontmost, so it is pressed only once the app the popup was opened
+            // over is confirmed frontmost; anything else (it quit, or macOS refused to bring it back)
+            // would paste into the wrong app.
+            guard await PasteInjector.bringToFront(app) else {
+                showCopiedHint("Press ⌘V to paste in \(app.localizedName ?? "the app you were in").")
+                return
+            }
+            // Give the app a beat to take focus back before the key press arrives, then check again.
             try? await Task.sleep(for: .milliseconds(60))
-            if !PasteInjector.postPaste() { showCopiedHint("Press ⌘V to paste.") }
+            guard PasteInjector.isFrontmost(app), PasteInjector.postPaste() else {
+                showCopiedHint("Press ⌘V to paste.")
+                return
+            }
         }
     }
 

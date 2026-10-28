@@ -31,6 +31,13 @@ public struct ClipboardLimits: Equatable, Sendable {
                   maxItemBytes: min(max(maxItemMegabytes, 1) * Self.megabyte, total))
     }
 
+    /// The most bytes of a not-yet-converted image (TIFF, usually) worth reading and converting: ten
+    /// times the stored limit. An image is judged by the PNG that would be stored, and an uncompressed
+    /// TIFF is far bigger than its PNG; this only keeps absurd sizes from being converted at all.
+    public var maxRawImageBytes: Int {
+        maxItemBytes > Int.max / 10 ? Int.max : maxItemBytes * 10
+    }
+
     /// Whether a copy of `byteSize` bytes may be recorded.
     public func allowsItem(ofSize byteSize: Int) -> Bool {
         byteSize <= maxItemBytes
@@ -39,9 +46,11 @@ public struct ClipboardLimits: Equatable, Sendable {
 
 extension ClipboardHistory {
     /// Applies the limits and returns the evicted entries (so their blobs can be deleted), oldest
-    /// first. Pinned entries are never evicted, but they do count toward the totals. In order:
+    /// first. Pinned entries are exempt from every limit: they are never evicted and they do not count
+    /// toward the count or size budgets (otherwise enough pins would leave no room, and every new copy
+    /// would be stored and evicted at once). The budgets apply to the unpinned entries. In order:
     /// entries older than `maxAge`; then the oldest unpinned entries while there are more than
-    /// `maxItems`; then the oldest unpinned entries while the stored bytes exceed `maxTotalBytes`.
+    /// `maxItems`; then the oldest unpinned entries while their stored bytes exceed `maxTotalBytes`.
     @discardableResult
     public mutating func enforce(limits: ClipboardLimits, now: Date) -> [ClipboardItem] {
         var evicted: [ClipboardItem] = []
@@ -51,8 +60,9 @@ extension ClipboardHistory {
         for item in tooOld { _ = remove(id: item.id) }
         evicted.append(contentsOf: tooOld)
 
-        var total = totalBytes
-        var count = self.count
+        // Budgets are measured over the unpinned entries only.
+        var total = items.reduce(0) { $0 + ($1.pinned ? 0 : $1.byteSize) }
+        var count = items.reduce(0) { $0 + ($1.pinned ? 0 : 1) }
         for item in items.reversed() where !item.pinned {
             guard count > limits.maxItems || total > limits.maxTotalBytes else { break }
             _ = remove(id: item.id)

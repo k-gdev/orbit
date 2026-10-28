@@ -16,8 +16,8 @@ final class PasteboardWatcher {
     private var timer: Timer?
     private var lastChangeCount = 0
     private var ignoredChangeCount: Int?
-    private var policy: () -> PasteboardPolicy = { PasteboardPolicy(ignoredBundleIDs: [], maxItemBytes: 0) }
-    private var onCapture: (ClipboardCapture) -> Void = { _ in }
+    private var policy: () -> PasteboardPolicy = { PasteboardPolicy(ignoredBundleIDs: [], limits: ClipboardLimits(maxItems: 1, maxAgeDays: 1, maxMegabytes: 1, maxItemMegabytes: 1)) }
+    private var onCapture: (RawPasteboardCopy) -> Void = { _ in }
 
     init(pasteboard: NSPasteboard = .general) {
         self.pasteboard = pasteboard
@@ -26,7 +26,7 @@ final class PasteboardWatcher {
     var isRunning: Bool { timer != nil }
 
     /// Starts polling. Idempotent.
-    func start(policy: @escaping () -> PasteboardPolicy, onCapture: @escaping (ClipboardCapture) -> Void) {
+    func start(policy: @escaping () -> PasteboardPolicy, onCapture: @escaping (RawPasteboardCopy) -> Void) {
         guard timer == nil else { return }
         self.policy = policy
         self.onCapture = onCapture
@@ -61,7 +61,7 @@ final class PasteboardWatcher {
             return
         }
         switch PasteboardReader.read(pasteboard, policy: policy(), frontmost: AppLookup.frontmost(), now: Date()) {
-        case .capture(let capture): onCapture(capture)
+        case .copy(let copy): onCapture(copy)
         case .skipped(let reason): Log.info("clipboard: skipped a copy (\(reason))")
         case .nothing: break
         }
