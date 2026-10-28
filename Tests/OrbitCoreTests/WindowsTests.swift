@@ -254,6 +254,11 @@ import Testing
         #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: false) == .titlesOnly)
         #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: true) == .ready)
         #expect(DockPreviewReadiness.allCases.filter(\.watchesDock) == [.titlesOnly, .ready])
+        // With the Windows feature itself off nothing runs, whatever the rest says.
+        #expect(DockPreviewReadiness(featureOn: false, enabled: true, accessibility: true, screenRecording: true) == .featureOff)
+        #expect(DockPreviewReadiness(featureOn: false, enabled: false, accessibility: false, screenRecording: false) == .featureOff)
+        #expect(DockPreviewReadiness(featureOn: true, enabled: true, accessibility: true, screenRecording: true) == .ready)
+        #expect(!DockPreviewReadiness.featureOff.watchesDock)
     }
 
     // MARK: Thumbnail cache

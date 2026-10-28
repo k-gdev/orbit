@@ -6,9 +6,12 @@ import SwiftUI
 struct WindowsSettingsView: View {
     @ObservedObject var settings: WindowsSettings
     @ObservedObject var permissions: PermissionCenter
+    /// Whether the Windows feature itself is on (the readiness row must not say "Ready" while it is off).
+    @ObservedObject var suite: SuiteSettings
 
     private var readiness: DockPreviewReadiness {
-        DockPreviewReadiness(enabled: settings.dockPreviewEnabled,
+        DockPreviewReadiness(featureOn: suite.isEnabled(.windows),
+                             enabled: settings.dockPreviewEnabled,
                              accessibility: permissions.status(.accessibility) == .granted,
                              screenRecording: permissions.status(.screenRecording) == .granted)
     }
@@ -49,6 +52,9 @@ struct WindowsSettingsView: View {
 
     @ViewBuilder private var statusRow: some View {
         switch readiness {
+        case .featureOff:
+            Label("Not running: turn on Windows above to use the Dock preview.", systemImage: "moon.zzz")
+                .font(.callout).foregroundStyle(.secondary)
         case .off:
             Label("Off. Orbit doesn't watch the Dock.", systemImage: "moon.zzz")
                 .font(.callout).foregroundStyle(.secondary)
