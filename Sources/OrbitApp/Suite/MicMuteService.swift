@@ -29,6 +29,13 @@ final class MicMuteService: NSObject, ObservableObject {
     @Published private(set) var isAvailable = false {
         didSet { if isAvailable != oldValue { updateShortcut() } }
     }
+    /// The input's name when it is a mic that ignores mute from the Mac (`MicsIgnoringMute`): only its own button
+    /// mutes it, so it is never available. The shortcut stays registered for it, to say so when pressed.
+    @Published private(set) var unmutableInputName: String? {
+        didSet { if unmutableInputName != oldValue { updateShortcut() } }
+    }
+    /// A mute was asked for on a mic that ignores mute from the Mac (its name): the app shows a toast.
+    var cannotMute: (String) -> Void = { _ in }
 
     let settings: MicMuteSettings
     private let hotKeys: HotKeyCenter?
@@ -68,7 +75,8 @@ final class MicMuteService: NSObject, ObservableObject {
 
     /// A state-only stand-in for snapshots and previews: no hardware, no hot key, no status item.
     /// `setMuted` just flips `isMuted`. `mutedElsewhere` shows a mute made outside Orbit.
-    static func fixture(muted: Bool = false, available: Bool = true, mutedElsewhere: Bool = false) -> MicMuteService {
+    static func fixture(muted: Bool = false, available: Bool = true, mutedElsewhere: Bool = false,
+                        unmutableInputName: String? = nil) -> MicMuteService {
         // An absolute-path suite in the temp folder: nothing is written unless a snapshot changes the
         // shortcut, and even then never to ~/Library/Preferences.
         let path = FileManager.default.temporaryDirectory.appending(path: "orbit-fixture-\(UUID().uuidString).plist").path
@@ -78,7 +86,8 @@ final class MicMuteService: NSObject, ObservableObject {
         let service = MicMuteService(fixtureSettings: MicMuteSettings(defaults: defaults))
         service.isMuted = muted || mutedElsewhere
         service.isMutedByOrbit = muted && !mutedElsewhere
-        service.isAvailable = available
+        service.isAvailable = available && unmutableInputName == nil
+        service.unmutableInputName = unmutableInputName
         return service
     }
 
@@ -98,6 +107,10 @@ final class MicMuteService: NSObject, ObservableObject {
         // An unmute always gets through while Orbit's own mute is on record, even when that mute sits on a mic that
         // is no longer the input (and so doesn't show in `isMuted`): it must stay clearable.
         guard muted != isMuted || (!muted && model.state.isMuted) else { return }
+        if muted, let unmutableInputName {
+            cannotMute(unmutableInputName)
+            return
+        }
         if isFixture {
             isMuted = muted
             isMutedByOrbit = muted
@@ -158,10 +171,11 @@ final class MicMuteService: NSObject, ObservableObject {
         active = false
     }
 
-    /// Registers the shortcut while active with an input device present; unregisters it otherwise.
+    /// Registers the shortcut while active with an input device present (one that ignores mute included, so the
+    /// shortcut can say it can't be muted); unregisters it otherwise.
     private func updateShortcut() {
         guard !isFixture else { return }
-        guard active, isAvailable else {
+        guard active, isAvailable || unmutableInputName != nil else {
             hotKeys?.unregister(id: Self.hotKeyID)
             return
         }
@@ -230,6 +244,7 @@ final class MicMuteService: NSObject, ObservableObject {
         let outcome = model.refresh(input: MicHAL.reading(for: device), now: .now, read: MicHAL.reading(uid:),
                                     perform: MicHAL.perform)
         note(outcome.events)
+        unmutableInputName = MicHAL.ignoresMute(device) ? MicHAL.name(of: device) ?? "This microphone" : nil
         isAvailable = outcome.presentation != .unavailable
         isMutedByOrbit = outcome.presentation == .mutedByOrbit
         isMuted = outcome.presentation == .mutedByOrbit || outcome.presentation == .mutedElsewhere
@@ -395,8 +410,17 @@ private enum MicHAL {
         return device
     }
 
-    static func uid(of device: AudioObjectID) -> String? {
-        var addr = address(kAudioDevicePropertyDeviceUID)
+    static func uid(of device: AudioObjectID) -> String? { string(device, kAudioDevicePropertyDeviceUID) }
+
+    static func name(of device: AudioObjectID) -> String? { string(device, kAudioObjectPropertyName) }
+
+    /// Whether the device is a mic that ignores its mute and input volume (`MicsIgnoringMute`).
+    static func ignoresMute(_ device: AudioObjectID) -> Bool {
+        device != kAudioObjectUnknown && MicsIgnoringMute.contains(modelUID: string(device, kAudioDevicePropertyModelUID))
+    }
+
+    private static func string(_ device: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var addr = address(selector)
         var value: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = withUnsafeMutablePointer(to: &value) { AudioObjectGetPropertyData(device, &addr, 0, nil, &size, $0) }
@@ -496,6 +520,7 @@ private enum MicHAL {
         let volume = volumes.first.flatMap { read(device, $0, as: Float32.self, zero: 0) }
         return MicDeviceReading(deviceUID: uid, canSetMute: !muteElements.isEmpty, isMuted: (muted ?? 0) != 0,
                                 canSetVolume: !volumes.isEmpty, volume: volume)
+            .usable(modelUID: string(device, kAudioDevicePropertyModelUID))
     }
 
     static func setMute(_ device: AudioObjectID, _ muted: Bool) -> Bool {

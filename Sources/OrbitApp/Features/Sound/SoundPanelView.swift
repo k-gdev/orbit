@@ -85,6 +85,13 @@ struct SoundPanelView: View {
                 .help(micMute.isMuted ? "Unmute the microphone (\(micSettings.muteShortcut.display))"
                                       : "Mute the microphone (\(micSettings.muteShortcut.display))")
             }
+            if let name = micMute.unmutableInputName {
+                Label("\(name) ignores mute from the Mac, so Orbit can’t mute it. Use the mute button on the mic.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -92,6 +99,7 @@ struct SoundPanelView: View {
         let shortcut = micSettings.muteShortcut.display
         if micMute.isMuted && !micMute.isMutedByOrbit { return "Muted outside Orbit" }
         if micMute.isMuted { return "Muted · \(shortcut) to unmute" }
+        if micMute.unmutableInputName != nil { return "Mute it on the mic" }
         if !micMute.isAvailable { return model.inputs.isEmpty ? "No microphone" : "This microphone can't be muted" }
         return "On · \(shortcut) to mute"
     }

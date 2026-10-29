@@ -195,7 +195,9 @@ final class ControlsModel: ObservableObject {
             default: return .action("\(volumes.count) drives")
             }
         case .micMute:
-            guard micMute.isAvailable else { return .unavailable("No microphone") }
+            guard micMute.isAvailable else {
+                return .unavailable(micMute.unmutableInputName == nil ? "No microphone" : "Use the mic’s button")
+            }
             return micMute.isMuted ? .on("Muted") : .off("Mic on")
         }
     }

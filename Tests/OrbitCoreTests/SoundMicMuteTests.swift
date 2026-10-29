@@ -428,3 +428,51 @@ extension SoundTests.MicMuteStateTests {
         #expect(flip.state.pending.isEmpty)
     }
 }
+
+/// A mic that takes Core Audio's mute and input volume, reads them back, and keeps sending sound anyway (the Arctis
+/// Nova 5, found on hardware): Orbit must treat it as a mic it can't mute, never show it muted, and never leave
+/// Orbit's mute behind on the mic it came from.
+extension SoundTests.MicMuteStateTests {
+    private static let arctisModel = "SteelSeries Arctis Nova 5:1038:2232"
+    private static let arctis = MicDeviceReading(deviceUID: "Arctis", canSetMute: true, isMuted: false, canSetVolume: true, volume: 1)
+
+    @Test func arctisNova5IsKnownToIgnoreMute() {
+        #expect(MicsIgnoringMute.contains(modelUID: Self.arctisModel))
+        #expect(MicsIgnoringMute.contains(modelUID: "STEELSERIES ARCTIS NOVA 5:1038:2232"))
+        #expect(!MicsIgnoringMute.contains(modelUID: "Digital Mic"))
+        #expect(!MicsIgnoringMute.contains(modelUID: "Some Headset:1038:2253"))   // untested sibling
+        #expect(!MicsIgnoringMute.contains(modelUID: "1038:2232"))                // no name part: not a USB model UID
+        #expect(!MicsIgnoringMute.contains(modelUID: nil))
+    }
+
+    @Test func aMicIgnoringMuteOffersNoControls() {
+        let usable = Self.arctis.usable(modelUID: Self.arctisModel)
+        #expect(!usable.canSetMute && !usable.canSetVolume)
+        #expect(usable.deviceUID == "Arctis" && usable.volume == 1 && !usable.isMuted)   // still reads as it is
+        #expect(Self.builtIn.usable(modelUID: "Digital Mic") == Self.builtIn)
+    }
+
+    @Test func muteOnAMicIgnoringMuteWritesNothingAndIsNotShownMuted() {
+        let rig = MicRig(Self.arctis.usable(modelUID: Self.arctisModel), input: "Arctis")
+        #expect(rig.presentation == .unavailable)
+        rig.toggle()
+        rig.advance(by: .seconds(3))
+        #expect(rig.written.isEmpty)
+        #expect(rig.presentation == .unavailable)
+        #expect(rig.events.contains(.cannotMute))
+        #expect(!rig.model.state.hasRecord)
+    }
+
+    @Test func switchingToAMicIgnoringMutePutsTheOldMicBack() {
+        let rig = MicRig(Self.builtIn, Self.arctis.usable(modelUID: Self.arctisModel), input: "BuiltIn")
+        rig.toggle()
+        rig.advance(by: .milliseconds(100))
+        #expect(rig.presentation == .mutedByOrbit)
+        rig.switchInput(to: "Arctis")
+        rig.advance(by: .seconds(3))
+        #expect(rig.presentation == .unavailable)                     // not "Muted": the headset is live
+        #expect(rig.devices["BuiltIn"]?.isMuted == false)
+        #expect(!rig.written.contains { $0.deviceUID == "Arctis" })
+        #expect(!rig.model.state.hasRecord)
+    }
+}

@@ -211,10 +211,15 @@ final class SoundFeature: SuiteFeature, SoundPanelActions {
         return "Already used by \(feature?.title ?? owner)"
     }
 
+    /// `ORBIT_SOUND_SNAPSHOT=arctis` in the environment of `Orbit --snapshot-panel sound` draws the headset as the
+    /// mic that ignores mute from the Mac (its warning, a "Fixed" level) instead of muted. Only the snapshot CLI reads it.
     static func snapshotViews() -> FeatureSnapshotViews {
         let settings = SoundSettings(defaults: SoundFixtures.throwawayDefaults())
-        let micMute = MicMuteService.fixture(muted: true)
+        let ignoresMute = ProcessInfo.processInfo.environment["ORBIT_SOUND_SNAPSHOT"] == "arctis"
+        let micMute = ignoresMute ? MicMuteService.fixture(unmutableInputName: "SteelSeries Arctis Nova 5")
+                                  : MicMuteService.fixture(muted: true)
         let model = SoundPanelModel.fixture(settings: settings, micMute: micMute)
+        if ignoresMute { model.inputVolume = nil }
         let identities = SoundFixtures.apps.map(\.identity)
         let environment = SoundSettingsEnvironment(
             inputDevices: { model.inputs },

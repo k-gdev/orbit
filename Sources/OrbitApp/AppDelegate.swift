@@ -80,9 +80,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func makeSuite(settings: SettingsStore, coordinator: JobCoordinator) -> FeatureRegistry {
         let hotKeys = HotKeyCenter()
+        let micMute = MicMuteService(hotKeys: hotKeys, settings: MicMuteSettings())
+        micMute.cannotMute = { [toasts = coordinator.toasts] name in
+            _ = toasts.show(ToastContent(message: "Can’t mute \(name) from the Mac",
+                                         detail: "It ignores mute from the Mac. Use the mute button on the mic.", isError: true))
+        }
         let context = SuiteContext(settings: settings, suite: SuiteSettings(), defaults: .standard, hotKeys: hotKeys,
-                                   permissions: PermissionCenter(),
-                                   micMute: MicMuteService(hotKeys: hotKeys, settings: MicMuteSettings()),
+                                   permissions: PermissionCenter(), micMute: micMute,
                                    toasts: coordinator.toasts, supportDirectory: SuiteContext.defaultSupportDirectory)
         return FeatureRegistry.standard(context: context)
     }

@@ -26,7 +26,7 @@ final class AudioHardware: ObservableObject {
     /// The default output's master volume (0…1), nil when it has none (DisplayPort audio, for example).
     @Published private(set) var outputVolume: Float?
     @Published private(set) var outputMuted = false
-    /// The default input's level (0…1), nil when it has none.
+    /// The default input's level (0…1), nil when it has none, or ignores it (`MicsIgnoringMute`).
     @Published private(set) var inputVolume: Float?
 
     private var systemListeners: [SoundHALListener] = []
@@ -99,7 +99,8 @@ final class AudioHardware: ObservableObject {
         let input = SoundHAL.defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         let outVolume = Self.volume(output, scope: kAudioObjectPropertyScopeOutput)
         let outMuted = (SoundHAL.read(output, SoundHAL.address(kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput), zero: UInt32(0)) ?? 0) != 0
-        let inVolume = Self.volume(input, scope: kAudioObjectPropertyScopeInput)
+        let ignoresVolume = MicsIgnoringMute.contains(modelUID: SoundHAL.string(input, SoundHAL.address(kAudioDevicePropertyModelUID)))
+        let inVolume = ignoresVolume ? nil : Self.volume(input, scope: kAudioObjectPropertyScopeInput)
         if outVolume != outputVolume { outputVolume = outVolume }
         if outMuted != outputMuted { outputMuted = outMuted }
         if inVolume != inputVolume { inputVolume = inVolume }
