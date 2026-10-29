@@ -29,10 +29,16 @@ Kevo and I went through the checks on his Mac. The build installed now is 317e02
 
 A review of the first six of today's commits found 2 Important and 9 Minor issues. Both Important ones (sync overwriting per-display wallpapers at launch, exported images never deleted) and M1, M2, M3, M6 were fixed before the install, as was the Clipboard tab hover, which SwiftUI's `onHover` doesn't deliver to Orbit. M4, M5, M7, M8 and M9 are open (below).
 
-### Not fixed: mic mute on the Arctis Nova 5
-- ⌃⌥M shows muted, but Discord still hears Kevo. The headset's USB dongle accepts Core Audio's mute and input-volume writes and reads them back, but its audio ignores both: the input meter kept moving with mute on and with input volume at its minimum. No Core Audio approach can mute this headset.
+### Can't be fixed, now warned about: mic mute on the Arctis Nova 5
+- ⌃⌥M showed muted, but Discord still heard Kevo. The headset's USB dongle accepts Core Audio's mute and input-volume writes and reads them back, but its audio ignores both: the input meter kept moving with mute on and with input volume at its minimum. No Core Audio approach can mute this headset.
 - HID research (nothing was sent to the headset) found no published mute command for the Nova 5 in any open-source project, or in the vendor spec they transcribe. The only candidate is the headset's mic volume (0–15), and nobody has measured whether 0 is silence. Details: [ARCTIS-HID.md](ARCTIS-HID.md).
-- The options are in QUESTIONS #28. Kevo's call.
+- Kevo chose a warning (QUESTIONS #28). Orbit now treats the headset as a mic it can't mute:
+  - The Sound tab says so under the mic, and its level shows "Fixed".
+  - The mute button is off.
+  - ⌃⌥M shows a toast saying to use the headset's button.
+  - The Controls tile says "Use the mic’s button".
+  - It is never shown as muted, and switching to it while muted puts the old mic back.
+- Checked with tests (970 passing) and Sound tab snapshots. Not yet seen on the real headset.
 
 ### Explained, no change
 - Safari came back at 72% after a relaunch because "Remember per-app states" had saved it at 72%, routed to the Arctis.

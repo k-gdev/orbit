@@ -126,9 +126,10 @@ Each item has the question, the default the build uses now, and where to change 
 
 ## New from the hardware session (28 Oct)
 
-### 28. How should Orbit handle the Arctis Nova 5 mic?
-- Default now: ⌃⌥M shows muted, but the headset keeps sending audio. The dongle accepts Core Audio mute and input-volume writes and reads them back, but its audio ignores both. Research found no published HID mute command for the Nova 5. The only candidate is the headset's mic volume (0–15); nobody has measured whether 0 is silence. Research: `docs/suite/ARCTIS-HID.md`.
-- Options: (a) with you watching, listen for the mute button over HID (nothing sent), then try mic volume 0 once and restore it; (b) a virtual microphone Orbit can silence (an audio driver, a large job); (c) a warning in the Sound tab that this mic can't be muted from the Mac, so you use the headset button.
+### 28. How should Orbit handle the Arctis Nova 5 mic? (answered 28 Oct: warn)
+- Decided: Orbit treats the headset as a mic it can't mute. The Sound tab says so under the mic, and its level shows "Fixed". The mute button is off, ⌃⌥M shows a toast saying to use the headset's button, and the Controls tile says "Use the mic’s button". Orbit never shows it as muted, and switching to it while muted puts the old mic back. The list of such mics is `Sources/OrbitCore/Suite/MicsIgnoringMute.swift` (only the tested base station, USB 1038:2232).
+- What was found: ⌃⌥M showed muted, but the headset kept sending audio. The dongle accepts Core Audio mute and input-volume writes and reads them back, but its audio ignores both. Research found no published HID mute command for the Nova 5. The only candidate is the headset's mic volume (0–15); nobody has measured whether 0 is silence. Research: `docs/suite/ARCTIS-HID.md`.
+- Not chosen, still possible later: (a) with you watching, listen for the mute button over HID (nothing sent), then try mic volume 0 once and restore it; (b) a virtual microphone Orbit can silence (an audio driver, a large job).
 
 ### 29. "Same on all displays" is on by default
 - Default now: on. Choosing a wallpaper on a connected display applies it to every connected display. Turning it on copies the main display's wallpaper to the others. At launch it only fills displays that have no wallpaper, so it never overwrites your per-display choices.
