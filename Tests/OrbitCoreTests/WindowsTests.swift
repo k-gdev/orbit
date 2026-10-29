@@ -1,0 +1,463 @@
+import CoreGraphics
+import Foundation
+import Testing
+@testable import OrbitCore
+
+/// Windows (spec §5.4): matching Accessibility windows to ScreenCaptureKit windows, the Dock preview
+/// strip's geometry and hover policy, the running-app order, the thumbnail cache and the settings.
+@Suite struct WindowsTests {
+    private func pairs(_ ax: [WindowDescriptor], _ capture: [WindowDescriptor]) -> [[Int]] {
+        WindowMatcher.match(axWindows: ax, captureWindows: capture).map { [$0.ax, $0.capture] }
+    }
+
+    // MARK: Window matching
+
+    /// A known window number wins over title and frame: titles change and windows move between the two reads.
+    @Test func matchesByNumber() {
+        let ax = [WindowDescriptor(number: 41, title: "Inbox", frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+                  WindowDescriptor(number: 42, title: "Draft", frame: CGRect(x: 100, y: 100, width: 500, height: 400))]
+        let capture = [WindowDescriptor(number: 42, title: "Draft — Edited", frame: CGRect(x: 300, y: 300, width: 500, height: 400)),
+                       // Same title and frame as Inbox but another number: a different window, never a match.
+                       WindowDescriptor(number: 99, title: "Inbox", frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+                       WindowDescriptor(number: 41, title: "Inbox", frame: CGRect(x: 0, y: 0, width: 800, height: 600))]
+        #expect(pairs(ax, capture) == [[0, 2], [1, 0]])
+        // A number Accessibility knows that capture doesn't list stays unmatched.
+        #expect(pairs([WindowDescriptor(number: 5, title: "Inbox", frame: .zero)],
+                      [WindowDescriptor(number: 6, title: "Inbox", frame: .zero)]).isEmpty)
+    }
+
+    /// Without a window number: same title (nil counts as empty) and every edge within 2 pt; each capture
+    /// window is used once, the closest one first.
+    @Test func matchesByTitleAndFrame() {
+        let ax = [WindowDescriptor(number: nil, title: "Notes", frame: CGRect(x: 10, y: 20, width: 600, height: 400)),
+                  WindowDescriptor(number: nil, title: "Notes", frame: CGRect(x: 700, y: 20, width: 600, height: 400)),
+                  WindowDescriptor(number: nil, title: "", frame: CGRect(x: 0, y: 0, width: 300, height: 200))]
+        let capture = [WindowDescriptor(number: 7, title: "Notes", frame: CGRect(x: 701.5, y: 18.5, width: 600, height: 401)),
+                       WindowDescriptor(number: 8, title: "Notes", frame: CGRect(x: 11, y: 21, width: 599, height: 400)),
+                       WindowDescriptor(number: 9, title: nil, frame: CGRect(x: 0, y: 0, width: 300, height: 200))]
+        #expect(pairs(ax, capture) == [[0, 1], [1, 0], [2, 2]])
+        // Two candidates in tolerance: the nearer frame wins, the other is left for the next window.
+        let twins = [WindowDescriptor(number: 1, title: "Notes", frame: CGRect(x: 12, y: 20, width: 600, height: 400)),
+                     WindowDescriptor(number: 2, title: "Notes", frame: CGRect(x: 10.5, y: 20, width: 600, height: 400))]
+        #expect(pairs([ax[0]], twins) == [[0, 1]])
+    }
+
+    @Test func noMatchBeyondTolerance() {
+        let ax = [WindowDescriptor(number: nil, title: "Notes", frame: CGRect(x: 10, y: 20, width: 600, height: 400))]
+        let capture = [WindowDescriptor(number: 1, title: "Notes", frame: CGRect(x: 12.5, y: 20, width: 600, height: 400)),
+                       WindowDescriptor(number: 2, title: "Notes 2", frame: CGRect(x: 10, y: 20, width: 600, height: 400)),
+                       WindowDescriptor(number: 3, title: "Notes", frame: CGRect(x: 10, y: 20, width: 600, height: 397))]
+        #expect(pairs(ax, capture).isEmpty)
+        // Exactly 2 pt off on every edge is still the same window.
+        let edge = [WindowDescriptor(number: 4, title: "Notes", frame: CGRect(x: 12, y: 18, width: 600, height: 400))]
+        #expect(pairs(ax, edge) == [[0, 0]])
+    }
+
+    // MARK: Dock preview layout
+
+    private typealias Layout = DockPreviewLayout
+    /// Kevo's main display (6016 × 3384 HiDPI at 2x = 3008 × 1692 pt); the Dock auto-hides, so the visible
+    /// frame reaches the bottom edge.
+    private let main = CGRect(x: 0, y: 0, width: 3008, height: 1692)
+
+    private func isInside(_ inner: CGRect, _ outer: CGRect) -> Bool {
+        inner.minX >= outer.minX - 0.001 && inner.maxX <= outer.maxX + 0.001
+            && inner.minY >= outer.minY - 0.001 && inner.maxY <= outer.maxY + 0.001
+    }
+
+    @Test func layoutCentresOverIcon() throws {
+        let icon = CGRect(x: 1400, y: 4, width: 64, height: 64)
+        let layout = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        // Full-height thumbnails side by side, 10 pt apart, under a title line, centred over the icon.
+        #expect(layout.thumbnailFrames == [CGRect(x: 10, y: 36, width: 224, height: 140),
+                                           CGRect(x: 244, y: 36, width: 140, height: 140)])
+        #expect(layout.stripFrame.size == CGSize(width: 394, height: 186))
+        #expect(layout.stripFrame.midX == icon.midX)
+        #expect(layout.stripFrame.minY == icon.maxY + Layout.iconGap)
+        #expect(layout.headerFrame == CGRect(x: 10, y: 10, width: 374, height: Layout.headerHeight))
+        // One narrow window: the strip keeps room for its title and centres the thumbnail.
+        let narrow = try #require(Layout.make(aspectRatios: [0.5], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        #expect(narrow.stripFrame.width == Layout.minContentWidth + 2 * Layout.padding)
+        #expect(narrow.thumbnailFrames == [CGRect(x: 55, y: 36, width: 70, height: 140)])
+        #expect(narrow.stripFrame.midX == icon.midX)
+        // Silly aspect ratios fall back or are limited; no windows, no strip.
+        let odd = try #require(Layout.make(aspectRatios: [0, .nan, 40], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        #expect(odd.thumbnailFrames.map(\.width) == [224, 224, 420])
+        #expect(Layout.make(aspectRatios: [], iconFrame: icon, edge: .bottom, visibleFrame: main) == nil)
+    }
+
+    @Test func layoutClampsToScreen() throws {
+        // An icon at the far right: the strip stops 8 pt from the screen edge.
+        let right = try #require(Layout.make(aspectRatios: [1.6, 1.6, 1.6], iconFrame: CGRect(x: 2940, y: 4, width: 64, height: 64),
+                                             edge: .bottom, visibleFrame: main))
+        #expect(right.stripFrame.maxX == main.maxX - Layout.screenMargin)
+        // The display left of the main one has a negative origin.
+        let leftScreen = CGRect(x: -2560, y: 252, width: 2560, height: 1440)
+        let left = try #require(Layout.make(aspectRatios: [1.6, 1.6, 1.6], iconFrame: CGRect(x: -2556, y: 256, width: 64, height: 64),
+                                            edge: .bottom, visibleFrame: leftScreen))
+        #expect(left.stripFrame.minX == leftScreen.minX + Layout.screenMargin)
+        #expect(left.stripFrame.minY == 256 + 64 + Layout.iconGap)
+        // A visible frame that stops above the Dock (Dock not hidden): the strip never dips into the Dock.
+        let shown = CGRect(x: 0, y: 80, width: 3008, height: 1612)
+        let low = try #require(Layout.make(aspectRatios: [1.6], iconFrame: CGRect(x: 1400, y: 4, width: 64, height: 64),
+                                           edge: .bottom, visibleFrame: shown))
+        #expect(low.stripFrame.minY == shown.minY + Layout.screenMargin)
+        // Thirty windows on a small screen wrap into rows instead of shrinking to slivers, and stay on screen.
+        let small = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let many = try #require(Layout.make(aspectRatios: Array(repeating: 1.6, count: 30), iconFrame: CGRect(x: 700, y: 4, width: 48, height: 48),
+                                            edge: .bottom, visibleFrame: small))
+        #expect(isInside(many.stripFrame, small.insetBy(dx: Layout.screenMargin, dy: Layout.screenMargin)))
+        #expect(Set(many.thumbnailFrames.map(\.minY)).count > 1)
+        #expect(many.thumbnailFrames.allSatisfy { $0.height > 80 && $0.height <= Layout.maxThumbnailHeight })
+        let bounds = CGRect(origin: .zero, size: many.stripFrame.size)
+        #expect(many.thumbnailFrames.allSatisfy { isInside($0, bounds.insetBy(dx: Layout.padding, dy: Layout.padding)) })
+        // Rows read left to right, top to bottom, and never overlap.
+        for (a, b) in zip(many.thumbnailFrames, many.thumbnailFrames.dropFirst()) {
+            #expect(b.minY > a.minY || (b.minY == a.minY && b.minX >= a.maxX + Layout.spacing - 0.001))
+        }
+    }
+
+    @Test func layoutLeftAndRightDock() throws {
+        let leftIcon = CGRect(x: 4, y: 800, width: 64, height: 64)
+        let left = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: leftIcon, edge: .left, visibleFrame: main))
+        #expect(left.stripFrame.minX == leftIcon.maxX + Layout.iconGap)
+        #expect(left.stripFrame.midY == leftIcon.midY)
+        #expect(left.thumbnailFrames.allSatisfy { $0.height == Layout.maxThumbnailHeight })
+
+        let rightIcon = CGRect(x: 2940, y: 800, width: 64, height: 64)
+        let right = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: rightIcon, edge: .right, visibleFrame: main))
+        #expect(right.stripFrame.maxX == rightIcon.minX - Layout.iconGap)
+        #expect(right.stripFrame.midY == rightIcon.midY)
+
+        // An icon near the top of a side Dock: the strip slides down to stay on screen.
+        let high = try #require(Layout.make(aspectRatios: [1.6], iconFrame: CGRect(x: 4, y: 1620, width: 64, height: 64),
+                                            edge: .left, visibleFrame: main))
+        #expect(high.stripFrame.maxY == main.maxY - Layout.screenMargin)
+        #expect(high.stripFrame.minX == 4 + 64 + Layout.iconGap)
+    }
+
+    /// The pointer can travel from the icon across the gap into the strip without the preview closing.
+    @Test func hoverRegionBridgesIconAndStrip() throws {
+        let icon = CGRect(x: 1400, y: 4, width: 64, height: 64)
+        let layout = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        #expect(layout.hoverRegionContains(CGPoint(x: icon.midX, y: icon.midY)))
+        #expect(layout.hoverRegionContains(CGPoint(x: icon.midX, y: icon.maxY + Layout.iconGap / 2)))
+        #expect(layout.hoverRegionContains(CGPoint(x: layout.stripFrame.minX + 2, y: layout.stripFrame.maxY - 2)))
+        #expect(!layout.hoverRegionContains(CGPoint(x: icon.minX - 120, y: icon.midY)))
+        #expect(!layout.hoverRegionContains(CGPoint(x: icon.midX, y: layout.stripFrame.maxY + 40)))
+
+        let side = try #require(Layout.make(aspectRatios: [1.6], iconFrame: CGRect(x: 2940, y: 800, width: 64, height: 64),
+                                            edge: .right, visibleFrame: main))
+        #expect(side.hoverRegionContains(CGPoint(x: 2940 - Layout.iconGap / 2, y: 832)))
+        #expect(!side.hoverRegionContains(CGPoint(x: 2940 - Layout.iconGap / 2, y: 832 + 200)))
+    }
+
+    /// The pointer (AppKit coordinates, y up) picks the thumbnail under it; the title line and gaps pick none.
+    @Test func thumbnailUnderPointer() throws {
+        let icon = CGRect(x: 1400, y: 4, width: 64, height: 64)
+        let layout = try #require(Layout.make(aspectRatios: [1.6, 1.0], iconFrame: icon, edge: .bottom, visibleFrame: main))
+        let strip = layout.stripFrame
+        func screen(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: strip.minX + x, y: strip.maxY - y) }
+        #expect(layout.thumbnailIndex(at: screen(20, 40)) == 0)
+        #expect(layout.thumbnailIndex(at: screen(250, 170)) == 1)
+        #expect(layout.thumbnailIndex(at: screen(239, 100)) == nil)   // the 10 pt gap
+        #expect(layout.thumbnailIndex(at: screen(20, 15)) == nil)     // the title line
+        #expect(layout.thumbnailIndex(at: CGPoint(x: icon.midX, y: icon.midY)) == nil)
+    }
+
+    /// Thumbnails are captured at the size they are shown, never bigger than the window itself.
+    @Test func captureSizeIsSmall() {
+        #expect(Layout.capturePixelSize(for: CGSize(width: 1600, height: 1000), scale: 2) == PixelSize(width: 448, height: 280))
+        #expect(Layout.capturePixelSize(for: CGSize(width: 100, height: 60), scale: 2) == PixelSize(width: 200, height: 120))
+        #expect(Layout.capturePixelSize(for: CGSize(width: 4000, height: 100), scale: 1) == PixelSize(width: 300, height: 100))
+        #expect(Layout.capturePixelSize(for: .zero, scale: 2) == PixelSize(width: 2, height: 1))
+    }
+
+    @Test func dockEdgeFromPreference() {
+        #expect(DockEdge(orientation: nil) == .bottom)
+        #expect(DockEdge(orientation: "bottom") == .bottom)
+        #expect(DockEdge(orientation: "left") == .left)
+        #expect(DockEdge(orientation: "right") == .right)
+        #expect(DockEdge(orientation: "sideways") == .bottom)
+    }
+
+    /// Accessibility and ScreenCaptureKit measure from the top left of the primary display; AppKit windows
+    /// from its bottom left.
+    @Test func flipsBetweenTopLeftAndBottomLeft() {
+        let primaryHeight: CGFloat = 1692
+        #expect(ScreenSpace.flip(CGRect(x: 0, y: 0, width: 100, height: 50), primaryHeight: primaryHeight)
+                == CGRect(x: 0, y: 1642, width: 100, height: 50))
+        // The display above the main one: negative y in the top-left space.
+        #expect(ScreenSpace.flip(CGRect(x: 18, y: 1692, width: 2560, height: 1440), primaryHeight: primaryHeight)
+                == CGRect(x: 18, y: -1440, width: 2560, height: 1440))
+        let r = CGRect(x: -2560, y: 252, width: 2560, height: 1440)
+        #expect(ScreenSpace.flip(ScreenSpace.flip(r, primaryHeight: primaryHeight), primaryHeight: primaryHeight) == r)
+    }
+
+    // MARK: Dock hover policy
+
+    /// Resting on an icon opens its preview only after the delay; moving off first cancels it.
+    @Test func hoverWaitsForDelay() {
+        var policy = DockHoverPolicy()
+        #expect(policy.hoverChanged(to: 10, delay: 0.35) == .schedule(pid: 10, after: 0.35))
+        #expect(policy.shown == nil)
+        #expect(policy.delayElapsed(for: 10) == .show(pid: 10))
+        #expect(policy.shown == 10)
+        // Hovering the open app's icon again changes nothing.
+        #expect(policy.hoverChanged(to: 10, delay: 0.35) == DockHoverPolicy.Command.none)
+
+        var quick = DockHoverPolicy()
+        _ = quick.hoverChanged(to: 10, delay: 0.35)
+        #expect(quick.hoverChanged(to: nil, delay: 0.35) == .cancelSchedule)
+        #expect(quick.delayElapsed(for: 10) == DockHoverPolicy.Command.none)
+        // Sliding along the Dock restarts the wait for the new icon; the old timer firing late is ignored.
+        _ = quick.hoverChanged(to: 10, delay: 0.35)
+        #expect(quick.hoverChanged(to: 11, delay: 0.35) == .schedule(pid: 11, after: 0.35))
+        #expect(quick.delayElapsed(for: 10) == DockHoverPolicy.Command.none)
+        #expect(quick.delayElapsed(for: 11) == .show(pid: 11))
+    }
+
+    /// With a preview open, moving to another app's icon switches at once, and leaving the Dock for the strip
+    /// keeps it open.
+    @Test func switchingAppsWhileOpenIsImmediate() {
+        var policy = DockHoverPolicy()
+        _ = policy.hoverChanged(to: 10, delay: 0.35)
+        _ = policy.delayElapsed(for: 10)
+        #expect(policy.hoverChanged(to: 11, delay: 0.35) == .show(pid: 11))
+        #expect(policy.shown == 11)
+        #expect(policy.hoverChanged(to: nil, delay: 0.35) == DockHoverPolicy.Command.none)
+        #expect(policy.shown == 11)
+    }
+
+    /// The preview closes when the pointer leaves the strip, icon and gap, or when something else closes it;
+    /// either way the next hover waits for the delay again.
+    @Test func leavingClosesPreview() {
+        var policy = DockHoverPolicy()
+        #expect(policy.pointerLeft() == DockHoverPolicy.Command.none)
+        _ = policy.hoverChanged(to: 10, delay: 0.35)
+        _ = policy.delayElapsed(for: 10)
+        _ = policy.hoverChanged(to: nil, delay: 0.35)
+        #expect(policy.pointerLeft() == .hide)
+        #expect(policy.shown == nil)
+        #expect(policy.hoverChanged(to: 11, delay: 0.35) == .schedule(pid: 11, after: 0.35))
+        _ = policy.delayElapsed(for: 11)
+        policy.dismissed()
+        #expect(policy.shown == nil && policy.pending == nil)
+        #expect(policy.hoverChanged(to: 11, delay: 0) == .schedule(pid: 11, after: 0))
+    }
+
+    /// The Dock is watched only with the preview on and Accessibility granted; Screen Recording only adds
+    /// thumbnails.
+    @Test func dockPreviewReadiness() {
+        #expect(DockPreviewReadiness(enabled: false, accessibility: true, screenRecording: true) == .off)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: false, screenRecording: true) == .needsAccessibility)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: false) == .titlesOnly)
+        #expect(DockPreviewReadiness(enabled: true, accessibility: true, screenRecording: true) == .ready)
+        #expect(DockPreviewReadiness.allCases.filter(\.watchesDock) == [.titlesOnly, .ready])
+        // With the Windows feature itself off nothing runs, whatever the rest says.
+        #expect(DockPreviewReadiness(featureOn: false, enabled: true, accessibility: true, screenRecording: true) == .featureOff)
+        #expect(DockPreviewReadiness(featureOn: false, enabled: false, accessibility: false, screenRecording: false) == .featureOff)
+        #expect(DockPreviewReadiness(featureOn: true, enabled: true, accessibility: true, screenRecording: true) == .ready)
+        #expect(!DockPreviewReadiness.featureOff.watchesDock)
+    }
+
+    // MARK: Slow ScreenCaptureKit
+
+    /// The strip waits for ScreenCaptureKit's window list at most 0.4 s from the hover firing, then shows
+    /// what Accessibility sees and fills in thumbnails and other-Space windows when the list arrives.
+    @Test func captureListWaitIsBounded() {
+        #expect(DockPreviewFill.captureWait == 0.4)
+        #expect(DockPreviewFill.remainingWait(elapsed: 0) == 0.4)
+        #expect(abs(DockPreviewFill.remainingWait(elapsed: 0.15) - 0.25) < 1e-9)
+        #expect(DockPreviewFill.remainingWait(elapsed: 0.4) == 0)
+        #expect(DockPreviewFill.remainingWait(elapsed: 2) == 0)            // a slow Accessibility read used it all
+        #expect(DockPreviewFill.remainingWait(elapsed: -1) == 0.4)         // never more than the wait itself
+    }
+
+    /// Without the capture list, Accessibility's windows show as title cards right away; when Accessibility has
+    /// none (every window on another Space, say) the strip waits for the list, which may have some.
+    @Test func earlyStripNeedsAccessibilityWindows() {
+        #expect(DockPreviewFill.showsWithoutCapture(accessibilityEntries: 3))
+        #expect(DockPreviewFill.showsWithoutCapture(accessibilityEntries: 1))
+        #expect(!DockPreviewFill.showsWithoutCapture(accessibilityEntries: 0))
+    }
+
+    /// One capture list is reused for 2 s (a single-entry `TimedCache`), so moving along the Dock doesn't
+    /// fetch it for every icon, while a window opened since shows up soon after.
+    @Test func captureListIsReusedBriefly() {
+        #expect(DockPreviewFill.shareableContentLifetime == 2)
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: DockPreviewFill.shareableContentLifetime, capacity: 1)
+        cache.insert("windows", for: 0, now: t0)
+        #expect(cache.value(for: 0, now: t0.addingTimeInterval(1.9)) == "windows")
+        #expect(cache.value(for: 0, now: t0.addingTimeInterval(2.1)) == nil)
+    }
+
+    // MARK: Thumbnail cache
+
+    /// Thumbnails are reused for a few seconds, then captured again; the cache never grows without bound.
+    @Test func thumbnailCacheExpires() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: 3, capacity: 2)
+        cache.insert("inbox", for: 41, now: t0)
+        #expect(cache.value(for: 41, now: t0.addingTimeInterval(2.9)) == "inbox")
+        #expect(cache.value(for: 41, now: t0.addingTimeInterval(3.1)) == nil)
+        #expect(cache.count == 0)
+        // Over capacity, the oldest entry goes first.
+        cache.insert("a", for: 1, now: t0)
+        cache.insert("b", for: 2, now: t0.addingTimeInterval(1))
+        cache.insert("c", for: 3, now: t0.addingTimeInterval(2))
+        #expect(cache.count == 2)
+        #expect(cache.value(for: 1, now: t0.addingTimeInterval(2)) == nil)
+        #expect(cache.value(for: 3, now: t0.addingTimeInterval(2)) == "c")
+        // Replacing a key restarts its lifetime.
+        cache.insert("b2", for: 2, now: t0.addingTimeInterval(2.5))
+        #expect(cache.value(for: 2, now: t0.addingTimeInterval(5)) == "b2")
+        cache.removeAll()
+        #expect(cache.count == 0)
+    }
+
+    /// Expired thumbnails can be dropped without a lookup or insert (the strip does it when it hides), so a
+    /// one-off hover doesn't keep its images in memory.
+    @Test func thumbnailCachePurgesExpired() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1000)
+        var cache = TimedCache<Int, String>(lifetime: 3, capacity: 10)
+        cache.insert("old", for: 1, now: t0)
+        cache.insert("new", for: 2, now: t0.addingTimeInterval(2))
+        cache.removeExpired(now: t0.addingTimeInterval(4))
+        #expect(cache.count == 1)
+        #expect(cache.value(for: 2, now: t0.addingTimeInterval(4)) == "new")
+        cache.removeExpired(now: t0.addingTimeInterval(10))
+        #expect(cache.count == 0)
+    }
+
+    // MARK: Window listing
+
+    /// Real windows only (no palettes, no invisible helpers), front to back, minimised ones last or left out.
+    @Test func windowListFilters() {
+        let size = CGSize(width: 800, height: 600)
+        let windows = [WindowSummary(title: "Minimised", size: size, isMinimised: true, subrole: "AXStandardWindow"),
+                       WindowSummary(title: "Front", size: size, isMinimised: false, subrole: "AXStandardWindow"),
+                       WindowSummary(title: "Colors", size: CGSize(width: 220, height: 300), isMinimised: false, subrole: "AXFloatingWindow"),
+                       WindowSummary(title: "Save?", size: CGSize(width: 400, height: 200), isMinimised: false, subrole: "AXDialog"),
+                       WindowSummary(title: nil, size: CGSize(width: 1, height: 1), isMinimised: false, subrole: nil),
+                       WindowSummary(title: "Back", size: size, isMinimised: false, subrole: nil)]
+        #expect(WindowListing.visibleIndices(windows, showMinimised: true) == [1, 3, 5, 0])
+        #expect(WindowListing.visibleIndices(windows, showMinimised: false) == [1, 3, 5])
+        #expect(WindowListing.visibleIndices([], showMinimised: true).isEmpty)
+    }
+
+    @Test func untitledWindowsTakeTheAppName() {
+        #expect(WindowListing.displayTitle("Inbox – Mail", appName: "Mail") == "Inbox – Mail")
+        #expect(WindowListing.displayTitle("  ", appName: "Mail") == "Mail")
+        #expect(WindowListing.displayTitle(nil, appName: "Mail") == "Mail")
+    }
+
+    // MARK: Dock preview window list (Accessibility + ScreenCaptureKit)
+
+    private let big = CGSize(width: 900, height: 600)
+
+    private func axInfo(_ number: Int?, _ title: String, minimised: Bool = false, subrole: String? = "AXStandardWindow",
+                        x: CGFloat = 0) -> AccessibilityWindowInfo {
+        AccessibilityWindowInfo(number: number, title: title, frame: CGRect(origin: CGPoint(x: x, y: 0), size: big),
+                                isMinimised: minimised, subrole: subrole)
+    }
+
+    private func capture(_ number: Int, _ title: String?, onScreen: Bool, size: CGSize? = nil, layer: Int = 0,
+                         x: CGFloat = 0) -> CaptureWindowInfo {
+        CaptureWindowInfo(number: number, title: title, frame: CGRect(origin: CGPoint(x: x, y: 0), size: size ?? big),
+                          isOnScreen: onScreen, layer: layer)
+    }
+
+    private func shape(_ entries: [PreviewWindowEntry]) -> [String] {
+        entries.map { "\($0.accessibilityIndex.map(String.init) ?? "-")/\($0.captureIndex.map(String.init) ?? "-")" }
+    }
+
+    /// Accessibility only sees the current Space (and minimised windows): windows ScreenCaptureKit finds
+    /// elsewhere (another Space, full screen) are added after them. Helpers, tiny windows, other layers and
+    /// windows already matched to Accessibility are not.
+    @Test func previewListAddsWindowsOnOtherSpaces() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Parked", minimised: true), axInfo(8, "Colors", subrole: "AXFloatingWindow")]
+        let sck = [capture(1, "Front", onScreen: true),
+                   capture(2, "Parked", onScreen: false),
+                   capture(3, "Spec — Full Screen", onScreen: false),
+                   capture(4, nil, onScreen: false),                                        // untitled helper
+                   capture(5, "Tooltip", onScreen: false, size: CGSize(width: 20, height: 20)), // too small
+                   capture(6, "Panel", onScreen: true),                                     // on screen, not a listed window
+                   capture(7, "Overlay", onScreen: false, layer: 3),                        // not a normal window
+                   capture(8, "Colors", onScreen: false)]                                   // the palette Accessibility skipped
+        let entries = PreviewWindowList.merge(accessibility: ax, capture: sck, showMinimised: true)
+        #expect(shape(entries) == ["0/0", "1/1", "-/2"])
+        #expect(entries.map(\.isElsewhere) == [false, false, true])
+        #expect(entries[2].title == "Spec — Full Screen")
+        #expect(entries.map(\.isMinimised) == [false, true, false])
+    }
+
+    /// With minimised windows hidden, a minimised window doesn't sneak back in as an "elsewhere" window.
+    @Test func previewListHidesMinimisedEverywhere() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Parked", minimised: true)]
+        let sck = [capture(1, "Front", onScreen: true), capture(2, "Parked", onScreen: false),
+                   capture(3, "Elsewhere", onScreen: false)]
+        #expect(shape(PreviewWindowList.merge(accessibility: ax, capture: sck, showMinimised: false)) == ["0/0", "-/2"])
+        // Without window numbers from Accessibility, title and frame still pair them up.
+        let unnumbered = [axInfo(nil, "Front"), axInfo(nil, "Parked", minimised: true, x: 300)]
+        let framed = [capture(1, "Front", onScreen: true), capture(2, "Parked", onScreen: false, x: 301)]
+        #expect(shape(PreviewWindowList.merge(accessibility: unnumbered, capture: framed, showMinimised: false)) == ["0/0"])
+    }
+
+    /// Without Screen Recording there is no capture list: Accessibility's windows only, no thumbnails.
+    @Test func previewListWithoutScreenRecording() {
+        let ax = [axInfo(1, "Front"), axInfo(2, "Back")]
+        #expect(shape(PreviewWindowList.merge(accessibility: ax, capture: [], showMinimised: true)) == ["0/-", "1/-"])
+        #expect(PreviewWindowList.merge(accessibility: [], capture: [], showMinimised: true).isEmpty)
+    }
+
+    // MARK: Running apps
+
+    private func app(_ pid: Int32, _ name: String, regular: Bool = true, active: Bool = false) -> RunningAppInfo {
+        RunningAppInfo(pid: pid, bundleID: "com.example.\(pid)", name: name, isRegular: regular, isActive: active, isHidden: false)
+    }
+
+    /// Regular (Dock) apps only, the frontmost first, then by name as Finder sorts them.
+    @Test func appListOrder() {
+        let apps = [app(1, "safari"), app(2, "Xcode", active: true), app(3, "Finder"),
+                    app(4, "Orbit", regular: false), app(5, "Spotlight", regular: false),
+                    app(6, "App 10"), app(7, "App 9"), app(20, "Notes"), app(10, "Notes")]
+        #expect(RunningAppList.sort(apps).map(\.pid) == [2, 7, 6, 3, 10, 20, 1])
+        #expect(RunningAppList.sort([]).isEmpty)
+        // Nothing frontmost (Orbit's own panel has focus): plain name order.
+        #expect(RunningAppList.sort([app(1, "b"), app(2, "a")]).map(\.name) == ["a", "b"])
+    }
+
+    // MARK: Settings
+
+    @Test func settingsRoundTrip() {
+        let (d, cleanup) = Fixtures.defaults()
+        defer { cleanup() }
+        let fresh = WindowsSettings(defaults: d)
+        #expect(fresh.dockPreviewEnabled == true)
+        #expect(fresh.previewDelay == 0.35)
+        #expect(fresh.showMinimised == true)
+
+        fresh.dockPreviewEnabled = false
+        fresh.previewDelay = 0.8
+        fresh.showMinimised = false
+        let read = WindowsSettings(defaults: d)
+        #expect(read.dockPreviewEnabled == false)
+        #expect(read.previewDelay == 0.8)
+        #expect(read.showMinimised == false)
+        // Keys carry the feature id.
+        #expect(d.object(forKey: "windows.dockPreviewEnabled") as? Bool == false)
+        #expect(d.object(forKey: "windows.previewDelay") as? Double == 0.8)
+        #expect(d.object(forKey: "windows.showMinimised") as? Bool == false)
+
+        // The delay stays within its range, whether set here or found in the defaults.
+        read.previewDelay = 9
+        #expect(read.previewDelay == WindowsSettings.previewDelayRange.upperBound)
+        #expect(WindowsSettings(defaults: d).previewDelay == WindowsSettings.previewDelayRange.upperBound)
+        d.set(-1.0, forKey: "windows.previewDelay")
+        #expect(WindowsSettings(defaults: d).previewDelay == 0)
+        d.set("soon", forKey: "windows.previewDelay")
+        #expect(WindowsSettings(defaults: d).previewDelay == 0.35)
+    }
+}

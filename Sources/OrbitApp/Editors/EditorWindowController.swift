@@ -98,7 +98,7 @@ final class EditorPanel: NSPanel {
         level = .floating
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
+        hasShadow = GlassRendering.windowHasShadow
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         animationBehavior = .utilityWindow

@@ -17,7 +17,7 @@ final class HUDPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         backgroundColor = .clear
         isOpaque = false
-        hasShadow = true
+        hasShadow = GlassRendering.windowHasShadow
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         animationBehavior = .none

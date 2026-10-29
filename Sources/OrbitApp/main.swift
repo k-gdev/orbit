@@ -7,9 +7,14 @@ MainActor.assumeIsolated {
     PerformCommand.runIfRequested(CommandLine.arguments)
     SettingsSnapshot.runIfRequested(CommandLine.arguments)
     WelcomeSnapshot.runIfRequested(CommandLine.arguments)
+    SuiteSnapshot.runIfRequested(CommandLine.arguments)
+    ShelfSnapshot.runIfRequested(CommandLine.arguments)
+    ShelfCheck.runIfRequested(CommandLine.arguments)
+    ClipboardDebug.runIfRequested(CommandLine.arguments)
     GlyphSnapshot.runIfRequested(CommandLine.arguments)
     EditorSnapshot.runIfRequested(CommandLine.arguments)
     EditorCheck.runIfRequested(CommandLine.arguments)
+    WindowsSnapshot.runIfRequested(CommandLine.arguments)
 }
 
 let app = NSApplication.shared
