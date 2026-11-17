@@ -5,6 +5,14 @@ import SwiftUI
 /// materials and glass don't render.
 enum GlassRendering {
     case live, flat
+
+    /// Whether a borderless window whose surface is `GlassBackground` should keep the window server's shadow.
+    /// Liquid Glass (macOS 26+) draws its own edge and depth; a window shadow under it shows through the glass
+    /// as a dark rim around the panel, so only the material fallback keeps one.
+    static var windowHasShadow: Bool {
+        if #available(macOS 26, *) { return false }
+        return true
+    }
 }
 
 private struct GlassRenderingKey: EnvironmentKey {

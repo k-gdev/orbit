@@ -1,7 +1,7 @@
 import Foundation
 
 /// Copy Path, Copy To and Move To. All three combine every dropped item into one unit (R17-R19).
-/// Float, AirDrop and Terminal are app-side and never reach a processor.
+/// Float, AirDrop, Terminal and Shelf are app-side and never reach a processor.
 public struct ActionProcessor: Processor {
     public init() {}
 

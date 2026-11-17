@@ -2,29 +2,43 @@ import AppKit
 import OrbitCore
 import SwiftUI
 
-/// The settings window's content: one scrolling page of sections (spec §6.9).
-struct SettingsView: View {
-    @ObservedObject var settings: SettingsStore
-    let capabilities: Capabilities
-    let rescan: () -> Capabilities
-    let showWelcome: () -> Void
+/// A titled card of settings: the building block of every Settings page, including the feature pages.
+///
+///     SettingsSection("Shortcut") {
+///         HStack { Text("Mute microphone"); Spacer(); KeyComboRecorder(combo: $settings.shortcut) }
+///     }
+struct SettingsSection<Content: View>: View {
+    let title: String
+    var footnote: String?
+    @ViewBuilder var content: () -> Content
+
+    init(_ title: String, footnote: String? = nil, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.footnote = footnote
+        self.content = content
+    }
 
     var body: some View {
-        ScrollView {
-            SettingsContent(settings: settings, capabilities: capabilities, rescan: rescan, showWelcome: showWelcome)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.headline)
+            VStack(alignment: .leading, spacing: 10) { content() }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
+            if let footnote {
+                Text(footnote).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
 
+/// The original single settings page (wheel sections, then General), kept for `--snapshot-settings`.
+/// The Settings window shows the same sections split across its General and Wheel pages.
 struct SettingsContent: View {
     @ObservedObject var settings: SettingsStore
     @State var capabilities: Capabilities
     let rescan: () -> Capabilities
     let showWelcome: () -> Void
-    @State private var loginOn = LoginItem.isEnabled
-    @State private var fullDiskAccess = FullDiskAccess.isGranted()
-    @State private var loginError: String?
-    @State private var triggerMessage: [WheelKind: String] = [:]
     /// True when drawn by `SettingsSnapshot`, whose `ImageRenderer` can't draw AppKit-backed controls.
     private let renderingForSnapshot: Bool
 
@@ -39,28 +53,40 @@ struct SettingsContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            section("Triggers") { triggers }
-            section("Output") { output }
-            section("Copy & Move") { folders }
-            section("Terminal") { terminal }
-            section("Helpers") { helpers }
-            section("General") { general }
+            WheelSettingsSections(settings: settings, capabilities: $capabilities, rescan: rescan)
+            SettingsSection("General") {
+                GeneralSettingsRows(settings: settings, showWelcome: showWelcome, renderingForSnapshot: renderingForSnapshot)
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
-            VStack(alignment: .leading, spacing: 10) { content() }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
-        }
+/// The wheel's sections: Triggers, Output, Copy & Move, Terminal, Helpers.
+struct WheelSettingsSections: View {
+    @ObservedObject var settings: SettingsStore
+    @Binding var capabilities: Capabilities
+    let rescan: () -> Capabilities
+
+    var body: some View {
+        SettingsSection("Triggers") { TriggerSettingsRows(settings: settings) }
+        SettingsSection("Output") { OutputSettingsRows(settings: settings) }
+        SettingsSection("Copy & Move") { FolderSettingsRows(settings: settings) }
+        SettingsSection("Terminal") { TerminalSettingsRows(settings: settings) }
+        SettingsSection("Helpers") { HelperSettingsRows(settings: settings, capabilities: $capabilities, rescan: rescan) }
     }
+}
 
-    // MARK: Triggers
+// MARK: Triggers
+
+struct TriggerSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
+    @State private var triggerMessage: [WheelKind: String] = [:]
+
+    var body: some View {
+        triggers
+    }
 
     @ViewBuilder private var triggers: some View {
         Text("Hold these modifiers while dragging files to open a wheel.")
@@ -107,9 +133,14 @@ struct SettingsContent: View {
         settings.bindings = b
     }
 
-    // MARK: Output
+}
 
-    @ViewBuilder private var output: some View {
+// MARK: Output
+
+struct OutputSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
+
+    var body: some View {
         Toggle("Reveal results in Finder", isOn: $settings.revealInFinder)
         qualitySlider("JPEG quality", $settings.jpegQuality)
         qualitySlider("HEIC quality", $settings.heicQuality)
@@ -134,9 +165,14 @@ struct SettingsContent: View {
         }
     }
 
-    // MARK: Copy & Move
+}
 
-    @ViewBuilder private var folders: some View {
+// MARK: Copy & Move
+
+struct FolderSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
+
+    var body: some View {
         if settings.favouriteFolders.isEmpty {
             Text("No folders yet.").foregroundStyle(.secondary)
         }
@@ -166,7 +202,12 @@ struct SettingsContent: View {
         }
     }
 
-    // MARK: Terminal
+}
+
+// MARK: Terminal
+
+struct TerminalSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
 
     private static let terminalIDs = ["com.apple.Terminal", "com.googlecode.iterm2",
                                       "com.mitchellh.ghostty", "dev.warp.Warp-Stable"]
@@ -183,15 +224,21 @@ struct SettingsContent: View {
         return choices
     }
 
-    @ViewBuilder private var terminal: some View {
+    var body: some View {
         Picker("Open Terminal actions in", selection: $settings.terminalBundleID) {
             ForEach(terminalChoices, id: \.id) { Text($0.name).tag($0.id) }
         }
     }
+}
 
-    // MARK: Helpers
+// MARK: Helpers
 
-    @ViewBuilder private var helpers: some View {
+struct HelperSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
+    @Binding var capabilities: Capabilities
+    let rescan: () -> Capabilities
+
+    var body: some View {
         ForEach(Helper.allCases, id: \.self) { helper in
             HStack(alignment: .firstTextBaseline) {
                 Image(systemName: capabilities.has(helper) ? "checkmark.circle.fill" : "xmark.circle")
@@ -216,9 +263,21 @@ struct SettingsContent: View {
         }
     }
 
-    // MARK: General
+}
 
-    @ViewBuilder private var general: some View {
+// MARK: General
+
+/// Launch at login, haptics, accent colour, and Full Disk Access with "Show welcome again".
+struct GeneralSettingsRows: View {
+    @ObservedObject var settings: SettingsStore
+    let showWelcome: () -> Void
+    /// True when drawn by `ImageRenderer` (`--snapshot-settings`), which can't draw `ColorPicker`.
+    var renderingForSnapshot = false
+    @State private var loginOn = LoginItem.isEnabled
+    @State private var fullDiskAccess = FullDiskAccess.isGranted()
+    @State private var loginError: String?
+
+    var body: some View {
         Toggle("Launch at login", isOn: Binding(get: { loginOn }, set: setLogin))
         if LoginItem.needsApproval {
             Text("Approve Orbit in System Settings → General → Login Items.")

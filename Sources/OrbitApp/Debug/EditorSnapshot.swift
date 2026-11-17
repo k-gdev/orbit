@@ -62,7 +62,7 @@ enum EditorSnapshot {
         case "metadata":
             let model = MetadataModel(allowsArtwork: false, loader: { ImageMetadata.read($0) })
             model.set(fields: ImageMetadata.read(url))
-            model.drafts[.artist] = "Kevo"
+            model.drafts[.artist] = "Demo Artist"
             editor = AnyView(MetadataEditor(title: "Metadata", model: model, onClose: {}, onApply: { _ in }, onRemoveLocation: {}))
             width = MetadataEditor.width
         case "compress":

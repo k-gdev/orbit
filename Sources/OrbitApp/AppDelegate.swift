@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var welcomeWindow: WelcomeWindowController?
     private var windowController: WheelWindowController?
     private var servicesProvider: ServicesProvider?
+    private var registry: FeatureRegistry?
 
     /// `diagnoseTrigger` logs every trigger input sample and drop callback to orbit.log.
     init(diagnoseTrigger: Bool) {
@@ -21,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.info("Orbit launched")
+        // Without a main menu, ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z do nothing in Orbit's text fields.
+        EditMenu.install()
         let settings = SettingsStore()
         Haptics.settings = settings
         OrbitTheme.shared.bind(to: settings)
@@ -43,7 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.dragWatcher = dragWatcher
         let welcomeWindow = WelcomeWindowController(settings: settings)
         self.welcomeWindow = welcomeWindow
-        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator,
+        let registry = makeSuite(settings: settings, coordinator: coordinator)
+        self.registry = registry
+        // The Shelf action: SHELF appears in the Actions ring only while the Shelf feature is on.
+        wheel.shelfActionEnabled = { [weak registry] in registry?.isEnabled(.shelf) ?? false }
+        coordinator.openShelf = { [weak registry] urls, point in
+            (registry?.feature(.shelf) as? ShelfFeature)?.open(adding: urls, near: point)
+        }
+        let settingsWindow = SettingsWindowController(settings: settings, coordinator: coordinator, registry: registry,
                                                       showWelcome: { welcomeWindow.show() })
         self.settingsWindow = settingsWindow
         let windowController = WheelWindowController(wheel: wheel)
@@ -52,10 +62,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         servicesProvider = provider
         NSApp.servicesProvider = provider
         NSUpdateDynamicServices()
-        statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
-                                                    windowController: windowController,
-                                                    showSettings: { settingsWindow.show() })
+        let statusItemController = StatusItemController(settings: settings, coordinator: coordinator, wheel: wheel,
+                                                        windowController: windowController, registry: registry,
+                                                        showSettings: { page in settingsWindow.show(page: page) })
+        self.statusItemController = statusItemController
+        registry.context.openSettings = { [weak statusItemController] page in
+            statusItemController?.closePanel()
+            settingsWindow.show(page: page)
+        }
+        registry.context.closePanel = { [weak statusItemController] in statusItemController?.closePanel() }
+        registry.startEnabled()
         // Offer Full Disk Access once, on the first launch where it isn't already granted.
         if welcomeWindow.shouldShowOnLaunch { welcomeWindow.show() }
+    }
+
+    /// Builds the suite's shared context and feature registry (nothing starts yet).
+    @MainActor
+    private func makeSuite(settings: SettingsStore, coordinator: JobCoordinator) -> FeatureRegistry {
+        let hotKeys = HotKeyCenter()
+        let micMute = MicMuteService(hotKeys: hotKeys, settings: MicMuteSettings())
+        micMute.cannotMute = { [toasts = coordinator.toasts] name in
+            _ = toasts.show(ToastContent(message: "Can’t mute \(name) from the Mac",
+                                         detail: "It ignores mute from the Mac. Use the mute button on the mic.", isError: true))
+        }
+        let context = SuiteContext(settings: settings, suite: SuiteSettings(), defaults: .standard, hotKeys: hotKeys,
+                                   permissions: PermissionCenter(), micMute: micMute,
+                                   toasts: coordinator.toasts, supportDirectory: SuiteContext.defaultSupportDirectory)
+        return FeatureRegistry.standard(context: context)
+    }
+
+    /// Every feature releases what it holds (audio taps, power assertions, hot keys, windows) and the mic
+    /// is restored before Orbit exits.
+    func applicationWillTerminate(_ notification: Notification) {
+        registry?.stopAll()
+        Log.info("Orbit quit")
     }
 }

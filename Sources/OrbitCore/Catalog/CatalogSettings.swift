@@ -5,15 +5,20 @@ public struct CatalogSettings: Sendable {
     public var imageFitPresets: [Int64]
     public var videoFitPresets: [Int64]
     public var pdfFitPresets: [Int64]
+    /// Whether the Actions ring offers SHELF (after FLOAT). `SettingsStore.catalogSettings` cannot see
+    /// whether the Shelf feature is on, so the app sets this to true while it is.
+    public var showShelfAction: Bool
 
     public init(favouriteFolders: [URL] = [],
                 imageFitPresets: [Int64] = [500_000, 1_000_000, 5_000_000],
                 videoFitPresets: [Int64] = [10_000_000, 25_000_000, 50_000_000, 100_000_000],
-                pdfFitPresets: [Int64] = [1_000_000, 5_000_000, 10_000_000]) {
+                pdfFitPresets: [Int64] = [1_000_000, 5_000_000, 10_000_000],
+                showShelfAction: Bool = false) {
         self.favouriteFolders = favouriteFolders
         self.imageFitPresets = imageFitPresets
         self.videoFitPresets = videoFitPresets
         self.pdfFitPresets = pdfFitPresets
+        self.showShelfAction = showShelfAction
     }
 }
 

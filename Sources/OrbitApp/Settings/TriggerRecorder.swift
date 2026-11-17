@@ -56,18 +56,6 @@ extension WheelKind {
     }
 }
 
-extension ModifierSet {
-    /// e.g. "⌃⌥" in the conventional macOS order.
-    var symbols: String {
-        var s = ""
-        if contains(.control) { s += "⌃" }
-        if contains(.option) { s += "⌥" }
-        if contains(.shift) { s += "⇧" }
-        if contains(.command) { s += "⌘" }
-        return s
-    }
-}
-
 /// A button that records a modifier combo. While recording, a *local* `.flagsChanged`
 /// monitor (no global monitor, so no permission) watches the keyboard; Esc cancels.
 struct TriggerRecorder: View {

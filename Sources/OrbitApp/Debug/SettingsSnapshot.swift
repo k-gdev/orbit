@@ -37,10 +37,10 @@ enum SettingsSnapshot {
         if fm.fileExists(atPath: output.path), !replace {
             throw Failure(description: "\(output.path) exists (pass --replace to overwrite it)")
         }
-        // Throwaway defaults suite so the snapshot never reads or writes the real settings.
-        let suite = "orbit.snapshot.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(description: "no defaults suite") }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        // Throwaway defaults (a plist in its own temp folder, never ~/Library/Preferences, removed afterwards)
+        // so the snapshot never reads or writes the real settings.
+        let (defaults, cleanup) = SnapshotFixtures.scopedDefaults()
+        defer { cleanup() }
         let settings = SettingsStore(defaults: defaults)
         let capabilities = HelperLocator().locate(customFFmpegPath: nil)
         let view = SettingsContent(settings: settings, capabilities: capabilities, rescan: { capabilities }, renderingForSnapshot: true)

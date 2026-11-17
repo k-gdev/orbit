@@ -247,7 +247,7 @@ public enum SliceCatalog {
         let archive = [OutputFormat.zip, .tar, .tgz].map {
             child("actions.archive.\($0.rawValue)", $0.label, .action(.archive, .archive($0)))
         }
-        return [
+        var slices = [
             act(.float, "FLOAT", "pin"),
             act(.airDrop, "AIRDROP", "dot.radiowaves.left.and.right"),
             act(.copyPath, "COPY PATH", "doc.on.clipboard", children: paths),
@@ -256,6 +256,9 @@ public enum SliceCatalog {
             act(.moveTo, "MOVE TO", "folder", children: folderChildren(.moveTo)),
             act(.archive, "ARCHIVE", "doc.zipper", children: archive),
         ]
+        // The Shelf feature adds SHELF right after FLOAT (the other app-side "park these files" action).
+        if settings.showShelfAction { slices.insert(act(.shelf, "SHELF", "tray"), at: 1) }
+        return slices
     }
 
     // MARK: Builders

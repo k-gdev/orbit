@@ -2,6 +2,10 @@ import AppKit
 import Combine
 import OrbitCore
 
+/// Orbit's menu bar icon. Left-click toggles the suite panel (`MenuBarPanelController`); right-click or
+/// ⌃-click shows the classic menu (About, Open Files…, Settings…, Enabled, Recent results, ⌥ Debug,
+/// Quit), unchanged. The icon's ring is dashed while a job runs, and a small accent dot shows while any
+/// feature has a status indicator on (`SuiteContext.setStatusIndicator`).
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -9,19 +13,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let wheel: WheelController
     private let coordinator: JobCoordinator
     private let windowController: WheelWindowController
-    private let showSettings: () -> Void
+    private let showSettings: (SettingsPage?) -> Void
+    private let panel: MenuBarPanelController
+    private var menu: NSMenu?
     private var debugItem: NSMenuItem?
     private var enabledItem: NSMenuItem?
     private var recentItem: NSMenuItem?
+    private var indicatorDot: NSView?
     private var cancellables: Set<AnyCancellable> = []
 
     init(settings: SettingsStore, coordinator: JobCoordinator, wheel: WheelController,
-         windowController: WheelWindowController, showSettings: @escaping () -> Void) {
+         windowController: WheelWindowController, registry: FeatureRegistry,
+         showSettings: @escaping (SettingsPage?) -> Void) {
         self.windowController = windowController
         self.showSettings = showSettings
         self.settings = settings
         self.coordinator = coordinator
         self.wheel = wheel
+        panel = MenuBarPanelController(registry: registry, settings: settings)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         setIcon(busy: false)
@@ -29,12 +38,102 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] count in self?.setIcon(busy: count > 0) }
             .store(in: &cancellables)
-        statusItem.menu = makeMenu()
+        menu = makeMenu()
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(statusButtonClicked)
+            button.sendAction(on: [.leftMouseDown, .rightMouseDown])
+        }
+        panel.actions = panelActions()
+        panel.onVisibilityChange = { [weak self] open in self?.statusItem.button?.highlight(open) }
+        installIndicatorDot()
+        registry.context.$statusIndicators
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] ids in self?.indicatorDot?.isHidden = ids.isEmpty }
+            .store(in: &cancellables)
+        settings.$accentHex
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] hex in self?.colourIndicatorDot(hex: hex) }
+            .store(in: &cancellables)
+    }
+
+    /// Closes the suite panel if it is open (before Settings or a feature's own window appears).
+    func closePanel() {
+        panel.close()
     }
 
     /// The ringed-planet glyph; its ring is dashed while a job runs.
     private func setIcon(busy: Bool) {
         statusItem.button?.image = OrbitGlyph.image(busy: busy)
+    }
+
+    // MARK: Clicks
+
+    @objc private func statusButtonClicked() {
+        guard let button = statusItem.button else { return }
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseDown || event?.modifierFlags.contains(.control) == true {
+            showMenu()
+        } else {
+            panel.toggle(from: button)
+        }
+    }
+
+    /// Pops the classic menu from the status item (attached only for this click, so left-click stays the panel's).
+    private func showMenu() {
+        panel.close()
+        guard let menu else { return }
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    private func panelActions() -> PanelActions {
+        PanelActions(
+            openSettings: { [weak self] in self?.openSettingsPage(nil) },
+            openFeaturesPage: { [weak self] in self?.openSettingsPage(.features) },
+            quit: { [weak self] in self?.quit() },
+            openFiles: { [weak self] in self?.panel.close(); self?.openFiles() },
+            about: { [weak self] in self?.panel.close(); self?.showAbout() },
+            recents: { [weak self] in self?.coordinator.recents.entries.map { (id: $0.id, title: $0.title) } ?? [] },
+            openRecent: { [weak self] id in
+                guard let self, let entry = self.coordinator.recents.entries.first(where: { $0.id == id }) else { return }
+                self.panel.close()
+                self.coordinator.openRecent(entry)
+            })
+    }
+
+    private func openSettingsPage(_ page: SettingsPage?) {
+        panel.close()
+        showSettings(page)
+    }
+
+    // MARK: Indicator dot
+
+    /// A 6 pt accent dot at the icon's lower right, over the template glyph (which stays tinted by the system).
+    private func installIndicatorDot() {
+        guard let button = statusItem.button else { return }
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3
+        dot.layer?.borderWidth = 0.5
+        dot.layer?.borderColor = NSColor.black.withAlphaComponent(0.25).cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.isHidden = true
+        button.addSubview(dot)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 6),
+            dot.heightAnchor.constraint(equalToConstant: 6),
+            dot.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -2),
+            dot.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -3),
+        ])
+        indicatorDot = dot
+        colourIndicatorDot(hex: settings.accentHex)
+    }
+
+    private func colourIndicatorDot(hex: String) {
+        let c = HexColor.parse(hex) ?? HexColor.parse(SettingsStore.defaultAccentHex)!
+        indicatorDot?.layer?.backgroundColor = NSColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1).cgColor
     }
 
     private func makeMenu() -> NSMenu {
@@ -134,7 +233,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         wheel.showDebug(kind: .convert, items: items, at: CGPoint(x: frame.midX, y: frame.midY))
     }
 
-    @objc private func openFiles() {
+    @objc func openFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseFiles = true
@@ -151,16 +250,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func showAbout() {
+    @objc func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     @objc private func openSettings() {
-        showSettings()
+        showSettings(nil)
     }
 
-    @objc private func quit() {
+    @objc func quit() {
         NSApp.terminate(nil)
     }
 }
